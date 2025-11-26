@@ -25,7 +25,7 @@ config = {
         "include_add": True,
         "is_filtered": True,
         "bs": 2**12,
-        "num_workers": 16,
+        "num_workers": 0,
         "dtype": d_dtype,
     },
     "base_conf": {
@@ -56,19 +56,20 @@ config = {
     },
 }
 
-lego_flow_model = torch.compile(LEGOLtng(config))
+# lego_flow_model = torch.compile(LEGOLtng(config))
+lego_flow_model = LEGOLtng(config)
 
 trainer = ltng.Trainer(
     max_epochs=epochs,
+    num_nodes=1,
     accelerator="gpu",
-    devices=1,
+    devices=4,
     precision=prec,
     strategy="ddp",
     check_val_every_n_epoch=1,
 )
 
-if __name__ == "__main__":
-    trainer.fit(model=lego_flow_model)
+trainer.fit(model=lego_flow_model)
 
 torch.save(
     {
