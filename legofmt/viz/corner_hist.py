@@ -119,7 +119,7 @@ class CornerHist:
             sols.contiguous().view(-1, 6),
             sols_true.contiguous().view(-1, 6),
             incoming=(batch[0][:, 0:1] if self.cube else None),
-            data_add=(data_add_f, batch[-1]),
+            data_add=(data_add_f, batch[-1] / batch[0][:, 0, :3].norm(dim=-1)),
         )
 
     def make_fig(self, title=None, cube=False, corner_=True):
@@ -188,7 +188,7 @@ class CornerHist:
         if self.plot_edep is not False:
             labels += [r"$E_\mathrm{dep}$"]
             data_add = data_add.repeat((data.shape[0] // data_add.shape[0])).unsqueeze(-1)
-            range_ += [(0.0, 300)]
+            range_ += [(-0.2, 1.2)]
             data = np.concatenate([data, data_add.cpu().numpy()], axis=-1)
         return corner.corner(
             data,

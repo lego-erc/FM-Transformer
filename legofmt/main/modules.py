@@ -37,18 +37,20 @@ class ProjectModel(ModelWrapper, nn.Module):
         attn_mask: torch.Tensor,
         types: torch.Tensor,
     ) -> torch.Tensor:
-        proj_type = (types == types[-1, -1]).unsqueeze(-1)
-        proj_mask = (mask == 1) * proj_type
+        proj_mask = attn_mask * (types > (types.max() - 2))
         x_2d = x.flatten(0, -2)
         pm_flat = proj_mask.flatten()
         x_projx = self.manifold.projx(x_2d[pm_flat])
-        x_proc = x_2d.clone()
-        x_proc[pm_flat] = x_projx
-        x = x_proc.view_as(x).detach()
-        t = torch.atleast_3d(t).expand_as(mask)
-        t = proj_mask * t + ~proj_mask
+        x_2d[pm_flat] = x_projx
+        x = x_2d.view_as(x).detach()
+        t = torch.atleast_2d(t).expand_as(attn_mask)
+        t_mask = (mask.squeeze(-1) == 1)
+        t = t_mask * t + ~t_mask
         v = self.vf(t, x, mask, attn_mask=attn_mask, types=types)
-        return self.manifold.proju(x, v)
+        v_2d = v.flatten(0, -2)
+        v_proj = self.manifold.proju(x_projx, v_2d[pm_flat])
+        v_2d[pm_flat] = v_proj
+        return v_2d.view_as(v)
 
 
 class LEGOLtng(ltng.LightningModule, nn.Module):
@@ -99,7 +101,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         self.pen = EnergyProjections(self.proj_en)
         self.model = ProjectModel(CFMTrafo_x(**model_conf), self.manifold)
         if state_dict is not None:
-            self.model.vf.load_state_dict(state_dict)
+            self.model.vf.load_state_dict(state_dict, strict=False)
 
         self.gen_base = GenerateBase(config.get("base_conf").copy())
         self.ppa = CubeTrace()
@@ -129,11 +131,12 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
     @torch.no_grad()
     def _prep(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
         try:
-            data_coord, mask, attn_mask, data_add = batch
+            cc, mask, attn_mask, data_add = batch
         except ValueError:
-            data_coord, mask, attn_mask = batch
+            cc, mask, attn_mask = batch
             data_add = None
-        cc = data_coord.nan_to_num(1)
+        in_dim = cc.shape[-1]
+        cc = cc.nan_to_num(1)
         if self.proj_en is not False:
             cc = self.pen(cc)
         if self.proj_ray:
@@ -144,12 +147,13 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         except AttributeError:
             pass
         if data_add is not None:
-            data_add = data_add.view(base.shape[0], -1)
+            data_add = data_add.view(mask.shape[0], -1)
             da_nft = torch.tensor([data_add.shape[-1]], device=self.device)
-            da_nt = torch.floor_divide(da_nft, cc.shape[-1]) + 1
-            da_tk = torch.ones_like(cc[:, :1]).repeat(1, 1, da_nt.int())
+            da_nt = torch.floor_divide(da_nft, in_dim) + 1
+            da_tk = torch.zeros_like(cc[:, :1]).repeat(1, 1, da_nt.int())
             da_tk[:, 0, :da_nft] = data_add.view(-1, da_nft)
-            da_tk = da_tk.view(-1, da_nt, cc.shape[-1])
+            da_tk = da_tk.view(-1, da_nt, in_dim)
+            da_tk[:, 0, 0] /= cc[:, 0, :3].norm(dim=-1)
             zr = torch.ones_like(da_tk[..., :1], dtype=torch.long)
             mask = torch.cat((zr, mask), dim=1)
             attn_mask = torch.cat((zr.bool().squeeze(-1), attn_mask), dim=1)

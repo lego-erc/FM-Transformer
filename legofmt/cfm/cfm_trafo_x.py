@@ -59,11 +59,10 @@ class CFMTrafo_x(nn.Module):
         self.lin_out_ = nn.Parameter(torch.empty(self.ntokens, self.h_dim, self.in_dim))
         self.bias_out_ = nn.Parameter(torch.zeros(self.ntokens, self.in_dim))
 
-        freq_range = torch.pi / 4
         self.freqs = nn.Parameter(
-            freq_range * 1e-4 ** (torch.arange(self.h_dim) / self.h_dim),
-            requires_grad=False,
+            self.h_dim * 1e-4 ** (torch.arange(self.h_dim) / self.h_dim), requires_grad=False,
         )
+        self.mask_freqs = nn.Parameter(torch.remainder(torch.arange(128), 2), requires_grad=False)
 
         nn.init.xavier_normal_(self.lin_out_, gain=xavier_gain)
         nn.init.xavier_normal_(self.bias_out_, gain=xavier_gain)
@@ -106,9 +105,10 @@ class CFMTrafo_x(nn.Module):
                 mask.view(*mask.shape[:2], 1, 1).expand(-1, -1, 1, self.in_dim),
             ).squeeze(2)
 
-        embd_t = torch.einsum("ijl, k -> ijk", t, self.freqs)
+        t_freqs = torch.einsum("ij, k -> ijk", t, self.freqs)
+        embd_t = self.mask_freqs * t_freqs.sin() + (self.mask_freqs * t_freqs.cos()).roll(1, dims=-1)
         embd_type = torch.einsum("ijl, ijkl -> ijk", states_mask, embd)
-        embdd = embd_type + bias + torch.sin(embd_t) + torch.cos(embd_t)
+        embdd = embd_type + bias + embd_t
 
         trafo_out = self.vf(embdd, mask=attn_mask)
         out_fwd = (
@@ -116,4 +116,4 @@ class CFMTrafo_x(nn.Module):
             + self.bias_out_[: mask.shape[1]]
         )
 
-        return torch.where(mask == 1.0, out_fwd, 0.0)
+        return (mask == 1.0) * out_fwd

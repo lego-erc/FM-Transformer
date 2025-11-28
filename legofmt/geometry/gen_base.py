@@ -80,11 +80,9 @@ class GenerateBase:
 
     @torch.no_grad()
     def extend_add(self, base):
-        factor = base[:, :1, :3].norm(dim=-1, keepdim=True)
         rd = torch.rand_like(base[:, :1, :1])
         ext = (
-            factor
-            * rd
-            * torch.tensor([1, 0, 0, 0, 0, 0], device=base.device).view(1, 1, -1)
+            rd *
+            torch.tensor([1, 0, 0, 0, 0, 0], device=base.device).view(1, 1, -1)
         )
         return torch.cat((ext, base), dim=1)
