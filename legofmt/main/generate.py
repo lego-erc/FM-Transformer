@@ -8,8 +8,11 @@ from ..multiplicity.gen_mult import GenMult
 class GenerateOut(torch.nn.Module):
     def __init__(self, flow_ckpt_path, mult_ckpt_path=None, device="cpu"):
         super().__init__()
-        dict_flow = torch.load(flow_ckpt_path, map_location=device, weights_only=False)
-        self.model = torch.compile(LEGOLtng(dict_flow).to(device))
+        if isinstance(mult_ckpt_path, str):
+            dict_flow = torch.load(flow_ckpt_path, map_location=device, weights_only=False)
+        elif isinstance(mult_ckpt_path, dict):
+            dict_flow = flow_ckpt_path
+        self.model = LEGOLtng(dict_flow).to(device)
         self.en_proj = EnergyProjections()
 
         dict_mult = torch.load(mult_ckpt_path, map_location=device, weights_only=False)

@@ -19,7 +19,7 @@ class GenerateBase:
             self.func = self.iso_half
 
         elif base_dist == "iso_3dmom":
-            self.scale_dist = "gauss"
+            self.scale_dist = "trunc_norm"
             self.func = self.iso_3dmom
 
         elif base_dist == "poles":
@@ -80,7 +80,7 @@ class GenerateBase:
 
     @torch.no_grad()
     def extend_add(self, base):
-        rd = torch.rand_like(base[:, :1, :1])
+        rd = torch.sigmoid(torch.randn_like(base[:, :1, :1]))
         ext = (
             rd *
             torch.tensor([1, 0, 0, 0, 0, 0], device=base.device).view(1, 1, -1)

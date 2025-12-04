@@ -62,7 +62,7 @@ class CFMTrafo_x(nn.Module):
         self.freqs = nn.Parameter(
             self.h_dim * 1e-4 ** (torch.arange(self.h_dim) / self.h_dim), requires_grad=False,
         )
-        self.mask_freqs = nn.Parameter(torch.remainder(torch.arange(128), 2), requires_grad=False)
+        self.mask_freqs = nn.Parameter(torch.remainder(torch.arange(self.h_dim), 2), requires_grad=False)
 
         nn.init.xavier_normal_(self.lin_out_, gain=xavier_gain)
         nn.init.xavier_normal_(self.bias_out_, gain=xavier_gain)

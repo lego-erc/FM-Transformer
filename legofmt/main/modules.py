@@ -137,27 +137,31 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             data_add = None
         in_dim = cc.shape[-1]
         cc = cc.nan_to_num(1)
+        cc = self.manifold.projx(cc)
         if self.proj_en is not False:
             cc = self.pen(cc)
         if self.proj_ray:
             cc[:, 0] = self.ppa(cc[:, 0])
-        base = self.gen_base(cc, device=self.device)
+        base = self.gen_base(cc * torch.ones_like(mask[0]), device=self.device)
         try:
             base[:, 1:] = self.otc(base[:, 1:], cc[:, 1:], attn_mask[:, 1:])
         except AttributeError:
             pass
         if data_add is not None:
-            data_add = data_add.view(mask.shape[0], -1)
-            da_nft = torch.tensor([data_add.shape[-1]], device=self.device)
-            da_nt = torch.floor_divide(da_nft, in_dim) + 1
-            da_tk = torch.zeros_like(cc[:, :1]).repeat(1, 1, da_nt.int())
-            da_tk[:, 0, :da_nft] = data_add.view(-1, da_nft)
-            da_tk = da_tk.view(-1, da_nt, in_dim)
-            da_tk[:, 0, 0] /= cc[:, 0, :3].norm(dim=-1)
-            zr = torch.ones_like(da_tk[..., :1], dtype=torch.long)
+            if isinstance(data_add, torch.Tensor):
+                data_add = data_add.view(mask.shape[0], -1)
+                da_nft = torch.tensor([data_add.shape[-1]], device=self.device)
+                da_nt = torch.floor_divide(da_nft, in_dim) + 1
+                da_tk = torch.ones_like(cc[:, :1]).repeat(1, 1, da_nt.int())
+                da_tk[:, 0, :da_nft] = data_add.view(-1, da_nft)
+                da_tk = da_tk.view(-1, da_nt, in_dim)
+                da_tk[:, 0, 0] /= cc[:, 0, :3].norm(dim=-1)
+                zr = torch.ones_like(da_tk[..., :1], dtype=torch.long)
+                cc = torch.cat((da_tk, cc), dim=1)
+            else:
+                zr = torch.ones_like(mask[:, :data_add], dtype=torch.long)
             mask = torch.cat((zr, mask), dim=1)
             attn_mask = torch.cat((zr.bool().squeeze(-1), attn_mask), dim=1)
-            cc = torch.cat((da_tk, cc), dim=1)
             base = self.gen_base.extend_add(base)
 
         return base, cc, mask, attn_mask
@@ -210,10 +214,15 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         split_size = self.odeint_conf.get("split_size", 2**16 - 1)
         return_base = self.odeint_conf.get("return_base", False)
         step_size = self.odeint_conf.get("step_size", 0.04)
+        return_timesteps = self.odeint_conf.get("return_timesteps", False)
+        if return_timesteps:
+            time_grid = torch.arange(0, 1 + step_size, step=step_size, device=self.device).clamp_max(1)
+        else:
+            time_grid = torch.tensor([0.0, 1.0], device=self.device)
         method = self.odeint_conf.get("method", "midpoint")
         base, _, mask, attn_mask = self._prep(batch, _batch_idx)
         if return_base:
-            return base
+            return base.masked_fill(~attn_mask.unsqueeze(-1), torch.nan)
         init_state_tp = base.split(split_size, 0)
         mask_tp = mask.split(split_size, 0)
         attn_mask_tp = attn_mask.split(split_size, 0)
@@ -226,16 +235,17 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
                 method=method,
                 projx=False,
                 proju=False,
-                return_intermediates=False,
+                return_intermediates=return_timesteps,
+                time_grid=time_grid,
                 mask=mask_tp[idx],
                 attn_mask=attn_mask_tp[idx],
                 types=self.types_embd,
             )
             del solver
-            sols_[~(attn_mask_tp[idx].unsqueeze(-1).expand_as(sols_))] = torch.nan
+            sols_ = sols_.masked_fill(~attn_mask_tp[idx].unsqueeze(-1), torch.nan)
 
             try:
-                sols = torch.cat((sols, sols_), dim=0)
+                sols = torch.cat((sols, sols_), dim=-3)
             except NameError:
                 sols = sols_
             del sols_
