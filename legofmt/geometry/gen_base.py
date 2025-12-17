@@ -53,9 +53,7 @@ class GenerateBase:
                 * self.exp_dist.sample((*shape, 1)).to(device)
                 % (1.0 - safety)
             ) + safety
-        return self.base_range * torch.rand((*shape, 1), device=device).expand(
-            -1, -1, 3
-        )
+        return self.base_range * (torch.sigmoid(torch.randn((*shape, 1), device=device)) - 1) + 1
 
     @torch.no_grad()
     def iso_3dmom(self, shape, **kwargs):

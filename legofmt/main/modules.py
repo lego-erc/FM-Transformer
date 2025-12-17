@@ -3,6 +3,7 @@ import torch
 from flow_matching.solver import RiemannianODESolver
 from flow_matching.utils import ModelWrapper
 from flow_matching.utils.manifolds import Manifold
+from torch_lap_cuda_lib import solve_lap as slap
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
 
@@ -12,7 +13,6 @@ from legofmt.geometry.energy_proj import EnergyProjections
 from legofmt.geometry.gen_base import GenerateBase
 from legofmt.geometry.path_sample_mult import ProductPathSampler
 from legofmt.geometry.raytracing_proj import CubeTrace
-from legofmt.geometry.ot_coupling import OTCoupling
 
 
 class ProjectModel(ModelWrapper, nn.Module):
@@ -123,8 +123,6 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
     def on_fit_start(self) -> None:
         self.loss_fn = nn.MSELoss()
         self.ps = ProductPathSampler(self.manifold)
-        if self.ot_coupling is not False:
-            self.otc = OTCoupling(method=self.ot_coupling)
         self.model.train()
         self.opt.train()
 
@@ -143,10 +141,10 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         if self.proj_ray:
             cc[:, 0] = self.ppa(cc[:, 0])
         base = self.gen_base(cc * torch.ones_like(mask[0]), device=self.device)
-        try:
-            base[:, 1:] = self.otc(base[:, 1:], cc[:, 1:], attn_mask[:, 1:])
-        except AttributeError:
-            pass
+        if self.ot_coupling:
+            cost = attn_mask[:, 1:].unsqueeze(-1) * torch.cdist(cc[:, 1:], base[:, 1:])
+            assign = slap(cost, cost.device)
+            base[:, 1:] = base[:, 1:].gather(1, assign.unsqueeze(-1).expand_as(base[:, 1:]))
         if data_add is not None:
             if isinstance(data_add, torch.Tensor):
                 data_add = data_add.view(mask.shape[0], -1)
@@ -182,6 +180,8 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         make_used_ = sum(
             p.sum() * 0.0 for p in self.model.vf.vf.attn_layers.parameters()
         )
+        if loss.isnan():
+            raise ValueError("NaN loss encountered during training.")
         return loss + make_used_
 
     def validation_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:

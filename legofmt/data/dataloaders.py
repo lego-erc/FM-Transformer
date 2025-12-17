@@ -38,7 +38,7 @@ class GetLEGOData:
             data_coord = data
             data_add = None
         data_coord_filtered = torch.cat(
-            (data_coord[:, 0:1, :8], data_coord[:, 1:, 8:]), dim=1
+            (data_coord[:, 0:1, :8], data_coord[..., 8:]), dim=1
         ).to(self.dtype)
         return data_coord_filtered, data_add
 
@@ -127,24 +127,29 @@ class GetLEGOData:
         self,
         path: str,
         **kwargs,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> dict:
         dataset = torch.load(path, map_location="cpu")
         try:
-            data_coord = dataset.get("per_particle").to(self.dtype)
+            data_coord = dataset.get("per_particle")
             data_add = dataset.get("per_event").to(self.dtype)
         except AttributeError:
             data_coord = dataset
             data_add = None
-        particle_nan = ~data_coord[..., 0].isnan()
-        attn_mask = particle_nan.to(torch.int64)
-        mask = attn_mask.clone().unsqueeze(2)
-        mask[:, 0] = 0
-        return {
-            "per_particle": (
+        if isinstance(data_coord, tuple):
+            pp_tpl = data_coord
+        elif isinstance(data_coord, Tensor):
+            data_coord = data_coord.to(self.dtype)
+            particle_nan = ~data_coord[..., 0].isnan()
+            attn_mask = particle_nan.to(torch.int64)
+            mask = attn_mask.clone().unsqueeze(2)
+            mask[:, 0] = 0
+            pp_tpl = (
                 data_coord.to(self.dev),
                 mask.to(self.dev),
                 attn_mask.to(self.dev).bool(),
-            ),
+            )
+        return {
+            "per_particle": pp_tpl,
             "per_event": data_add,
         }
 
@@ -155,14 +160,14 @@ class LEGODataset(Dataset):
         n_events = kwargs.pop("n_events", None)
         self.include_add = kwargs.pop("include_add", False)
         get_lego_data = GetLEGOData(**kwargs)
-        data = get_lego_data(path, n_events=n_events)
+        self.data = get_lego_data(path, n_events=n_events)
         try:
-            self.data_coord, self.mask, self.attn_mask, self.data_add_pp = data.get(
+            self.data_coord, self.mask, self.attn_mask, self.data_add_pp = self.data.get(
                 "per_particle"
             )
         except ValueError:
-            self.data_coord, self.mask, self.attn_mask = data.get("per_particle")
-        self.data_add = data.get("per_event")
+            self.data_coord, self.mask, self.attn_mask = self.data.get("per_particle")
+        self.data_add = self.data.get("per_event")
         self.length = self.data_coord.shape[0]
         self.max_particles = self.data_coord.shape[1]
         self.device = kwargs.get("device", "cpu")

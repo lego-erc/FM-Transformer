@@ -3,10 +3,16 @@ from torch import Tensor
 
 class EnergyProjections:
     def __init__(self, norm_type: str | bool = "in_frac"):
-        self.func = self.__getattribute__(norm_type)
+        try:
+            self.func = self.__getattribute__(norm_type)
+        except TypeError:
+            self.func = self.identity
 
     def __call__(self, *args, **kwargs):
         return self.func(*args, **kwargs)
+
+    def identity(self, p_x: Tensor) -> Tensor:
+        return p_x
 
     def in_frac_log(self, p_x: Tensor) -> Tensor:
         p_x = self.in_frac(p_x)
