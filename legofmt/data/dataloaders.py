@@ -10,7 +10,6 @@ class GetLEGOData:
         min_particles=0,
         device="cpu",
         is_filtered=False,
-        only_ptype=False,
         **kwargs,
     ):
         self.dev = device
@@ -20,8 +19,6 @@ class GetLEGOData:
 
         if is_filtered:
             self.func = self.get_filtered
-        elif only_ptype:
-            self.func = self.p_types
         elif cutoff_mev is not None:
             self.func = self.dataset_cutoff
 
@@ -29,18 +26,29 @@ class GetLEGOData:
         return self.func(*args, **kwargs)
 
     def dataset_compact(self, path):
-        data = torch.load(path, map_location="cpu")
+        data = torch.load(path, map_location="cpu", weights_only=False)
 
         try:
-            data_coord = data.get("per_particle")
-            data_add = data.get("per_event").to(self.dtype)
+            data_pp = data.get("per_particle")
+            data_add = data.get("per_event")
+            if isinstance(data_add, torch.Tensor):
+                data_add = data_add.to(self.dtype)
+            elif isinstance(data_add, dict):
+                data_add = data_add["E_dep"].to(self.dtype)
         except AttributeError:
-            data_coord = data
+            data_pp = data
             data_add = None
-        data_coord_filtered = torch.cat(
-            (data_coord[:, 0:1, :8], data_coord[..., 8:]), dim=1
-        ).to(self.dtype)
-        return data_coord_filtered, data_add
+
+        if isinstance(data_pp, dict):
+            data_pp = torch.cat((data_pp["Incoming"], data_pp["Outgoing"]), dim=-2)
+
+        if data_pp.shape[-1] == 16:
+            data_pp_filtered = torch.cat(
+                (data_pp[:, 0:1, :8], data_pp[..., 8:]), dim=1
+            ).to(self.dtype)
+        elif data_pp.shape[-1] == 8:
+            data_pp_filtered = data_pp.to(self.dtype)
+        return data_pp_filtered, data_add
 
     def dataset_cutoff(
         self,
@@ -75,53 +83,24 @@ class GetLEGOData:
         idx_rel_events = ~dataset_valid[:, : self.min_particles + 1, 0].isnan().any(
             dim=-1
         )
-        dataset_rel_events = dataset_valid[idx_rel_events]
-        dataset_coord = dataset_rel_events[..., 1:-1]
-        dataset_add_pp = dataset_rel_events[..., [0, -1]]
+        data_pp = dataset_valid[idx_rel_events]
         if n_events is not None:
-            rd_idx = torch.randperm(dataset_coord.shape[0], device="cpu")[
+            rd_idx = torch.randperm(data_pp.shape[0], device="cpu")[
                 :n_events
             ]
-            dataset_coord = dataset_coord[rd_idx]
-        particle_nan = ~dataset_coord[..., 0].isnan()
+            data_pp = data_pp[rd_idx]
+        particle_nan = ~data_pp.isnan().any(dim=-1)
         attn_mask = particle_nan.to(torch.int64)
         mask = attn_mask.clone().unsqueeze(2)
         mask[:, 0] = 0
         return {
             "per_particle": (
-                dataset_coord.to(self.dev),
+                data_pp.to(self.dev),
                 mask.to(self.dev),
-                attn_mask.to(self.dev).bool(),
-                dataset_add_pp.to(self.dev),
+                attn_mask.to(self.dev).bool()
             ),
             "per_event": data_add[idx_rel_events].to(self.dev),
         }
-
-    def p_types(
-        self,
-        path: str,
-    ) -> tuple[Tensor, Tensor, Tensor, torch.distributions.Categorical]:
-        dataset = self.dataset_compact(path)
-        mask_valid = dataset[..., 0] >= self.cutoff_mev
-        max_valid = mask_valid.sum(dim=-1).max()
-        mask_valid_sorted = mask_valid.sort(dim=-1, descending=True).values[
-            :, :max_valid
-        ]
-        dataset_valid = torch.empty_like(dataset)[:, :max_valid].fill_(torch.nan)
-        dataset_valid[mask_valid_sorted] = dataset[mask_valid]
-        idx_rel_events = ~dataset_valid[:, : self.min_particles + 1, 0].isnan().any(
-            dim=-1
-        )
-        dataset_rel_events = dataset_valid[idx_rel_events, :, -1:]
-        particle_nan = ~dataset_rel_events[..., 0].isnan()
-        attn_mask = particle_nan.to(torch.int64)
-        mask = attn_mask.clone().unsqueeze(2)
-        mask[:, 0] = 0
-        return (
-            dataset_rel_events.to(self.dev),
-            mask.to(self.dev),
-            attn_mask.to(self.dev).bool(),
-        )
 
     def get_filtered(
         self,
@@ -130,21 +109,21 @@ class GetLEGOData:
     ) -> dict:
         dataset = torch.load(path, map_location="cpu")
         try:
-            data_coord = dataset.get("per_particle")
+            data_pp = dataset.get("per_particle")
             data_add = dataset.get("per_event").to(self.dtype)
         except AttributeError:
-            data_coord = dataset
+            data_pp = dataset
             data_add = None
-        if isinstance(data_coord, tuple):
-            pp_tpl = data_coord
-        elif isinstance(data_coord, Tensor):
-            data_coord = data_coord.to(self.dtype)
-            particle_nan = ~data_coord[..., 0].isnan()
+        if isinstance(data_pp, tuple):
+            pp_tpl = data_pp
+        elif isinstance(data_pp, Tensor):
+            data_pp = data_pp.to(self.dtype)
+            particle_nan = ~data_pp[..., 0].isnan()
             attn_mask = particle_nan.to(torch.int64)
             mask = attn_mask.clone().unsqueeze(2)
             mask[:, 0] = 0
             pp_tpl = (
-                data_coord.to(self.dev),
+                data_pp.to(self.dev),
                 mask.to(self.dev),
                 attn_mask.to(self.dev).bool(),
             )
@@ -157,19 +136,16 @@ class GetLEGOData:
 class LEGODataset(Dataset):
     def __init__(self, path: str, **kwargs) -> None:
         super().__init__()
+        path = kwargs.pop("data_path", path)
         n_events = kwargs.pop("n_events", None)
         self.include_add = kwargs.pop("include_add", False)
         get_lego_data = GetLEGOData(**kwargs)
         self.data = get_lego_data(path, n_events=n_events)
-        try:
-            self.data_coord, self.mask, self.attn_mask, self.data_add_pp = self.data.get(
-                "per_particle"
-            )
-        except ValueError:
-            self.data_coord, self.mask, self.attn_mask = self.data.get("per_particle")
+        self.data_pp, self.mask, self.attn_mask = self.data.get("per_particle")
+        self.data_coord = self.data_pp[..., 1:-1]
         self.data_add = self.data.get("per_event")
-        self.length = self.data_coord.shape[0]
-        self.max_particles = self.data_coord.shape[1]
+        self.length = self.data_pp.shape[0]
+        self.max_particles = self.data_pp.shape[1]
         self.device = kwargs.get("device", "cpu")
 
     def __len__(self) -> int:
@@ -178,13 +154,13 @@ class LEGODataset(Dataset):
     def __getitem__(self, idx: int | Tensor) -> tuple[Tensor]:
         if self.include_add:
             return (
-                self.data_coord[idx].to(self.device),
+                self.data_pp[idx].to(self.device),
                 self.mask[idx].to(self.device),
                 self.attn_mask[idx].to(self.device),
                 self.data_add[idx].to(self.device),
             )
         return (
-            self.data_coord[idx].to(self.device),
+            self.data_pp[idx].to(self.device),
             self.mask[idx].to(self.device),
             self.attn_mask[idx].to(self.device),
         )

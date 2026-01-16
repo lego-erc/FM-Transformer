@@ -34,8 +34,13 @@ class GenerateBase:
         return self.func(*args, **kwargs)
 
     @torch.no_grad()
-    def iso(self, shape, **kwargs):
-        return self.vmf_utils.sample_iso(shape, 2, **kwargs)
+    def iso(self, shape, incoming_rt=None, **kwargs):
+        rd_scale = self.rd_scale(shape, incoming_rt.device)
+        base = self.vmf_utils.sample_iso(shape, 2, **kwargs)
+        p, x = base.split(3, dim=-1)
+        base = torch.cat((rd_scale * p, x), dim=-1)
+        base = torch.cat((incoming_rt, base), dim=1)
+        return base
 
     @torch.no_grad()
     def rd_scale(self, shape, device):
@@ -46,6 +51,8 @@ class GenerateBase:
             )
         if self.scale_dist == "uniform":
             return self.base_range * torch.rand((*shape, 1), device=device)
+        if self.scale_dist == "sm_norm":
+            return self.base_range * (torch.sigmoid(torch.randn((*shape, 1), device=device)))
         if self.scale_dist == "exp":
             safety = 1e-1
             return (

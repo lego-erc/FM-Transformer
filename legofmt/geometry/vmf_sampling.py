@@ -1,5 +1,4 @@
 import torch
-from torch.distributions import VonMises
 
 
 class VMF:

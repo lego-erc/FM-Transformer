@@ -10,19 +10,24 @@ class CFMTrafo_x(nn.Module):
         *,
         nhead: int = 8,
         ntokens: int = 4,
-        ninferences: int = 3,
+        nvtypes: int = 3,
         in_dim: int = 6,
         ff_mult: int = 1,
         dropout: float = 0.1,
         nlayers: int = 4,
         xavier_gain: float = 1.0,
+        npdgids: int = 1,
         **kwargs: dict,
     ) -> None:
         super().__init__()
         self.h_dim = h_dim
         self.in_dim = in_dim
         self.ntokens = ntokens
-        self.ninferences = ninferences
+        self.nvtypes = nvtypes
+        self.npdgids = npdgids
+        self.vl = (self.ntokens, 2, self.h_dim, self.in_dim)
+        self.vb = (self.ntokens, self.h_dim)
+        self.vbo = (self.ntokens, self.in_dim)
 
         self.vf = ContinuousTransformerWrapper(
             dim_in=h_dim,
@@ -39,81 +44,88 @@ class CFMTrafo_x(nn.Module):
                 attn_dropout=dropout,
                 ff_dropout=dropout,
                 use_rmsnorm=True,
-                ff_glu=True,
                 ff_mult=ff_mult,
-                ff_no_bias=True,
                 attn_flash=True,
                 **kwargs,
             ),
         )
 
-        self.embd_ = nn.Parameter(
-            torch.empty(self.ninferences, self.ntokens, self.h_dim, self.in_dim)
-        )
-        self.bias_ = nn.Parameter(
-            torch.zeros(self.ninferences, self.ntokens, self.h_dim)
-        )
-        nn.init.xavier_normal_(self.embd_, gain=xavier_gain)
-        nn.init.xavier_normal_(self.bias_, gain=xavier_gain)
+        self.l_mask_ = nn.Parameter(torch.empty(self.nvtypes, 2, self.h_dim, self.in_dim))
+        self.b_mask_ = nn.Parameter(torch.empty(self.nvtypes, self.h_dim))
+        self.bo_mask_ = nn.Parameter(torch.empty(self.nvtypes, self.in_dim))
+        self.l_types_ = nn.Parameter(torch.empty(self.ntokens, 2, self.h_dim, self.in_dim))
+        self.b_types_ = nn.Parameter(torch.empty(self.ntokens, self.h_dim))
+        self.bo_types_ = nn.Parameter(torch.empty(self.ntokens, self.in_dim))
+        if npdgids > 0:
+            self.l_pdgids_ = nn.Parameter(torch.empty(self.npdgids, 2, self.h_dim, self.in_dim))
+            self.b_pdgids_ = nn.Parameter(torch.empty(self.npdgids, self.h_dim))
+            self.bo_pdgids_ = nn.Parameter(torch.empty(self.npdgids, self.in_dim))
 
-        self.lin_out_ = nn.Parameter(torch.empty(self.ntokens, self.h_dim, self.in_dim))
-        self.bias_out_ = nn.Parameter(torch.zeros(self.ntokens, self.in_dim))
+        par_list = [
+            self.l_mask_,
+            self.b_mask_,
+            self.bo_mask_,
+            self.l_types_,
+            self.b_types_,
+            self.bo_types_,
+        ]
+        if npdgids > 0:
+            par_list += [
+                self.l_pdgids_,
+                self.b_pdgids_,
+                self.bo_pdgids_,
+            ]
+        for p in par_list:
+            nn.init.xavier_normal_(p, gain=xavier_gain)
 
         self.freqs = nn.Parameter(
-            self.h_dim * 1e-4 ** (torch.arange(self.h_dim) / self.h_dim), requires_grad=False,
+            self.h_dim * 1e-4 ** (torch.arange(self.h_dim) / self.h_dim),
+            requires_grad=False,
         )
-        self.mask_freqs = nn.Parameter(torch.remainder(torch.arange(self.h_dim), 2), requires_grad=False)
-
-        nn.init.xavier_normal_(self.lin_out_, gain=xavier_gain)
-        nn.init.xavier_normal_(self.bias_out_, gain=xavier_gain)
-        self.device = self.embd_.device
+        self.mask_freqs = nn.Parameter(
+            torch.remainder(torch.arange(self.h_dim), 2), requires_grad=False
+        )
 
     def forward(
         self,
         t: Tensor,
-        states_t: Tensor,
+        states_mask: Tensor,
         mask: Tensor,
-        attn_mask: (Tensor | None) = None,
-        states_1: (Tensor | None) = None,
-        types: (Tensor | None) = None,
-        filtered: bool = True,
+        attn_mask: Tensor,
+        types: Tensor,
+        pdgids: Tensor | None,
     ) -> Tensor:
-        embd = self.embd_.gather(
-            0, mask.view(*mask.shape[:2], 1, 1).expand(-1, -1, self.h_dim, self.in_dim)
-        )
-        bias = self.bias_.gather(
-            0, mask.view(*mask.shape[:2], 1).expand(-1, -1, self.h_dim)
-        )
+        l_mask = self.l_mask_.index_select(0, mask.view(-1)).view(-1, *self.vl)
+        b_mask = self.b_mask_.index_select(0, mask.view(-1)).view(-1, *self.vb)
+        bo_mask = self.bo_mask_.index_select(0, mask.view(-1)).view(-1, *self.vbo)
 
-        if types is not None:
-            embd = embd.gather(
-                1,
-                types.view(*types.shape[:2], 1, 1).expand_as(embd),
-            )
-            bias = bias.gather(
-                1,
-                types.view(*types.shape[:2], 1).expand_as(bias),
-            )
-        if filtered:
-            states_mask = states_t
-        if not filtered:
-            states_cat = torch.stack(
-                (states_1, states_t, torch.ones_like(states_t)), dim=2
-            )
-            states_mask = states_cat.gather(
-                2,
-                mask.view(*mask.shape[:2], 1, 1).expand(-1, -1, 1, self.in_dim),
-            ).squeeze(2)
+        l_types = self.l_types_.index_select(0, types.view(-1)).view(-1, *self.vl)
+        b_types = self.b_types_.index_select(0, types.view(-1)).view(-1, *self.vb)
+        bo_types = self.bo_types_.index_select(0, types.view(-1)).view(-1, *self.vbo)
+
+        if pdgids is not None:
+            l_pdgids = self.l_pdgids_.index_select(0, pdgids.view(-1)).view(-1, *self.vl)
+            b_pdgids = self.b_pdgids_.index_select(0, pdgids.view(-1)).view(-1, *self.vb)
+            bo_pdgids = self.bo_pdgids_.index_select(0, pdgids.view(-1)).view(-1, *self.vbo)
+        else:
+            l_pdgids = 0
+            b_pdgids = 0
+            bo_pdgids = 0
 
         t_freqs = torch.einsum("ij, k -> ijk", t, self.freqs)
-        embd_t = self.mask_freqs * t_freqs.sin() + (self.mask_freqs * t_freqs.cos()).roll(1, dims=-1)
-        embd_type = torch.einsum("ijl, ijkl -> ijk", states_mask, embd)
-        embdd = embd_type + bias + embd_t
+        embd_t = self.mask_freqs * t_freqs.sin() + (
+            self.mask_freqs * t_freqs.cos()
+        ).roll(1, dims=-1)
+
+        l_embd = 1/3 * (l_mask + l_types + l_pdgids)
+        b_embd = 1/3 * (b_mask + b_types + b_pdgids)
+        bo_embd = 1/3 * (bo_mask + bo_types + bo_pdgids)
+
+        l_embdd = torch.einsum("ijl, ijkl -> ijk", states_mask, l_embd[:, :, 0])
+        embdd = l_embdd + b_embd + embd_t
 
         trafo_out = self.vf(embdd, mask=attn_mask)
-        out_fwd = (
-            torch.einsum("ijk, jkl -> ijl", trafo_out, self.lin_out_[: mask.shape[1]])
-            + self.bias_out_[: mask.shape[1]]
-        )
+        l_out = torch.einsum("ijk, ijkl -> ijl", trafo_out, l_embd[:, :, 1])
+        out = l_out + bo_embd
 
-        return (mask == 1.0) * out_fwd
+        return (mask == 1.0) * out

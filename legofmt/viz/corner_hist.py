@@ -30,7 +30,7 @@ class CornerHist:
     def __init__(
         self,
         config: dict,
-        split_model_truth=False,
+        full_gen=False,
         figsize=(8, 6),
         plot_vars="default",
         title=None,
@@ -40,18 +40,27 @@ class CornerHist:
         plot_en=False,
         plot_edep=False,
         return_base=False,
+        anim_intermediates=False,
         **kwargs,
     ):
         device = kwargs.get("device", torch.get_default_device())
         self.proj_en_out = config["config"]["model_conf"].get("proj_en_out", False)
         self.proj_en = config["config"]["model_conf"].get("proj_en", False)
-        config["config"]["odeint_conf"] = {"return_base": return_base}
+        config["config"]["odeint_conf"] = config["config"].get("odeint_conf", {})
+        config["config"]["odeint_conf"].update({
+            "return_base": return_base,
+            "return_timesteps": anim_intermediates,
+        })
+        self.anim_intermediates = anim_intermediates
         self.vmf_utils = VMF()
-        self.model = LEGOLtng(config).to(device)
-        self.split_model_truth = split_model_truth
+        if isinstance(full_gen, str):
+            from ..utils.generate import GenerateOut
+
+            self.model = GenerateOut(config, full_gen, device=device)
+        else:
+            self.model = LEGOLtng(config).to(device)
         self.disp_man = ProductManifold([Sphere(), Sphere()], (3, 3))
-        if self.proj_en is not False:
-            self.en_norm = EnergyProjections(self.proj_en)
+        self.en_norm = EnergyProjections(self.proj_en)
         if self.proj_en_out is not False:
             self.en_norm_out = EnergyProjections(self.proj_en_out)
         self.figsize = figsize
@@ -80,36 +89,44 @@ class CornerHist:
             self.title, cube=self.cube, corner_=self.corner_
         )
 
-        if isinstance(batch[0], torch.Tensor):
+        if (
+            isinstance(batch[0], torch.Tensor)
+            and batch[0].ndim <= 3
+            and not self.anim_intermediates
+        ):
             return self.prep(batch)
-        if not isinstance(batch[0], tuple):
-            err = "Data must be a Tensor or a tuple of Tensors."
-            raise TypeError(err)
+
+        if self.anim_intermediates:
+            sols = self.model(batch)
 
         def anim_wrapper_(i):
             for axis in (self.fig[1] if self.cube else self.fig).get_axes():
                 axis.clear()
+            if self.anim_intermediates:
+                return self.prep(batch, sols=sols[i])
             return self.prep(batch[i])
 
         anim = FuncAnimation(
             self.fig_sup,
             anim_wrapper_,
-            frames=torch.arange(len(batch)),
+            frames=torch.arange(len(sols if self.anim_intermediates else batch)),
             interval=100,
             repeat_delay=2000,
             blit=False,
         )
 
         if self.anim_save_path is not None:
-            anim.save(self.anim_save_path, writer="pillow", bbox_inches="tight")
+            anim.save(self.anim_save_path, writer="pillow")
 
         return anim
 
-    def prep(self, batch):
-        sols_true = self.en_norm(batch[0])[:, 1:]
-        sols = self.model(batch)
+    def prep(self, batch, sols=None):
+        if sols is None:
+            sols = self.model(batch)
         data_add_f = sols[:, 0, 0]
         sols = sols[:, 2:]
+        sols_true = self.en_norm(batch[0] if batch[0].shape[-1] == 6 else batch[0][..., -7:-1])[:, 1:]
+        sols_true = torch.where(torch.isnan(sols), torch.nan, sols_true)
         if self.proj_en_out is not False:
             sols = self.en_norm_out(sols)
             sols_true = self.en_norm_out(sols_true)
@@ -119,7 +136,7 @@ class CornerHist:
             sols.contiguous().view(-1, 6),
             sols_true.contiguous().view(-1, 6),
             incoming=(batch[0][:, 0:1] if self.cube else None),
-            data_add=(data_add_f, batch[-1] / batch[0][:, 0, :3].norm(dim=-1)),
+            data_add=(data_add_f, batch[-1] / batch[0][:, 0, 1:4].norm(dim=-1)),
         )
 
     def make_fig(self, title=None, cube=False, corner_=True):
@@ -181,13 +198,17 @@ class CornerHist:
             labels = [r"$p_x$", r"$p_y$", r"$p_z$", r"$x$", r"$y$", r"$z$"]
             range_ = [(-3.0, 3.0)] * 3 + [(-1.1, 1.1)] * 3
         if self.plot_en is not False:
-            labels += [r"$-\log \frac{\| \vec{p} \|_2}{\| \vec{p}_\mathrm{incoming} \|_2}$"]
+            labels += [
+                r"$-\log \frac{\| \vec{p} \|_2}{\| \vec{p}_\mathrm{incoming} \|_2}$"
+            ]
             data_en = data_cc[..., :3].norm(dim=-1, keepdim=True)
             range_ += [(-0.2, 1.2)]
             data = np.concatenate([data, data_en.cpu().numpy()], axis=-1)
         if self.plot_edep is not False:
             labels += [r"$E_\mathrm{dep}$"]
-            data_add = data_add.repeat((data.shape[0] // data_add.shape[0])).unsqueeze(-1)
+            data_add = data_add.repeat((data.shape[0] // data_add.shape[0])).unsqueeze(
+                -1
+            )
             range_ += [(-0.2, 1.2)]
             data = np.concatenate([data, data_add.cpu().numpy()], axis=-1)
         return corner.corner(
@@ -204,6 +225,8 @@ class CornerHist:
     @torch.no_grad()
     def make_cube(self, data, cube, incoming, color="#FF9D00"):
         incoming = self.vmf_utils.to_cube(self.disp_man.projx(incoming))
+        en = data[..., :3].norm(dim=-1)
+        en_frac = (1 - en / en.nan_to_num().max()).nan_to_num().cpu().numpy()
         return cube.plot_cube_with_points(
             self.vmf_utils.to_cube(data),
             incoming=incoming,
@@ -211,15 +234,18 @@ class CornerHist:
             arr_lr=0.0,
             arr_l=1.0,
             arr_lw=1.0,
+            en_frac=en_frac,
         )
 
     @torch.no_grad()
-    def arrange_plots_(self, fig_sup, fig, sols, sols_true=None, incoming=None, data_add=None):
+    def arrange_plots_(
+        self, fig_sup, fig, sols, sols_true=None, incoming=None, data_add=None,
+    ):
         if self.cube:
             _, fig, pc_s, pc_t = fig
-            self.make_cube(sols, pc_s, incoming)
+            self.make_cube(sols[:2**10], pc_s, incoming[:2**10])
             if sols_true is not None:
-                self.make_cube(sols_true, pc_t, incoming, color="maroon")
+                self.make_cube(sols_true[:2**10], pc_t, incoming[:2**10], color="maroon")
         if self.corner_:
             self.make_corner(sols, fig, data_add=data_add[0])
             if sols_true is not None:

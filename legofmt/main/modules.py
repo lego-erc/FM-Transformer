@@ -1,13 +1,14 @@
 import pytorch_lightning as ltng
 import torch
+import json
 from flow_matching.solver import RiemannianODESolver
 from flow_matching.utils import ModelWrapper
 from flow_matching.utils.manifolds import Manifold
-from torch_lap_cuda_lib import solve_lap as slap
+from legofmt.data.dataloaders import LEGODataset
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
+from torch_lap_cuda_lib import solve_lap as slap
 
-from legofmt.data.dataloaders import LEGODataset
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt.geometry.energy_proj import EnergyProjections
 from legofmt.geometry.gen_base import GenerateBase
@@ -36,6 +37,7 @@ class ProjectModel(ModelWrapper, nn.Module):
         mask: torch.Tensor,
         attn_mask: torch.Tensor,
         types: torch.Tensor,
+        pdgids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         proj_mask = attn_mask * (types > (types.max() - 2))
         x_2d = x.flatten(0, -2)
@@ -44,9 +46,9 @@ class ProjectModel(ModelWrapper, nn.Module):
         x_2d[pm_flat] = x_projx
         x = x_2d.view_as(x).detach()
         t = torch.atleast_2d(t).expand_as(attn_mask)
-        t_mask = (mask.squeeze(-1) == 1)
+        t_mask = mask.squeeze(-1) == 1
         t = t_mask * t + ~t_mask
-        v = self.vf(t, x, mask, attn_mask=attn_mask, types=types)
+        v = self.vf(t, x, mask, attn_mask, types, pdgids)
         v_2d = v.flatten(0, -2)
         v_proj = self.manifold.proju(x_projx, v_2d[pm_flat])
         v_2d[pm_flat] = v_proj
@@ -92,7 +94,21 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         super().__init__()
         state_dict = config.get("state_dict")
         config = config.get("config", config)
+        dpath = config.get("dl_conf").get("path")
+        if dpath[-3:] != ".pt":
+            config["dl_conf"]["data_path"] = dpath + "/data.pt"
+            with open(dpath + "/meta.json") as f:
+                meta_dict = json.load(f)
+                ntokens = meta_dict["ntokens"]
+                ptensor = torch.tensor([0] + meta_dict["particles"])
+                self.register_buffer("pdgids_template", ptensor)
+                config["model_conf"]["npdgids"] = self.pdgids_template.shape[0]
+            if "ntokens" not in config.get("model_conf"):
+                config["model_conf"]["ntokens"] = ntokens
+        else:
+            self.pdgids_template = None
         model_conf = config.get("model_conf").copy()
+        self.t_dist = model_conf.pop("t_dist", "uniform")
         self.manifold = model_conf.pop("manifold")
         self.proj_ray = model_conf.pop("proj_ray", True)
         self.proj_en = model_conf.pop("proj_en", False)
@@ -127,13 +143,28 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         self.opt.train()
 
     @torch.no_grad()
+    def convert_pdgids(self, pdgids: Tensor) -> Tensor:
+        data_particles = pdgids.nan_to_num(int(self.pdgids_template[0]))
+        bool_comp = data_particles.unsqueeze(-1) == self.pdgids_template.view(1, 1, -1)
+        idx_template = torch.arange(bool_comp.shape[-1], device=self.device).view(
+            1, 1, -1
+        )
+        return (bool_comp * idx_template).sum(dim=-1)
+
+    @torch.no_grad()
     def _prep(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
         try:
             cc, mask, attn_mask, data_add = batch
         except ValueError:
             cc, mask, attn_mask = batch
             data_add = None
-        in_dim = cc.shape[-1]
+        in_dim = self.model.vf.in_dim
+        if self.pdgids_template is not None:
+            pdgid_idx = self.convert_pdgids(cc[..., -1])
+        else:
+            pdgid_idx = None
+        if cc.shape[-1] > in_dim:
+            cc = cc[..., -in_dim - 1 : -1]
         cc = cc.nan_to_num(1)
         cc = self.manifold.projx(cc)
         if self.proj_en is not False:
@@ -144,7 +175,9 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         if self.ot_coupling:
             cost = attn_mask[:, 1:].unsqueeze(-1) * torch.cdist(cc[:, 1:], base[:, 1:])
             assign = slap(cost, cost.device)
-            base[:, 1:] = base[:, 1:].gather(1, assign.unsqueeze(-1).expand_as(base[:, 1:]))
+            base[:, 1:] = base[:, 1:].gather(
+                1, assign.unsqueeze(-1).expand_as(base[:, 1:])
+            )
         if data_add is not None:
             if isinstance(data_add, torch.Tensor):
                 data_add = data_add.view(mask.shape[0], -1)
@@ -156,21 +189,37 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
                 da_tk[:, 0, 0] /= cc[:, 0, :3].norm(dim=-1)
                 zr = torch.ones_like(da_tk[..., :1], dtype=torch.long)
                 cc = torch.cat((da_tk, cc), dim=1)
+                if pdgid_idx is not None:
+                    pdgid_idx = torch.cat(
+                        (
+                            torch.zeros_like(pdgid_idx[:, :da_nt], device=self.device),
+                            pdgid_idx,
+                        ),
+                        dim=1,
+                    )
             else:
                 zr = torch.ones_like(mask[:, :data_add], dtype=torch.long)
             mask = torch.cat((zr, mask), dim=1)
             attn_mask = torch.cat((zr.bool().squeeze(-1), attn_mask), dim=1)
             base = self.gen_base.extend_add(base)
 
-        return base, cc, mask, attn_mask
+        return base, cc, mask, attn_mask, pdgid_idx
 
     def _step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
         with torch.no_grad():
-            base, target, mask, attn_mask = self._prep(batch, _batch_idx)
-            t = torch.sigmoid(torch.randn_like(base[:, 0, 0]))
+            base, target, mask, attn_mask, pdgid_idx = self._prep(batch, _batch_idx)
+            if self.t_dist == "sm_norm":
+                t = torch.sigmoid(torch.randn_like(base[:, 0, 0]))
+            elif self.t_dist == "uniform":
+                t = torch.rand_like(base[:, 0, 0])
             ps_ = self.ps.sample(base, target, t)
         v_out = self.model(
-            ps_.x_t, ps_.t, mask=mask, attn_mask=attn_mask, types=self.types_embd
+            ps_.x_t,
+            ps_.t,
+            mask=mask,
+            attn_mask=attn_mask,
+            types=self.types_embd,
+            pdgids=pdgid_idx,
         )
         v_target = ps_.dx_t * attn_mask.unsqueeze(-1)
         return self.loss_fn(v_out, v_target)
@@ -181,7 +230,10 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             p.sum() * 0.0 for p in self.model.vf.vf.attn_layers.parameters()
         )
         if loss.isnan():
-            raise ValueError("NaN loss encountered during training.")
+            for name, p in self.model.named_parameters():
+                if p.isnan().any():
+                    break
+            raise ValueError(f"NaN loss encountered during training. \n {name}")
         return loss + make_used_
 
     def validation_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
@@ -192,7 +244,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
                 loss.clone().item(),
                 on_step=True,
                 on_epoch=True,
-                #batch_size=self._step_bs,
+                # batch_size=self._step_bs,
                 logger=True,
                 sync_dist=True,
             )
@@ -215,20 +267,27 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         return_base = self.odeint_conf.get("return_base", False)
         step_size = self.odeint_conf.get("step_size", 0.04)
         return_timesteps = self.odeint_conf.get("return_timesteps", False)
+        filter_pdgid = self.odeint_conf.get("filter_pdgid", None)
         if return_timesteps:
-            time_grid = torch.arange(0, 1 + step_size, step=step_size, device=self.device).clamp_max(1)
+            time_grid = torch.arange(
+                0, 1 + step_size, step=step_size, device=self.device
+            ).clamp_max(1)
         else:
             time_grid = torch.tensor([0.0, 1.0], device=self.device)
         method = self.odeint_conf.get("method", "midpoint")
-        base, _, mask, attn_mask = self._prep(batch, _batch_idx)
+        base, _, mask, attn_mask, pdgids_idx = self._prep(batch, _batch_idx)
         if return_base:
             return base.masked_fill(~attn_mask.unsqueeze(-1), torch.nan)
         init_state_tp = base.split(split_size, 0)
         mask_tp = mask.split(split_size, 0)
         attn_mask_tp = attn_mask.split(split_size, 0)
+        if pdgids_idx is not None:
+            pdgids_idx_tp = pdgids_idx.split(split_size, 0)
 
         for idx in range(len(init_state_tp)):
-            solver = RiemannianODESolver(velocity_model=self.model, manifold=self.manifold)
+            solver = RiemannianODESolver(
+                velocity_model=self.model, manifold=self.manifold
+            )
             sols_ = solver.sample(
                 x_init=init_state_tp[idx],
                 step_size=step_size,
@@ -240,9 +299,15 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
                 mask=mask_tp[idx],
                 attn_mask=attn_mask_tp[idx],
                 types=self.types_embd,
+                pdgids=pdgids_idx_tp[idx] if pdgids_idx is not None else None,
             )
             del solver
             sols_ = sols_.masked_fill(~attn_mask_tp[idx].unsqueeze(-1), torch.nan)
+
+            if filter_pdgid is not None:
+                filter_pdgid_idx = self.convert_pdgids(filter_pdgid)
+                pdgid_mask = torch.isin(pdgids_idx_tp[idx], filter_pdgid_idx)
+                sols_ = sols_.masked_fill(~pdgid_mask.unsqueeze(-1), torch.nan)
 
             try:
                 sols = torch.cat((sols, sols_), dim=-3)
