@@ -95,18 +95,14 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         state_dict = config.get("state_dict")
         config = config.get("config", config)
         dpath = config.get("dl_conf").get("path")
-        if dpath[-3:] != ".pt":
-            config["dl_conf"]["data_path"] = dpath + "/data.pt"
-            with open(dpath + "/meta.json") as f:
-                meta_dict = json.load(f)
-                ntokens = meta_dict["ntokens"]
-                ptensor = torch.tensor([0] + meta_dict["particles"])
-                self.register_buffer("pdgids_template", ptensor)
-                config["model_conf"]["npdgids"] = self.pdgids_template.shape[0]
-            if "ntokens" not in config.get("model_conf"):
-                config["model_conf"]["ntokens"] = ntokens
-        else:
-            self.pdgids_template = None
+        config["dl_conf"]["data_path"] = dpath + "/data.pt"
+        with open(dpath + "/meta.json") as f:
+            meta_dict = json.load(f)
+        ntokens = meta_dict["ntokens"]
+        ptensor = torch.tensor([0] + meta_dict["particles"])
+        self.register_buffer("pdgids_template", ptensor)
+        config["model_conf"]["npdgids"] = self.pdgids_template.shape[0]
+        config["model_conf"]["ntokens"] = ntokens
         model_conf = config.get("model_conf").copy()
         self.t_dist = model_conf.pop("t_dist", "uniform")
         self.manifold = model_conf.pop("manifold")
@@ -150,21 +146,42 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             1, 1, -1
         )
         return (bool_comp * idx_template).sum(dim=-1)
+    
+    @torch.no_grad()
+    def extend_data_add(self, batch: tuple, pdgid_idx: Tensor, base: Tensor) -> tuple:
+        cc, mask, attn_mask, data_add = batch
+        in_dim = self.model.vf.in_dim
+        if isinstance(data_add, torch.Tensor):
+            data_add = data_add.view(mask.shape[0], -1)
+            da_nft = torch.tensor([data_add.shape[-1]], device=self.device)
+            da_nt = torch.floor_divide(da_nft, in_dim) + 1
+            da_tk = torch.ones_like(cc[:, :1]).repeat(1, 1, da_nt.int())
+            da_tk[:, 0, :da_nft] = data_add.view(-1, da_nft)
+            da_tk = da_tk.view(-1, da_nt, in_dim)
+            da_tk[:, 0, 0] /= cc[:, 0, :3].norm(dim=-1)
+            zr = torch.ones_like(da_tk[..., :1], dtype=torch.long)
+            cc = torch.cat((da_tk, cc), dim=1)
+            if pdgid_idx is not None:
+                pdgid_idx = torch.cat(
+                    (
+                        torch.zeros_like(pdgid_idx[:, :da_nt], device=self.device),
+                        pdgid_idx,
+                    ),
+                    dim=1,
+                )
+        else:
+            zr = torch.ones_like(mask[:, :data_add], dtype=torch.long)
+        mask = torch.cat((zr, mask), dim=1)
+        attn_mask = torch.cat((zr.bool().squeeze(-1), attn_mask), dim=1)
+        base = self.gen_base.extend_add(base)
+        return cc, mask, attn_mask, base
 
     @torch.no_grad()
     def _prep(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
-        try:
-            cc, mask, attn_mask, data_add = batch
-        except ValueError:
-            cc, mask, attn_mask = batch
-            data_add = None
+        cc, mask, attn_mask, data_add = batch
         in_dim = self.model.vf.in_dim
-        if self.pdgids_template is not None:
-            pdgid_idx = self.convert_pdgids(cc[..., -1])
-        else:
-            pdgid_idx = None
-        if cc.shape[-1] > in_dim:
-            cc = cc[..., -in_dim - 1 : -1]
+        pdgid_idx = self.convert_pdgids(cc[..., -1])
+        cc = cc[..., -in_dim - 1 : -1]
         cc = cc.nan_to_num(1)
         cc = self.manifold.projx(cc)
         if self.proj_en is not False:
@@ -178,30 +195,8 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             base[:, 1:] = base[:, 1:].gather(
                 1, assign.unsqueeze(-1).expand_as(base[:, 1:])
             )
-        if data_add is not None:
-            if isinstance(data_add, torch.Tensor):
-                data_add = data_add.view(mask.shape[0], -1)
-                da_nft = torch.tensor([data_add.shape[-1]], device=self.device)
-                da_nt = torch.floor_divide(da_nft, in_dim) + 1
-                da_tk = torch.ones_like(cc[:, :1]).repeat(1, 1, da_nt.int())
-                da_tk[:, 0, :da_nft] = data_add.view(-1, da_nft)
-                da_tk = da_tk.view(-1, da_nt, in_dim)
-                da_tk[:, 0, 0] /= cc[:, 0, :3].norm(dim=-1)
-                zr = torch.ones_like(da_tk[..., :1], dtype=torch.long)
-                cc = torch.cat((da_tk, cc), dim=1)
-                if pdgid_idx is not None:
-                    pdgid_idx = torch.cat(
-                        (
-                            torch.zeros_like(pdgid_idx[:, :da_nt], device=self.device),
-                            pdgid_idx,
-                        ),
-                        dim=1,
-                    )
-            else:
-                zr = torch.ones_like(mask[:, :data_add], dtype=torch.long)
-            mask = torch.cat((zr, mask), dim=1)
-            attn_mask = torch.cat((zr.bool().squeeze(-1), attn_mask), dim=1)
-            base = self.gen_base.extend_add(base)
+        batch = (cc, mask, attn_mask, data_add)
+        cc, mask, attn_mask, base = self.extend_data_add(batch, pdgid_idx, base)
 
         return base, cc, mask, attn_mask, pdgid_idx
 

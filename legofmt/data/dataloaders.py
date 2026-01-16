@@ -28,16 +28,12 @@ class GetLEGOData:
     def dataset_compact(self, path):
         data = torch.load(path, map_location="cpu", weights_only=False)
 
-        try:
-            data_pp = data.get("per_particle")
-            data_add = data.get("per_event")
-            if isinstance(data_add, torch.Tensor):
-                data_add = data_add.to(self.dtype)
-            elif isinstance(data_add, dict):
-                data_add = data_add["E_dep"].to(self.dtype)
-        except AttributeError:
-            data_pp = data
-            data_add = None
+        data_pp = data.get("per_particle")
+        data_add = data.get("per_event")
+        if isinstance(data_add, torch.Tensor):
+            data_add = data_add.to(self.dtype)
+        elif isinstance(data_add, dict):
+            data_add = data_add["E_dep"].to(self.dtype)
 
         if isinstance(data_pp, dict):
             data_pp = torch.cat((data_pp["Incoming"], data_pp["Outgoing"]), dim=-2)
@@ -108,27 +104,10 @@ class GetLEGOData:
         **kwargs,
     ) -> dict:
         dataset = torch.load(path, map_location="cpu")
-        try:
-            data_pp = dataset.get("per_particle")
-            data_add = dataset.get("per_event").to(self.dtype)
-        except AttributeError:
-            data_pp = dataset
-            data_add = None
-        if isinstance(data_pp, tuple):
-            pp_tpl = data_pp
-        elif isinstance(data_pp, Tensor):
-            data_pp = data_pp.to(self.dtype)
-            particle_nan = ~data_pp[..., 0].isnan()
-            attn_mask = particle_nan.to(torch.int64)
-            mask = attn_mask.clone().unsqueeze(2)
-            mask[:, 0] = 0
-            pp_tpl = (
-                data_pp.to(self.dev),
-                mask.to(self.dev),
-                attn_mask.to(self.dev).bool(),
-            )
+        data_pp = dataset.get("per_particle")
+        data_add = dataset.get("per_event").to(self.dtype)
         return {
-            "per_particle": pp_tpl,
+            "per_particle": data_pp,
             "per_event": data_add,
         }
 

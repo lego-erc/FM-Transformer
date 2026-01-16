@@ -56,10 +56,9 @@ class CFMTrafo_x(nn.Module):
         self.l_types_ = nn.Parameter(torch.empty(self.ntokens, 2, self.h_dim, self.in_dim))
         self.b_types_ = nn.Parameter(torch.empty(self.ntokens, self.h_dim))
         self.bo_types_ = nn.Parameter(torch.empty(self.ntokens, self.in_dim))
-        if npdgids > 0:
-            self.l_pdgids_ = nn.Parameter(torch.empty(self.npdgids, 2, self.h_dim, self.in_dim))
-            self.b_pdgids_ = nn.Parameter(torch.empty(self.npdgids, self.h_dim))
-            self.bo_pdgids_ = nn.Parameter(torch.empty(self.npdgids, self.in_dim))
+        self.l_pdgids_ = nn.Parameter(torch.empty(self.npdgids, 2, self.h_dim, self.in_dim))
+        self.b_pdgids_ = nn.Parameter(torch.empty(self.npdgids, self.h_dim))
+        self.bo_pdgids_ = nn.Parameter(torch.empty(self.npdgids, self.in_dim))
 
         par_list = [
             self.l_mask_,
@@ -68,13 +67,11 @@ class CFMTrafo_x(nn.Module):
             self.l_types_,
             self.b_types_,
             self.bo_types_,
-        ]
-        if npdgids > 0:
-            par_list += [
-                self.l_pdgids_,
-                self.b_pdgids_,
-                self.bo_pdgids_,
+            self.l_pdgids_,
+            self.b_pdgids_,
+            self.bo_pdgids_,
             ]
+        
         for p in par_list:
             nn.init.xavier_normal_(p, gain=xavier_gain)
 
@@ -103,14 +100,9 @@ class CFMTrafo_x(nn.Module):
         b_types = self.b_types_.index_select(0, types.view(-1)).view(-1, *self.vb)
         bo_types = self.bo_types_.index_select(0, types.view(-1)).view(-1, *self.vbo)
 
-        if pdgids is not None:
-            l_pdgids = self.l_pdgids_.index_select(0, pdgids.view(-1)).view(-1, *self.vl)
-            b_pdgids = self.b_pdgids_.index_select(0, pdgids.view(-1)).view(-1, *self.vb)
-            bo_pdgids = self.bo_pdgids_.index_select(0, pdgids.view(-1)).view(-1, *self.vbo)
-        else:
-            l_pdgids = 0
-            b_pdgids = 0
-            bo_pdgids = 0
+        l_pdgids = self.l_pdgids_.index_select(0, pdgids.view(-1)).view(-1, *self.vl)
+        b_pdgids = self.b_pdgids_.index_select(0, pdgids.view(-1)).view(-1, *self.vb)
+        bo_pdgids = self.bo_pdgids_.index_select(0, pdgids.view(-1)).view(-1, *self.vbo)
 
         t_freqs = torch.einsum("ij, k -> ijk", t, self.freqs)
         embd_t = self.mask_freqs * t_freqs.sin() + (
