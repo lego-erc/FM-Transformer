@@ -25,30 +25,15 @@ class GetLEGOData:
     def __call__(self, *args, **kwargs):
         return self.func(*args, **kwargs)
 
-    def dataset_compact(self, path):
-        data = torch.load(path, map_location="cpu", weights_only=False)
-
+    def dataset_compact(self, data):
         data_pp = data.get("per_particle")
         data_add = data.get("per_event")
-        if isinstance(data_add, torch.Tensor):
-            data_add = data_add.to(self.dtype)
-        elif isinstance(data_add, dict):
-            data_add = data_add["E_dep"].to(self.dtype)
-
-        if isinstance(data_pp, dict):
-            data_pp = torch.cat((data_pp["Incoming"], data_pp["Outgoing"]), dim=-2)
-
-        if data_pp.shape[-1] == 16:
-            data_pp_filtered = torch.cat(
-                (data_pp[:, 0:1, :8], data_pp[..., 8:]), dim=1
-            ).to(self.dtype)
-        elif data_pp.shape[-1] == 8:
-            data_pp_filtered = data_pp.to(self.dtype)
-        return data_pp_filtered, data_add
+        data_pp = torch.cat((data_pp["Incoming"], data_pp["Outgoing"]), dim=-2)
+        return data_pp.to(self.dtype), data_add
 
     def dataset_cutoff(
         self,
-        path: str,
+        data: dict,
         n_events: (int | None) = None,
     ) -> tuple[Tensor, Tensor, Tensor, torch.distributions.Categorical]:
         """Load a dataset from the given path and preprocesses it to give particles above an energy threshold.
@@ -68,7 +53,7 @@ class GetLEGOData:
             Attention mask for the transformer.
 
         """
-        dataset, data_add = self.dataset_compact(path)
+        dataset, data_add = self.dataset_compact(data)
         mask_valid = dataset[..., 0] >= self.cutoff_mev
         max_valid = mask_valid.sum(dim=-1).max()
         mask_valid_sorted = mask_valid.sort(dim=-1, descending=True).values[
@@ -81,22 +66,15 @@ class GetLEGOData:
         )
         data_pp = dataset_valid[idx_rel_events]
         if n_events is not None:
-            rd_idx = torch.randperm(data_pp.shape[0], device="cpu")[
-                :n_events
-            ]
+            rd_idx = torch.randperm(data_pp.shape[0], device="cpu")[:n_events]
             data_pp = data_pp[rd_idx]
         particle_nan = ~data_pp.isnan().any(dim=-1)
         attn_mask = particle_nan.to(torch.int64)
         mask = attn_mask.clone().unsqueeze(2)
         mask[:, 0] = 0
-        return {
-            "per_particle": (
-                data_pp.to(self.dev),
-                mask.to(self.dev),
-                attn_mask.to(self.dev).bool()
-            ),
-            "per_event": data_add[idx_rel_events].to(self.dev),
-        }
+        for keys in data_add.keys():
+            data_add[keys] = data_add[keys][idx_rel_events].to(self.dev)
+        return data_pp.to(self.dev), mask.to(self.dev), attn_mask.to(self.dev).bool(), data_add
 
     def get_filtered(
         self,
@@ -116,30 +94,21 @@ class LEGODataset(Dataset):
     def __init__(self, path: str, **kwargs) -> None:
         super().__init__()
         path = kwargs.pop("data_path", path)
-        n_events = kwargs.pop("n_events", None)
-        self.include_add = kwargs.pop("include_add", False)
-        get_lego_data = GetLEGOData(**kwargs)
-        self.data = get_lego_data(path, n_events=n_events)
-        self.data_pp, self.mask, self.attn_mask = self.data.get("per_particle")
-        self.data_coord = self.data_pp[..., 1:-1]
-        self.data_add = self.data.get("per_event")
-        self.length = self.data_pp.shape[0]
-        self.max_particles = self.data_pp.shape[1]
+        data = torch.load(path, map_location="cpu", weights_only=False)
+        try:
+            self.target, self.mask, self.attn_mask = data
+        except ValueError:
+            self.full_data = GetLEGOData(**kwargs)(data) 
+            self.target = self.full_data[0]
+        self.length = self.target.shape[0]
         self.device = kwargs.get("device", "cpu")
 
     def __len__(self) -> int:
         return self.length
 
     def __getitem__(self, idx: int | Tensor) -> tuple[Tensor]:
-        if self.include_add:
-            return (
-                self.data_pp[idx].to(self.device),
-                self.mask[idx].to(self.device),
-                self.attn_mask[idx].to(self.device),
-                self.data_add[idx].to(self.device),
-            )
         return (
-            self.data_pp[idx].to(self.device),
+            self.target[idx].to(self.device),
             self.mask[idx].to(self.device),
             self.attn_mask[idx].to(self.device),
         )

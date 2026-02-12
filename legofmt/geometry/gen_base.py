@@ -44,10 +44,17 @@ class GenerateBase:
 
     @torch.no_grad()
     def rd_scale(self, shape, device):
-        if self.scale_dist == "trunc_norm":
+        if self.scale_dist == "trunc_norm_legacy":
             return (
                 -((torch.randn((*shape, 1), device=device).abs() * 2) % self.base_range)
                 + self.base_range
+            )
+        if self.scale_dist == "trunc_norm":
+            return self.base_range * (
+                torch.nn.init.trunc_normal_(
+                    torch.empty((*shape, 1), device=device), std=1.0 / self.base_range, a=-1.0, b=0.0
+                )
+                + 1.0
             )
         if self.scale_dist == "uniform":
             return self.base_range * torch.rand((*shape, 1), device=device)
@@ -60,7 +67,6 @@ class GenerateBase:
                 * self.exp_dist.sample((*shape, 1)).to(device)
                 % (1.0 - safety)
             ) + safety
-        return self.base_range * (torch.sigmoid(torch.randn((*shape, 1), device=device)) - 1) + 1
 
     @torch.no_grad()
     def iso_3dmom(self, shape, **kwargs):
@@ -85,9 +91,6 @@ class GenerateBase:
 
     @torch.no_grad()
     def extend_add(self, base):
-        rd = torch.sigmoid(torch.randn_like(base[:, :1, :1]))
-        ext = (
-            rd *
-            torch.tensor([1, 0, 0, 0, 0, 0], device=base.device).view(1, 1, -1)
-        )
+        rd = 0.4 * torch.sigmoid(torch.randn_like(base[:, :1, :1]))
+        ext = rd * torch.tensor([1, 0, 0, 0, 0, 0], device=base.device).view(1, 1, -1)
         return torch.cat((ext, base), dim=1)

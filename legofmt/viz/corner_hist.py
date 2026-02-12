@@ -120,12 +120,13 @@ class CornerHist:
 
         return anim
 
-    def prep(self, batch, sols=None):
-        if sols is None:
-            sols = self.model(batch)
-        data_add_f = sols[:, 0, 0]
-        sols = sols[:, 2:]
-        sols_true = self.en_norm(batch[0] if batch[0].shape[-1] == 6 else batch[0][..., -7:-1])[:, 1:]
+    def prep(self, batch):
+        sols = self.model(batch)
+        data_add_f = sols[:, 1, 0]
+        self.sols_density = sols[0, 0, 0]
+        self.sols_e_dep = sols[:, 1, 0].mean()
+        sols = sols[:, 3:]
+        sols_true = batch[0][:, 3:] if batch[0].shape[-1] == 6 else batch[0][:, 3:, -7:-1]
         sols_true = torch.where(torch.isnan(sols), torch.nan, sols_true)
         if self.proj_en_out is not False:
             sols = self.en_norm_out(sols)
@@ -135,8 +136,8 @@ class CornerHist:
             self.fig,
             sols.contiguous().view(-1, 6),
             sols_true.contiguous().view(-1, 6),
-            incoming=(batch[0][:, 0:1] if self.cube else None),
-            data_add=(data_add_f, batch[-1] / batch[0][:, 0, 1:4].norm(dim=-1)),
+            incoming=(batch[0][:, 2:3, -7:-1] if self.cube else None),
+            data_add=(data_add_f, batch[0][:, 1, 1]),
         )
 
     def make_fig(self, title=None, cube=False, corner_=True):
@@ -171,13 +172,13 @@ class CornerHist:
             return fig_sup, (fig, fig_t, pc_s, pc_t)
 
         if cube and not corner_:
-            ax_l = fig.add_subplot(111, projection="3d")
+            ax_l = fig.add_subplot(121, projection="3d")
             ax_r = fig.add_subplot(122, projection="3d")
 
             pc_s = PlotGeom(figure=fig, ax=ax_l)
             pc_t = PlotGeom(figure=fig, ax=ax_r)
 
-            return fig_sup, (fig, fig, pc_s, pc_s)
+            return fig_sup, (fig, fig, pc_s, pc_t)
 
         return fig_sup, fig
 
@@ -225,8 +226,6 @@ class CornerHist:
     @torch.no_grad()
     def make_cube(self, data, cube, incoming, color="#FF9D00"):
         incoming = self.vmf_utils.to_cube(self.disp_man.projx(incoming))
-        en = data[..., :3].norm(dim=-1)
-        en_frac = (1 - en / en.nan_to_num().max()).nan_to_num().cpu().numpy()
         return cube.plot_cube_with_points(
             self.vmf_utils.to_cube(data),
             incoming=incoming,
@@ -234,7 +233,6 @@ class CornerHist:
             arr_lr=0.0,
             arr_l=1.0,
             arr_lw=1.0,
-            en_frac=en_frac,
         )
 
     @torch.no_grad()

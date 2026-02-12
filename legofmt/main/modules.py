@@ -95,14 +95,18 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         state_dict = config.get("state_dict")
         config = config.get("config", config)
         dpath = config.get("dl_conf").get("path")
-        config["dl_conf"]["data_path"] = dpath + "/data.pt"
-        with open(dpath + "/meta.json") as f:
-            meta_dict = json.load(f)
-        ntokens = meta_dict["ntokens"]
-        ptensor = torch.tensor([0] + meta_dict["particles"])
-        self.register_buffer("pdgids_template", ptensor)
-        config["model_conf"]["npdgids"] = self.pdgids_template.shape[0]
-        config["model_conf"]["ntokens"] = ntokens
+        if dpath[-3:] != ".pt":
+            config["dl_conf"]["data_path"] = dpath + "/data_prepped.pt"
+            with open(dpath + "/meta.json") as f:
+                meta_dict = json.load(f)
+                ntokens = meta_dict["ntokens"]
+                ptensor = torch.tensor([0] + meta_dict["particles"])
+                self.register_buffer("pdgids_template", ptensor)
+                config["model_conf"]["npdgids"] = self.pdgids_template.shape[0]
+            if "ntokens" not in config.get("model_conf"):
+                config["model_conf"]["ntokens"] = ntokens
+        else:
+            self.pdgids_template = None
         model_conf = config.get("model_conf").copy()
         self.t_dist = model_conf.pop("t_dist", "uniform")
         self.manifold = model_conf.pop("manifold")
@@ -123,11 +127,8 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         self.opt = opt(self.model.parameters(), **opt_conf)
 
         self.dl_conf = config.get("dl_conf").copy()
-        self.types_embd = nn.Parameter(
-            torch.arange(model_conf.get("ntokens"), dtype=torch.int64)
-            .clamp_max(2 if self.dl_conf.get("include_add", True) else 1)
-            .view(1, -1),
-            requires_grad=False,
+        self.register_buffer("types_embd",
+            torch.arange(model_conf.get("ntokens"), dtype=torch.int64).clamp_max(3).view(1, -1)
         )
 
         self.odeint_conf = config.get("odeint_conf", {})
@@ -146,48 +147,11 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             1, 1, -1
         )
         return (bool_comp * idx_template).sum(dim=-1)
-    
-    @torch.no_grad()
-    def extend_data_add(self, batch: tuple, pdgid_idx: Tensor, base: Tensor) -> tuple:
-        cc, mask, attn_mask, data_add = batch
-        in_dim = self.model.vf.in_dim
-        if isinstance(data_add, torch.Tensor):
-            data_add = data_add.view(mask.shape[0], -1)
-            da_nft = torch.tensor([data_add.shape[-1]], device=self.device)
-            da_nt = torch.floor_divide(da_nft, in_dim) + 1
-            da_tk = torch.ones_like(cc[:, :1]).repeat(1, 1, da_nt.int())
-            da_tk[:, 0, :da_nft] = data_add.view(-1, da_nft)
-            da_tk = da_tk.view(-1, da_nt, in_dim)
-            da_tk[:, 0, 0] /= cc[:, 0, :3].norm(dim=-1)
-            zr = torch.ones_like(da_tk[..., :1], dtype=torch.long)
-            cc = torch.cat((da_tk, cc), dim=1)
-            if pdgid_idx is not None:
-                pdgid_idx = torch.cat(
-                    (
-                        torch.zeros_like(pdgid_idx[:, :da_nt], device=self.device),
-                        pdgid_idx,
-                    ),
-                    dim=1,
-                )
-        else:
-            zr = torch.ones_like(mask[:, :data_add], dtype=torch.long)
-        mask = torch.cat((zr, mask), dim=1)
-        attn_mask = torch.cat((zr.bool().squeeze(-1), attn_mask), dim=1)
-        base = self.gen_base.extend_add(base)
-        return cc, mask, attn_mask, base
 
     @torch.no_grad()
-    def _prep(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
-        cc, mask, attn_mask, data_add = batch
-        in_dim = self.model.vf.in_dim
-        pdgid_idx = self.convert_pdgids(cc[..., -1])
-        cc = cc[..., -in_dim - 1 : -1]
-        cc = cc.nan_to_num(1)
-        cc = self.manifold.projx(cc)
-        if self.proj_en is not False:
-            cc = self.pen(cc)
-        if self.proj_ray:
-            cc[:, 0] = self.ppa(cc[:, 0])
+    def gen_base_wrapper(self, batch: tuple) -> Tensor:
+        target, mask_, attn_mask_ = batch
+        cc, mask, attn_mask = target[:, 2:], mask_[:, 2:], attn_mask_[:, 2:]
         base = self.gen_base(cc * torch.ones_like(mask[0]), device=self.device)
         if self.ot_coupling:
             cost = attn_mask[:, 1:].unsqueeze(-1) * torch.cdist(cc[:, 1:], base[:, 1:])
@@ -195,19 +159,21 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             base[:, 1:] = base[:, 1:].gather(
                 1, assign.unsqueeze(-1).expand_as(base[:, 1:])
             )
-        batch = (cc, mask, attn_mask, data_add)
-        cc, mask, attn_mask, base = self.extend_data_add(batch, pdgid_idx, base)
-
-        return base, cc, mask, attn_mask, pdgid_idx
+        base = self.gen_base.extend_add(base) # E_dep
+        base = torch.cat((target[:, :1], base), dim=1) # Density
+        return base
 
     def _step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
         with torch.no_grad():
-            base, target, mask, attn_mask, pdgid_idx = self._prep(batch, _batch_idx)
+            target, mask, attn_mask = batch
+            energy, cc, pdgids = target.split([1, 6, 1], dim=-1)
+            base = self.gen_base_wrapper((cc, mask, attn_mask))
+            pdgid_idx = self.convert_pdgids(pdgids)
             if self.t_dist == "sm_norm":
                 t = torch.sigmoid(torch.randn_like(base[:, 0, 0]))
             elif self.t_dist == "uniform":
                 t = torch.rand_like(base[:, 0, 0])
-            ps_ = self.ps.sample(base, target, t)
+            ps_ = self.ps.sample(base, cc, t)
         v_out = self.model(
             ps_.x_t,
             ps_.t,
@@ -270,14 +236,16 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         else:
             time_grid = torch.tensor([0.0, 1.0], device=self.device)
         method = self.odeint_conf.get("method", "midpoint")
-        base, _, mask, attn_mask, pdgids_idx = self._prep(batch, _batch_idx)
+        target, mask, attn_mask = batch
+        energy, cc, pdgids = target.split([1, 6, 1], dim=-1)
+        base = self.gen_base_wrapper((cc, mask, attn_mask))
+        pdgids_idx = self.convert_pdgids(pdgids)
         if return_base:
             return base.masked_fill(~attn_mask.unsqueeze(-1), torch.nan)
         init_state_tp = base.split(split_size, 0)
         mask_tp = mask.split(split_size, 0)
         attn_mask_tp = attn_mask.split(split_size, 0)
-        if pdgids_idx is not None:
-            pdgids_idx_tp = pdgids_idx.split(split_size, 0)
+        pdgids_idx_tp = pdgids_idx.split(split_size, 0)
 
         for idx in range(len(init_state_tp)):
             solver = RiemannianODESolver(
@@ -294,7 +262,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
                 mask=mask_tp[idx],
                 attn_mask=attn_mask_tp[idx],
                 types=self.types_embd,
-                pdgids=pdgids_idx_tp[idx] if pdgids_idx is not None else None,
+                pdgids=pdgids_idx_tp[idx],
             )
             del solver
             sols_ = sols_.masked_fill(~attn_mask_tp[idx].unsqueeze(-1), torch.nan)
@@ -302,7 +270,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             if filter_pdgid is not None:
                 filter_pdgid_idx = self.convert_pdgids(filter_pdgid)
                 pdgid_mask = torch.isin(pdgids_idx_tp[idx], filter_pdgid_idx)
-                sols_ = sols_.masked_fill(~pdgid_mask.unsqueeze(-1), torch.nan)
+                sols_ = sols_.masked_fill(~pdgid_mask, torch.nan)
 
             try:
                 sols = torch.cat((sols, sols_), dim=-3)
