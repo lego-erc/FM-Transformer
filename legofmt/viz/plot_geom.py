@@ -64,15 +64,15 @@ class PlotGeom:
         if incoming is not None:
             vec_in, pts_in = incoming.split(3, -1)
             ax.scatter(
-                *pts_in.movedim(-1, 0).cpu().numpy(),
+                *-pts_in.movedim(-1, 0).cpu().numpy(),
                 color="r",
                 depthshade=True,
                 zorder=3,
             )
             ax.quiver(
-                *pts_in.movedim(-1, 0).cpu().numpy(),
-                *-vec_in.movedim(-1, 0).cpu().numpy(),
-                length=2 * arr_l,
+                *-pts_in.movedim(-1, 0).cpu().numpy(),
+                *vec_in.movedim(-1, 0).cpu().numpy(),
+                length=1 * arr_l,
                 normalize=True,
                 arrow_length_ratio=0.0,
                 linewidths=2.0,
