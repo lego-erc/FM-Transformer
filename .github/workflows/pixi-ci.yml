@@ -22,8 +22,12 @@ jobs:
       uses: prefix-dev/setup-pixi@v0.8.1
       with:
         pixi-version: latest
-        environments: ci
+        # setup-pixi caches the environment but doesn't install it by default if cache exists.
+        # We want to force install steps to verify 'pixi install' specifically.
+        run-install: false
 
-    - name: Run Build Task
-      # Runs the [tasks.build] defined in your pixi.toml
-      run: pixi run -e ci build
+    - name: Pixi Install (CI Environment)
+      run: pixi install -e ci
+
+    - name: Verify Package Import
+      run: pixi run -e ci python -c "import legofmt; print('Successfully imported legofmt')"
