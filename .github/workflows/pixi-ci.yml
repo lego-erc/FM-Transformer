@@ -22,9 +22,7 @@ jobs:
       uses: prefix-dev/setup-pixi@v0.8.1
       with:
         pixi-version: latest
-
-    - name: Verify Install
-      run: pixi install -e ci
+        environments: ci
 
     - name: Run Build Task
       # Runs the [tasks.build] defined in your pixi.toml
