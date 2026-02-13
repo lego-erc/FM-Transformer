@@ -24,4 +24,8 @@ jobs:
         pixi-version: v0.40.1
 
     - name: Verify Install
-      run: pixi install
+      run: pixi install -e ci
+
+    - name: Run Build Task
+      # Runs the [tasks.build] defined in your pixi.toml
+      run: pixi run -e ci build

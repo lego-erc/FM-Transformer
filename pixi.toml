@@ -31,5 +31,7 @@ legofmt = { path = ".", editable = true }
 torch-lap-cuda = ">=0.0.3"
 
 [environments]
-cuda = ["cuda"]
+default = ["cuda"]
+ci = []
+
 
