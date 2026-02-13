@@ -2,7 +2,7 @@ name: Pixi CI
 
 on:
   push:
-    branches: [ "main", "master", "CI" ]
+    branches: [ "main", "master" ]
   pull_request:
     branches: [ "main", "master" ]
 
