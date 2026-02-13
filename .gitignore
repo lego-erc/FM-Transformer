@@ -3,3 +3,5 @@
 .pixi/*
 !.pixi/config.toml
 pixi.lock
+*.egg-info
+
