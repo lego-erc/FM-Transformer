@@ -54,7 +54,7 @@ class CornerHist:
         self.anim_intermediates = anim_intermediates
         self.vmf_utils = VMF()
         if isinstance(full_gen, str):
-            from ..utils.generate import GenerateOut
+            from ..main.generate import GenerateOut
 
             self.model = GenerateOut(config, full_gen, device=device)
         else:
@@ -127,6 +127,7 @@ class CornerHist:
         self.sols_e_dep = sols[:, 1, 0].mean()
         sols = sols[:, 3:]
         sols_true = batch[0][:, 3:] if batch[0].shape[-1] == 6 else batch[0][:, 3:, -7:-1]
+        sols = sols[:, :sols_true.shape[1]]
         sols_true = torch.where(torch.isnan(sols), torch.nan, sols_true)
         if self.proj_en_out is not False:
             sols = self.en_norm_out(sols)

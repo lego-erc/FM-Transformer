@@ -3,7 +3,7 @@ import torch
 import json
 from flow_matching.solver import RiemannianODESolver
 from flow_matching.utils import ModelWrapper
-from flow_matching.utils.manifolds import Manifold
+from flow_matching.utils.manifolds import Euclidean, Sphere
 from legofmt.data.dataloaders import LEGODataset
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
@@ -12,7 +12,7 @@ from torch_lap_cuda_lib import solve_lap as slap
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt.geometry.energy_proj import EnergyProjections
 from legofmt.geometry.gen_base import GenerateBase
-from legofmt.geometry.path_sample_mult import ProductPathSampler
+from legofmt.geometry.path_sample_mult import ProductPathSampler, ProductManifold
 from legofmt.geometry.raytracing_proj import CubeTrace
 
 
@@ -22,7 +22,7 @@ class ProjectModel(ModelWrapper, nn.Module):
     def __init__(
         self,
         vf: nn.Module,
-        manifold: Manifold,
+        manifold: ProductManifold,
         **kwargs: dict,
     ) -> None:
         nn.Module.__init__(self)
@@ -99,17 +99,17 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             config["dl_conf"]["data_path"] = dpath + "/data_prepped.pt"
             with open(dpath + "/meta.json") as f:
                 meta_dict = json.load(f)
-                ntokens = meta_dict["ntokens"]
+                self.ntokens = meta_dict["ntokens"]
                 ptensor = torch.tensor([0] + meta_dict["particles"])
                 self.register_buffer("pdgids_template", ptensor)
                 config["model_conf"]["npdgids"] = self.pdgids_template.shape[0]
             if "ntokens" not in config.get("model_conf"):
-                config["model_conf"]["ntokens"] = ntokens
+                config["model_conf"]["ntokens"] = self.ntokens
         else:
             self.pdgids_template = None
         model_conf = config.get("model_conf").copy()
         self.t_dist = model_conf.pop("t_dist", "uniform")
-        self.manifold = model_conf.pop("manifold")
+        self.manifold = eval(model_conf.pop("manifold"))
         self.proj_ray = model_conf.pop("proj_ray", True)
         self.proj_en = model_conf.pop("proj_en", False)
         self.ot_coupling = model_conf.pop("ot_coupling", False)
@@ -128,7 +128,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
 
         self.dl_conf = config.get("dl_conf").copy()
         self.register_buffer("types_embd",
-            torch.arange(model_conf.get("ntokens"), dtype=torch.int64).clamp_max(3).view(1, -1)
+            torch.arange(self.ntokens, dtype=torch.int64).clamp_max(3).view(1, -1)
         )
 
         self.odeint_conf = config.get("odeint_conf", {})
@@ -153,7 +153,8 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         target, mask_, attn_mask_ = batch
         cc, mask, attn_mask = target[:, 2:], mask_[:, 2:], attn_mask_[:, 2:]
         base = self.gen_base(cc * torch.ones_like(mask[0]), device=self.device)
-        if self.ot_coupling:
+        if self.ot_coupling and self.model.training:
+            base = attn_mask.unsqueeze(-1) * base + ~attn_mask.unsqueeze(-1) * cc
             cost = attn_mask[:, 1:].unsqueeze(-1) * torch.cdist(cc[:, 1:], base[:, 1:])
             assign = slap(cost, cost.device)
             base[:, 1:] = base[:, 1:].gather(
@@ -224,24 +225,38 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
 
     @torch.no_grad()
     def forward(self, batch: tuple, _batch_idx: int | Tensor | None = None) -> Tensor:
+        self.model.eval()
+        self.opt.eval()
+
         split_size = self.odeint_conf.get("split_size", 2**16 - 1)
         return_base = self.odeint_conf.get("return_base", False)
         step_size = self.odeint_conf.get("step_size", 0.04)
         return_timesteps = self.odeint_conf.get("return_timesteps", False)
         filter_pdgid = self.odeint_conf.get("filter_pdgid", None)
+        method = self.odeint_conf.get("method", "midpoint")
+
         if return_timesteps:
             time_grid = torch.arange(
                 0, 1 + step_size, step=step_size, device=self.device
             ).clamp_max(1)
         else:
             time_grid = torch.tensor([0.0, 1.0], device=self.device)
-        method = self.odeint_conf.get("method", "midpoint")
+
         target, mask, attn_mask = batch
+
+        if target.shape[-2] < self.ntokens:
+            pad_len = self.ntokens - target.shape[-2]
+            target = torch.cat((target, target[:, -1:].expand(-1, pad_len, -1)), dim=-2)
+            mask = torch.cat((mask, torch.zeros_like(mask[:, :pad_len])), dim=1)
+            attn_mask = torch.cat((attn_mask, torch.zeros_like(attn_mask[:, :pad_len])), dim=1)
+
         energy, cc, pdgids = target.split([1, 6, 1], dim=-1)
-        base = self.gen_base_wrapper((cc, mask, attn_mask))
         pdgids_idx = self.convert_pdgids(pdgids)
+
+        base = self.gen_base_wrapper((cc, mask, attn_mask))
         if return_base:
             return base.masked_fill(~attn_mask.unsqueeze(-1), torch.nan)
+
         init_state_tp = base.split(split_size, 0)
         mask_tp = mask.split(split_size, 0)
         attn_mask_tp = attn_mask.split(split_size, 0)
