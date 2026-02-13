@@ -104,7 +104,10 @@ class CornerHist:
                 axis.clear()
             if self.anim_intermediates:
                 return self.prep(batch, sols=sols[i])
-            return self.prep(batch[i])
+            prepped = self.prep(batch[i])
+            self.fig_sup.suptitle(r"$\mathrm{Density:\;}" + str(self.sols_density.item())[:4] +
+                                  r"\mathrm{,\;Deposited\;Energy\;Mean:\;}" + str(self.sols_e_dep.item())[:4] + r"$", fontsize=20)
+            return prepped
 
         anim = FuncAnimation(
             self.fig_sup,

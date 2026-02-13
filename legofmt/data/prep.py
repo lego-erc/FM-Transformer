@@ -1,25 +1,12 @@
 import torch
 from torch import Tensor
 
-import json
-
 from ..geometry.energy_proj import EnergyProjections
-from ..geometry.gen_base import GenerateBase
 from ..geometry.raytracing_proj import CubeTrace
 
 class DataPrep:
     def __init__(self, config):
         config = config.get("config", config)
-        dpath = config.get("dl_conf").get("path")
-        if dpath[-3:] != ".pt":
-            config["dl_conf"]["data_path"] = dpath + "/data.pt"
-            with open(dpath + "/meta.json") as f:
-                meta_dict = json.load(f)
-                ntokens = meta_dict["ntokens"]
-            if "ntokens" not in config.get("model_conf"):
-                config["model_conf"]["ntokens"] = ntokens
-        else:
-            self.pdgids_template = None
         model_conf = config.get("model_conf").copy()
         self.in_dim = model_conf.pop("in_dim")
         self.manifold = model_conf.pop("manifold")
@@ -28,8 +15,6 @@ class DataPrep:
         self.proj_en_out = model_conf.pop("proj_en_out", False)
         self.pen = EnergyProjections(self.proj_en)
         self.ppa = CubeTrace()
-
-        self.dl_conf = config.get("dl_conf").copy()
 
     def __call__(self, batch: tuple) -> Tensor:
         return self.prep(batch)
