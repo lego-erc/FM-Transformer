@@ -9,6 +9,7 @@ class GenerateBase:
         base_dist = config.get("base_dist", "iso")
         self.kappa = config.get("kappa", torch.tensor(10.0))
         self.base_range = config.get("base_range", 1.0)
+        self.e_dep_max = config.get("e_dep_max", 0.4)
         self.bs_frac = config.get("bs_frac", 0.0)
         self.scale_dist = config.get("scale_dist", "trunc_norm")
 
@@ -91,6 +92,6 @@ class GenerateBase:
 
     @torch.no_grad()
     def extend_add(self, base):
-        rd = 0.4 * torch.sigmoid(torch.randn_like(base[:, :1, :1]))
+        rd = self.e_dep_max * torch.sigmoid(torch.randn_like(base[:, :1, :1]))
         ext = rd * torch.tensor([1, 0, 0, 0, 0, 0], device=base.device).view(1, 1, -1)
         return torch.cat((ext, base), dim=1)
