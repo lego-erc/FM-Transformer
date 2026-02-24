@@ -114,6 +114,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         self.proj_en = model_conf.pop("proj_en", False)
         self.ot_coupling = model_conf.pop("ot_coupling", False)
         self.proj_en_out = model_conf.pop("proj_en_out", False)
+        self.loss_sc_fac = model_conf.pop("loss_sc", 0.0)
         self.pen = EnergyProjections(self.proj_en)
         self.model = ProjectModel(CFMTrafo_x(**model_conf), self.manifold)
         if state_dict is not None:
@@ -183,8 +184,14 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             types=self.types_embd,
             pdgids=pdgid_idx,
         )
+        if self.loss_sc_fac > 0:
+            pred_sc = (1 - ps_.t).unsqueeze(-1) * v_out + ps_.x_t
+            pred_sc_ft = (pred_sc * attn_mask.unsqueeze(-1))[..., :3]
+            target_sc = (target * attn_mask.unsqueeze(-1))[..., :3]
+            loss_sc = self.loss_fn(pred_sc_ft, target_sc)
         v_target = ps_.dx_t * attn_mask.unsqueeze(-1)
-        return self.loss_fn(v_out, v_target)
+        loss = self.loss_fn(v_out, v_target) + self.loss_sc_fac * loss_sc
+        return loss
 
     def training_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
         loss = self._step(batch, _batch_idx)
