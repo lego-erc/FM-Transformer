@@ -11,11 +11,11 @@ class DataPrep:
     def __init__(self, config):
         config = config.get("config", config)
         model_conf = config.get("model_conf").copy()
-        self.in_dim = model_conf.pop("in_dim")
-        self.manifold = eval(model_conf.pop("manifold"))
-        self.proj_ray = model_conf.pop("proj_ray", True)
-        self.proj_en = model_conf.pop("proj_en", False)
-        self.proj_en_out = model_conf.pop("proj_en_out", False)
+        self.in_dim = model_conf.get("model_args").get("in_dim")
+        self.manifold = eval(model_conf.get("manifold"))
+        self.proj_ray = model_conf.get("proj_ray", True)
+        self.proj_en = model_conf.get("proj_en", False)
+        self.proj_en_out = model_conf.get("proj_en_out", False)
         self.pen = EnergyProjections(self.proj_en)
         self.ppa = CubeTrace()
 
@@ -32,11 +32,11 @@ class DataPrep:
     @torch.no_grad()
     def cc_trafo(self, cc: Tensor) -> Tensor:
         cc = cc.nan_to_num(1)
-        cc = self.manifold.projx(cc)
         if self.proj_en:
             cc = self.pen(cc)
         if self.proj_ray:
             cc[:, 0] = self.ppa(cc[:, 0])
+        cc = self.manifold.projx(cc)
         return cc
     
     @torch.no_grad()
