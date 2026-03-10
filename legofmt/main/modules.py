@@ -108,15 +108,15 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         else:
             self.pdgids_template = None
         model_conf = config.get("model_conf").copy()
-        self.t_dist = model_conf.pop("t_dist", "uniform")
-        self.manifold = eval(model_conf.pop("manifold"))
-        self.proj_ray = model_conf.pop("proj_ray", True)
-        self.proj_en = model_conf.pop("proj_en", False)
-        self.ot_coupling = model_conf.pop("ot_coupling", False)
-        self.proj_en_out = model_conf.pop("proj_en_out", False)
-        self.loss_sc_fac = model_conf.pop("loss_sc", 0.0)
+        self.t_dist = model_conf.get("t_dist", "uniform")
+        self.manifold = eval(model_conf.get("manifold"))
+        self.proj_ray = model_conf.get("proj_ray", True)
+        self.proj_en = model_conf.get("proj_en", False)
+        self.ot_coupling = model_conf.get("ot_coupling", False)
+        self.proj_en_out = model_conf.get("proj_en_out", False)
+        self.loss_sc_fac = model_conf.get("loss_sc", 0.0)
         self.pen = EnergyProjections(self.proj_en)
-        self.model = ProjectModel(CFMTrafo_x(**model_conf), self.manifold)
+        self.model = ProjectModel(CFMTrafo_x(**model_conf.get("model_args")), self.manifold)
         if state_dict is not None:
             self.model.vf.load_state_dict(state_dict, strict=False)
 
@@ -153,7 +153,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
     def gen_base_wrapper(self, batch: tuple) -> Tensor:
         target, mask_, attn_mask_ = batch
         cc, mask, attn_mask = target[:, 2:], mask_[:, 2:], attn_mask_[:, 2:]
-        base = self.gen_base(cc * torch.ones_like(mask[0]), device=self.device)
+        base = self.gen_base(mask[:, 1:].shape[:-1], cc[:, :1])
         if self.ot_coupling and self.model.training:
             base = attn_mask.unsqueeze(-1) * base + ~attn_mask.unsqueeze(-1) * cc
             cost = attn_mask[:, 1:].unsqueeze(-1) * torch.cdist(cc[:, 1:], base[:, 1:])
@@ -223,11 +223,15 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         return self.opt
 
     def train_dataloader(self) -> DataLoader:
-        bs = self.dl_conf.pop("bs", 2**12)
-        num_workers = self.dl_conf.pop("num_workers", 32)
-        dataset_train = LEGODataset(**self.dl_conf)
+        num_workers = self.dl_conf.get("num_workers", 32)
+        dataset_train = LEGODataset(**self.dl_conf.get("lds_args"))
         return DataLoader(
-            dataset_train, batch_size=bs, shuffle=True, num_workers=num_workers
+            dataset_train,
+            batch_size=self.dl_conf.get("bs", 2**12),
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=num_workers > 0,
         )
 
     @torch.no_grad()
@@ -254,7 +258,11 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         if target.shape[-2] < self.ntokens:
             pad_len = self.ntokens - target.shape[-2]
             target = torch.cat((target, target[:, -1:].expand(-1, pad_len, -1)), dim=-2)
+        if mask.shape[1] < self.ntokens:
+            pad_len = self.ntokens - mask.shape[1]
             mask = torch.cat((mask, torch.zeros_like(mask[:, :pad_len])), dim=1)
+        if attn_mask.shape[1] < self.ntokens:
+            pad_len = self.ntokens - attn_mask.shape[1]
             attn_mask = torch.cat((attn_mask, torch.zeros_like(attn_mask[:, :pad_len])), dim=1)
 
         energy, cc, pdgids = target.split([1, 6, 1], dim=-1)
