@@ -30,8 +30,6 @@ class CFMTrafo_x(nn.Module):
         self.vbo = (self.ntokens, self.in_dim)
 
         self.vf = ContinuousTransformerWrapper(
-            dim_in=h_dim,
-            dim_out=h_dim,
             max_seq_len=ntokens,
             emb_dropout=dropout,
             use_abs_pos_emb=False,
@@ -39,13 +37,11 @@ class CFMTrafo_x(nn.Module):
                 dim=h_dim,
                 depth=nlayers,
                 heads=nhead,
-                rotary_pos_emb=False,
                 layer_dropout=dropout,
                 attn_dropout=dropout,
                 ff_dropout=dropout,
-                use_rmsnorm=True,
                 ff_mult=ff_mult,
-                attn_flash=True,
+                dim_condition=h_dim,
                 **kwargs,
             ),
         )
@@ -116,7 +112,8 @@ class CFMTrafo_x(nn.Module):
         l_embdd = torch.einsum("ijl, ijkl -> ijk", states_mask, l_embd[:, :, 0])
         embdd = l_embdd + b_embd + embd_t
 
-        trafo_out = self.vf(embdd, mask=attn_mask)
+        trafo_out = self.vf(embdd, mask=attn_mask, condition=embd_t)
+        
         l_out = torch.einsum("ijk, ijkl -> ijl", trafo_out, l_embd[:, :, 1])
         out = l_out + bo_embd
 

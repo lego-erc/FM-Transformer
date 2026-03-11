@@ -94,7 +94,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         super().__init__()
         state_dict = config.get("state_dict")
         config = config.get("config", config)
-        dpath = config.get("dl_conf").get("path")
+        dpath = config.get("dl_conf").get("lds_args").get("path")
         if dpath[-3:] != ".pt":
             config["dl_conf"]["data_path"] = dpath + "/data_prepped.pt"
             with open(dpath + "/meta.json") as f:
@@ -102,9 +102,9 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
                 self.ntokens = meta_dict["ntokens"]
                 ptensor = torch.tensor([0] + meta_dict["particles"])
                 self.register_buffer("pdgids_template", ptensor)
-                config["model_conf"]["npdgids"] = self.pdgids_template.shape[0]
-            if "ntokens" not in config.get("model_conf"):
-                config["model_conf"]["ntokens"] = self.ntokens
+                config["model_conf"]["model_args"]["npdgids"] = self.pdgids_template.shape[0]
+            if "ntokens" not in config["model_conf"]["model_args"]:
+                config["model_conf"]["model_args"]["ntokens"] = self.ntokens
         else:
             self.pdgids_template = None
         model_conf = config.get("model_conf").copy()
