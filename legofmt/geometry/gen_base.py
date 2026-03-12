@@ -89,5 +89,6 @@ class GenerateBase:
     @torch.no_grad()
     def extend_add(self, base):
         rd = self.e_dep_max * torch.sigmoid(torch.randn_like(base[:, :1, :1]))
-        ext = rd * torch.tensor([1, 0, 0, 0, 0, 0], device=base.device).view(1, 1, -1)
+        ext = torch.zeros_like(base[:, :1])
+        ext[..., 0] = rd.squeeze(-1)
         return torch.cat((ext, base), dim=1)

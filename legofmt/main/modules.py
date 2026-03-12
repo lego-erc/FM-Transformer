@@ -40,11 +40,11 @@ class ProjectModel(ModelWrapper, nn.Module):
         pdgids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         proj_mask = attn_mask * (types > (types.max() - 2))
-        x_2d = x.flatten(0, -2)
+        x_2d = x.flatten(0, -2).clone()
         pm_flat = proj_mask.flatten()
         x_projx = self.manifold.projx(x_2d[pm_flat])
         x_2d[pm_flat] = x_projx
-        x = x_2d.view_as(x).detach()
+        x = x_2d.view_as(x)
         t = torch.atleast_2d(t).expand_as(attn_mask)
         t_mask = mask.squeeze(-1) == 1
         t = t_mask * t + ~t_mask
@@ -100,22 +100,19 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             with open(dpath + "/meta.json") as f:
                 meta_dict = json.load(f)
                 self.ntokens = meta_dict["ntokens"]
-                ptensor = torch.tensor([0] + meta_dict["particles"])
-                self.register_buffer("pdgids_template", ptensor)
-                config["model_conf"]["model_args"]["npdgids"] = self.pdgids_template.shape[0]
+                ptensor = torch.tensor(meta_dict["particles"], dtype=torch.int64)
+                self.register_buffer("pdgids_template", ptensor.contiguous())
+                config["model_conf"]["model_args"]["npdgids"] = self.pdgids_template.shape[0] + 1
             if "ntokens" not in config["model_conf"]["model_args"]:
                 config["model_conf"]["model_args"]["ntokens"] = self.ntokens
         else:
             self.pdgids_template = None
-        model_conf = config.get("model_conf").copy()
+        model_conf = config.get("model_conf")
         self.t_dist = model_conf.get("t_dist", "uniform")
         self.manifold = eval(model_conf.get("manifold"))
-        self.proj_ray = model_conf.get("proj_ray", True)
-        self.proj_en = model_conf.get("proj_en", False)
         self.ot_coupling = model_conf.get("ot_coupling", False)
         self.proj_en_out = model_conf.get("proj_en_out", False)
         self.loss_sc_fac = model_conf.get("loss_sc", 0.0)
-        self.pen = EnergyProjections(self.proj_en)
         self.model = ProjectModel(CFMTrafo_x(**model_conf.get("model_args")), self.manifold)
         if state_dict is not None:
             self.model.vf.load_state_dict(state_dict, strict=False)
@@ -127,13 +124,14 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         opt = opt_conf.pop("opt")
         self.opt = opt(self.model.parameters(), **opt_conf)
 
-        self.dl_conf = config.get("dl_conf").copy()
+        self.dl_conf = config.get("dl_conf")
         self.register_buffer("types_embd",
             torch.arange(self.ntokens, dtype=torch.int64).clamp_max(3).view(1, -1)
         )
 
         self.odeint_conf = config.get("odeint_conf", {})
 
+    @torch.no_grad()
     def on_fit_start(self) -> None:
         self.loss_fn = nn.MSELoss()
         self.ps = ProductPathSampler(self.manifold)
@@ -142,12 +140,9 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
 
     @torch.no_grad()
     def convert_pdgids(self, pdgids: Tensor) -> Tensor:
-        data_particles = pdgids.nan_to_num(int(self.pdgids_template[0]))
-        bool_comp = data_particles.unsqueeze(-1) == self.pdgids_template.view(1, 1, -1)
-        idx_template = torch.arange(bool_comp.shape[-1], device=self.device).view(
-            1, 1, -1
-        )
-        return (bool_comp * idx_template).sum(dim=-1)
+        cond = torch.isnan(pdgids) | (pdgids == 0) | (pdgids >= 1e8)
+        pdgid_idx = torch.searchsorted(self.pdgids_template, pdgids.contiguous()) + 1
+        return pdgid_idx.masked_scatter(cond, torch.zeros_like(pdgid_idx))
 
     @torch.no_grad()
     def gen_base_wrapper(self, batch: tuple) -> Tensor:
@@ -189,28 +184,28 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             pred_sc_ft = (pred_sc * attn_mask.unsqueeze(-1))[..., :3]
             target_sc = (target * attn_mask.unsqueeze(-1))[..., :3]
             loss_sc = self.loss_fn(pred_sc_ft, target_sc)
+        else:
+            loss_sc = 0.0
         v_target = ps_.dx_t * attn_mask.unsqueeze(-1)
         loss = self.loss_fn(v_out, v_target) + self.loss_sc_fac * loss_sc
         return loss
 
     def training_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
         loss = self._step(batch, _batch_idx)
-        make_used_ = sum(
-            p.sum() * 0.0 for p in self.model.vf.vf.attn_layers.parameters()
-        )
         if loss.isnan():
             for name, p in self.model.named_parameters():
                 if p.isnan().any():
                     break
             raise ValueError(f"NaN loss encountered during training. \n {name}")
-        return loss + make_used_
+        return loss
 
+    @torch.no_grad()
     def validation_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
         loss = self._step(batch, _batch_idx)
         with torch.no_grad():
             self.log(
                 "Validation Loss",
-                loss.clone().item(),
+                loss.item(),
                 on_step=True,
                 on_epoch=True,
                 # batch_size=self._step_bs,
@@ -219,9 +214,11 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             )
         return loss
 
+    @torch.no_grad()
     def configure_optimizers(self) -> torch.optim.Optimizer:
         return self.opt
 
+    @torch.no_grad()
     def train_dataloader(self) -> DataLoader:
         num_workers = self.dl_conf.get("num_workers", 32)
         dataset_train = LEGODataset(**self.dl_conf.get("lds_args"))
@@ -277,6 +274,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         attn_mask_tp = attn_mask.split(split_size, 0)
         pdgids_idx_tp = pdgids_idx.split(split_size, 0)
 
+        sols_list = []
         for idx in range(len(init_state_tp)):
             solver = RiemannianODESolver(
                 velocity_model=self.model, manifold=self.manifold
@@ -302,11 +300,6 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
                 pdgid_mask = torch.isin(pdgids_idx_tp[idx], filter_pdgid_idx)
                 sols_ = sols_.masked_fill(~pdgid_mask, torch.nan)
 
-            try:
-                sols = torch.cat((sols, sols_), dim=-3)
-            except NameError:
-                sols = sols_
-            del sols_
-            torch.cuda.empty_cache()
+            sols_list.append(sols_)
 
-        return sols.contiguous()
+        return torch.cat(sols_list, dim=-3).contiguous()

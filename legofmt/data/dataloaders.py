@@ -107,8 +107,4 @@ class LEGODataset(Dataset):
         return self.length
 
     def __getitem__(self, idx: int | Tensor) -> tuple[Tensor]:
-        return (
-            self.target[idx].to(self.device),
-            self.mask[idx].to(self.device),
-            self.attn_mask[idx].to(self.device),
-        )
+        return self.target[idx], self.mask[idx], self.attn_mask[idx]

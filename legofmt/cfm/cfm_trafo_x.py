@@ -37,7 +37,6 @@ class CFMTrafo_x(nn.Module):
                 dim=h_dim,
                 depth=nlayers,
                 heads=nhead,
-                layer_dropout=dropout,
                 attn_dropout=dropout,
                 ff_dropout=dropout,
                 ff_mult=ff_mult,
@@ -78,6 +77,9 @@ class CFMTrafo_x(nn.Module):
         self.mask_freqs = nn.Parameter(
             torch.remainder(torch.arange(self.h_dim), 2), requires_grad=False
         )
+        self.mask_freqs_rolled = nn.Parameter(
+            torch.remainder(torch.arange(self.h_dim) + 1, 2), requires_grad=False
+        )
 
     def forward(
         self,
@@ -101,9 +103,7 @@ class CFMTrafo_x(nn.Module):
         bo_pdgids = self.bo_pdgids_.index_select(0, pdgids.view(-1)).view(-1, *self.vbo)
 
         t_freqs = torch.einsum("ij, k -> ijk", t, self.freqs)
-        embd_t = self.mask_freqs * t_freqs.sin() + (
-            self.mask_freqs * t_freqs.cos()
-        ).roll(1, dims=-1)
+        embd_t = self.mask_freqs * t_freqs.sin() + self.mask_freqs_rolled * t_freqs.cos()
 
         l_embd = 1/3 * (l_mask + l_types + l_pdgids)
         b_embd = 1/3 * (b_mask + b_types + b_pdgids)
@@ -117,4 +117,4 @@ class CFMTrafo_x(nn.Module):
         l_out = torch.einsum("ijk, ijkl -> ijl", trafo_out, l_embd[:, :, 1])
         out = l_out + bo_embd
 
-        return (mask == 1.0) * out
+        return (mask == 1) * out

@@ -90,11 +90,28 @@ class CornerHist:
         )
 
         if (
-            isinstance(batch[0], torch.Tensor)
+            isinstance(batch, tuple)
+            and isinstance(batch[0], torch.Tensor)
             and batch[0].ndim <= 3
             and not self.anim_intermediates
         ):
             return self.prep(batch)
+        
+        if (
+            isinstance(batch, torch.Tensor)
+            and not self.anim_intermediates
+        ):
+            sols = batch
+            sols = sols[:, 3:]
+            if self.proj_en_out is not False:
+                sols = self.en_norm_out(sols)
+            return self.arrange_plots_(
+                self.fig_sup,
+                self.fig,
+                sols.contiguous().view(-1, 6),
+                incoming=(batch[:, 2:3] if self.cube else None),
+                data_add=(batch[:, 1, 0],),
+            )
 
         if self.anim_intermediates:
             sols = self.model(batch)

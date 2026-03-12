@@ -49,10 +49,8 @@ class VMF:
         if bs_frac > 0.0:
             loc_theta[: round(bs_frac * n[0])] = loc_theta[0] + torch.pi
         samples_theta = (
-            torch.distributions.VonMises(torch.tensor(0.0, device=loc_cc.device), kappa)
-            .sample(n)
-            .abs()
-        )
+            2 / kappa * torch.randn(n, device=loc_cc.device) + torch.pi
+        ) % (2 * torch.pi) - torch.pi
         samples_phi = 2 * torch.pi * torch.rand_like(samples_theta)
         samples = torch.stack((samples_theta, samples_phi), dim=-1)
         cc = self.to_cc(samples)

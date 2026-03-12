@@ -15,21 +15,23 @@ class GenerateOut(torch.nn.Module):
         mult_conf = torch.load(mult_conf_path, map_location=device, weights_only=False)
         self.gen_mult = MultModel(mult_conf).to(device)
 
-        self.ntokens = flow_conf["config"]["model_conf"]["ntokens"]
+        self.pdgid_in = mult_conf["config"]["mm_conf"]["ptypes_in"]
+
+        self.ntokens = flow_conf["config"]["model_conf"]["model_args"]["ntokens"]
 
     def __call__(self, cond: torch.Tensor):
-        masks = self.gen_mult_masks(cond[:, -1:])
-        batch = (cond.clone(), *masks)
+        cond = cond.clone()
+        masks = self.gen_mult_masks(cond)
+        cond_fm = cond[:, None, :]
+        cond_fm = torch.cat((torch.zeros_like(cond_fm).expand(-1, 2, -1), cond_fm), dim=1)
+        cond_fm[:, 0, 1] = cond[:, 0]
+        batch = (cond_fm, *masks)
         return self.model(batch)
 
     def gen_mult_masks(self, cond: torch.Tensor):
-        if cond.ndim == 3 and cond.shape[1] == 2:
-            density, cc = cond.split(1, 1)
-        else:
-            cc = cond
-        pdgid_in = cond[:, 0, -1].long()
-        pdgid_in_idx = (pdgid_in == pdgid_in.unique().view(-1, 1)).nonzero()[:, 0]
-        mult = self.gen_mult((cc[:, 0, 1:-1], None, pdgid_in_idx))
+        pdgid_in = cond[:, -1].long()
+        pdgid_in_idx = torch.searchsorted(self.pdgid_in, pdgid_in)
+        mult = self.gen_mult((cond[:, 0:-1], None, pdgid_in_idx))
         attn_mask = ~(
             torch.nn.functional.one_hot(mult.sum(-1).clamp(max=self.ntokens-4), num_classes=self.ntokens-3)
             .cumsum(-1)
