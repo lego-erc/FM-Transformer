@@ -27,12 +27,8 @@ class GenerateBase:
             self.exp_dist = torch.distributions.Exponential(8)
             self.func = self.poles
 
-    def __call__(self, *args, **kwargs):
-        if isinstance(args[0], torch.Tensor):
-            cc = args[0]
-            args = (cc[:, 1:].shape[:-1],)
-            kwargs["incoming_rt"] = cc[:, 0:1]
-        return self.func(*args, **kwargs)
+    def __call__(self, shape, incoming_rt):
+        return self.func(shape, incoming_rt=incoming_rt)
 
     @torch.no_grad()
     def iso(self, shape, incoming_rt=None, **kwargs):
@@ -93,5 +89,6 @@ class GenerateBase:
     @torch.no_grad()
     def extend_add(self, base):
         rd = self.e_dep_max * torch.sigmoid(torch.randn_like(base[:, :1, :1]))
-        ext = rd * torch.tensor([1, 0, 0, 0, 0, 0], device=base.device).view(1, 1, -1)
+        ext = torch.zeros_like(base[:, :1])
+        ext[..., 0] = rd.squeeze(-1)
         return torch.cat((ext, base), dim=1)

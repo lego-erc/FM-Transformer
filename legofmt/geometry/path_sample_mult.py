@@ -39,22 +39,9 @@ class ProductManifold(Manifold):
 
 class ProductPath:
     def __init__(self, paths, view_as_: tuple):
-        self.paths = paths
-        self.view_as_ = view_as_
-
-    @property
-    def dx_t(self):
-        return torch.cat([path.dx_t for path in self.paths], dim=-1).view(
-            *self.view_as_
-        )
-
-    @property
-    def t(self):
-        return self.paths[0].t.view(*self.view_as_[:-1])
-
-    @property
-    def x_t(self):
-        return torch.cat([path.x_t for path in self.paths], dim=-1).view(*self.view_as_)
+        self.x_t = torch.cat([p.x_t for p in paths], dim=-1).view(*view_as_)
+        self.dx_t = torch.cat([p.dx_t for p in paths], dim=-1).view(*view_as_)
+        self.t = paths[0].t.view(*view_as_[:-1])
 
 
 class ProductPathSampler:

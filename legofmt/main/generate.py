@@ -1,43 +1,43 @@
 import torch
 
-from .modules import LEGOLtng
+from ..main.modules import LEGOLtng
 from ..geometry.energy_proj import EnergyProjections
-from ..multiplicity.gen_mult import GenMult
+from ..multiplicity.model import MultModel
 
 
 class GenerateOut(torch.nn.Module):
-    def __init__(self, flow_ckpt_path, mult_ckpt_path=None, device="cpu"):
+    def __init__(self, flow_conf_path: str, mult_conf_path: str, device="cpu"):
         super().__init__()
-        if isinstance(mult_ckpt_path, str):
-            dict_flow = torch.load(flow_ckpt_path, map_location=device, weights_only=False)
-        elif isinstance(mult_ckpt_path, dict):
-            dict_flow = flow_ckpt_path
-        self.model = LEGOLtng(dict_flow).to(device)
+        flow_conf = torch.load(flow_conf_path, map_location=device, weights_only=False)
+        self.model = LEGOLtng(flow_conf).to(device)
         self.en_proj = EnergyProjections()
 
-        dict_mult = torch.load(mult_ckpt_path, map_location=device, weights_only=False)
-        config_mult = dict_mult["config"]
-        self.gen_mult = GenMult(**config_mult["model_conf"]).to(device)
-        self.gen_mult.load_state_dict(dict_mult["state_dict"])
+        mult_conf = torch.load(mult_conf_path, map_location=device, weights_only=False)
+        self.gen_mult = MultModel(mult_conf).to(device)
 
-        self.max_particles = config_mult["model_conf"]["max_particles"]
+        self.pdgid_in = mult_conf["config"]["mm_conf"]["ptypes_in"]
 
-    def __call__(self, incoming_cc, data_add=None):
-        masks = self.gen_mult_masks(incoming_cc)
-        if data_add is not None:
-            batch = (incoming_cc.view(-1, 1, 6).clone(), *masks, data_add)
-        else:
-            batch = (incoming_cc.view(-1, 1, 6).clone(), *masks)
-        sols = self.model(batch)
-        return self.en_proj.exp_mult(incoming_cc.view(-1, 1, 6), sols)
+        self.ntokens = flow_conf["config"]["model_conf"]["model_args"]["ntokens"]
 
-    def gen_mult_masks(self, cc):
-        mult = self.gen_mult(cc.view(-1, 6))
+    def __call__(self, cond: torch.Tensor):
+        cond = cond.clone()
+        masks = self.gen_mult_masks(cond)
+        cond_fm = cond[:, None, :]
+        cond_fm = torch.cat((torch.zeros_like(cond_fm).expand(-1, 2, -1), cond_fm), dim=1)
+        cond_fm[:, 0, 1] = cond[:, 0]
+        batch = (cond_fm, *masks)
+        return self.model(batch)
+
+    def gen_mult_masks(self, cond: torch.Tensor):
+        pdgid_in = cond[:, -1].long()
+        pdgid_in_idx = torch.searchsorted(self.pdgid_in, pdgid_in)
+        mult = self.gen_mult((cond[:, 0:-1], None, pdgid_in_idx))
         attn_mask = ~(
-            torch.nn.functional.one_hot(mult, num_classes=self.max_particles)
+            torch.nn.functional.one_hot(mult.sum(-1).clamp(max=self.ntokens-4), num_classes=self.ntokens-3)
             .cumsum(-1)
             .bool()
         )
+        attn_mask = torch.cat((torch.ones_like(attn_mask[:, :3]), attn_mask), dim=1)
         mask = attn_mask.clone().long().unsqueeze(2)
-        mask[:, 0] = 0
+        mask[:, [0, 2]] = 0
         return mask, attn_mask

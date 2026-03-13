@@ -30,8 +30,6 @@ class CFMTrafo_x(nn.Module):
         self.vbo = (self.ntokens, self.in_dim)
 
         self.vf = ContinuousTransformerWrapper(
-            dim_in=h_dim,
-            dim_out=h_dim,
             max_seq_len=ntokens,
             emb_dropout=dropout,
             use_abs_pos_emb=False,
@@ -39,13 +37,10 @@ class CFMTrafo_x(nn.Module):
                 dim=h_dim,
                 depth=nlayers,
                 heads=nhead,
-                rotary_pos_emb=False,
-                layer_dropout=dropout,
                 attn_dropout=dropout,
                 ff_dropout=dropout,
-                use_rmsnorm=True,
                 ff_mult=ff_mult,
-                attn_flash=True,
+                dim_condition=h_dim,
                 **kwargs,
             ),
         )
@@ -82,6 +77,9 @@ class CFMTrafo_x(nn.Module):
         self.mask_freqs = nn.Parameter(
             torch.remainder(torch.arange(self.h_dim), 2), requires_grad=False
         )
+        self.mask_freqs_rolled = nn.Parameter(
+            torch.remainder(torch.arange(self.h_dim) + 1, 2), requires_grad=False
+        )
 
     def forward(
         self,
@@ -105,9 +103,7 @@ class CFMTrafo_x(nn.Module):
         bo_pdgids = self.bo_pdgids_.index_select(0, pdgids.view(-1)).view(-1, *self.vbo)
 
         t_freqs = torch.einsum("ij, k -> ijk", t, self.freqs)
-        embd_t = self.mask_freqs * t_freqs.sin() + (
-            self.mask_freqs * t_freqs.cos()
-        ).roll(1, dims=-1)
+        embd_t = self.mask_freqs * t_freqs.sin() + self.mask_freqs_rolled * t_freqs.cos()
 
         l_embd = 1/3 * (l_mask + l_types + l_pdgids)
         b_embd = 1/3 * (b_mask + b_types + b_pdgids)
@@ -116,8 +112,9 @@ class CFMTrafo_x(nn.Module):
         l_embdd = torch.einsum("ijl, ijkl -> ijk", states_mask, l_embd[:, :, 0])
         embdd = l_embdd + b_embd + embd_t
 
-        trafo_out = self.vf(embdd, mask=attn_mask)
+        trafo_out = self.vf(embdd, mask=attn_mask, condition=embd_t)
+        
         l_out = torch.einsum("ijk, ijkl -> ijl", trafo_out, l_embd[:, :, 1])
         out = l_out + bo_embd
 
-        return (mask == 1.0) * out
+        return (mask == 1) * out
