@@ -1,7 +1,6 @@
 import torch
 
 from ..main.modules import LEGOLtng
-from ..geometry.energy_proj import EnergyProjections
 from ..multiplicity.model import MultModel
 
 
@@ -10,7 +9,6 @@ class GenerateOut(torch.nn.Module):
         super().__init__()
         flow_conf = torch.load(flow_conf_path, map_location=device, weights_only=False)
         self.model = LEGOLtng(flow_conf).to(device)
-        self.en_proj = EnergyProjections()
 
         mult_conf = torch.load(mult_conf_path, map_location=device, weights_only=False)
         self.gen_mult = MultModel(mult_conf).to(device)
@@ -32,11 +30,10 @@ class GenerateOut(torch.nn.Module):
         pdgid_in = cond[:, -1].long()
         pdgid_in_idx = torch.searchsorted(self.pdgid_in, pdgid_in)
         mult = self.gen_mult((cond[:, 0:-1], None, pdgid_in_idx))
-        attn_mask = ~(
-            torch.nn.functional.one_hot(mult.sum(-1).clamp(max=self.ntokens-4), num_classes=self.ntokens-3)
-            .cumsum(-1)
-            .bool()
-        )
+        
+        idx = torch.arange(self.ntokens - 3, device=mult.device)
+        attn_mask = idx < mult.sum(-1, keepdim=True)
+        
         attn_mask = torch.cat((torch.ones_like(attn_mask[:, :3]), attn_mask), dim=1)
         mask = attn_mask.clone().long().unsqueeze(2)
         mask[:, [0, 2]] = 0
