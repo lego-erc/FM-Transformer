@@ -57,7 +57,7 @@ class ProductPathSampler:
     def sample(self, bases, data, t):
         bases_ = bases.split(self.ambient_dims, dim=-1)
         data_ = data.split(self.ambient_dims, dim=-1)
-        t = t.repeat(bases.shape[1:-1].numel())
+        t = t.repeat_interleave(bases.shape[1:-1].numel())
         paths = [
             path.sample(bases_[i].flatten(0, -2), data_[i].flatten(0, -2), t)
             for i, path in enumerate(self.paths)
