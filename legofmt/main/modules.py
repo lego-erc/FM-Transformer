@@ -40,11 +40,11 @@ class ProjectModel(ModelWrapper, nn.Module):
         pdgids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         proj_mask = attn_mask * (types > (types.max() - 2))
-        x_2d = x.flatten(0, -2).clone()
+        x_2d = x.flatten(0, -2)
         pm_flat = proj_mask.flatten()
         x_projx = self.manifold.projx(x_2d[pm_flat])
         x_2d[pm_flat] = x_projx
-        x = x_2d.view_as(x)
+        x = x_2d.view_as(x).detach()
         t = torch.atleast_2d(t).expand_as(attn_mask)
         t_mask = mask.squeeze(-1) == 1
         t = t_mask * t + ~t_mask

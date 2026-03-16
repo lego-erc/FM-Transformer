@@ -48,9 +48,9 @@ class VMF:
         loc_theta, loc_phi = self.to_sph(loc_cc).expand((*n, -1)).clone().split(1, -1)
         if bs_frac > 0.0:
             loc_theta[: round(bs_frac * n[0])] = loc_theta[0] + torch.pi
-        samples_theta = (
+        samples_theta = ((
             2 / kappa * torch.randn(n, device=loc_cc.device) + torch.pi
-        ) % (2 * torch.pi) - torch.pi
+        ) % (2 * torch.pi) - torch.pi).abs()
         samples_phi = 2 * torch.pi * torch.rand_like(samples_theta)
         samples = torch.stack((samples_theta, samples_phi), dim=-1)
         cc = self.to_cc(samples)
