@@ -49,14 +49,19 @@ class GenerateBase:
         if self.scale_dist == "trunc_norm":
             return self.base_range * (
                 torch.nn.init.trunc_normal_(
-                    torch.empty((*shape, 1), device=device), std=1.0 / self.base_range, a=-1.0, b=0.0
+                    torch.empty((*shape, 1), device=device),
+                    std=1.0 / self.base_range,
+                    a=-1.0,
+                    b=0.0,
                 )
                 + 1.0
             )
         if self.scale_dist == "uniform":
             return self.base_range * torch.rand((*shape, 1), device=device)
         if self.scale_dist == "sm_norm":
-            return self.base_range * (torch.sigmoid(torch.randn((*shape, 1), device=device)))
+            return self.base_range * (
+                -(2 * torch.sigmoid(torch.randn((*shape, 1), device=device)) - 1.0).abs() + 1
+            )
         if self.scale_dist == "exp":
             safety = 1e-1
             return (
