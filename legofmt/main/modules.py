@@ -94,30 +94,33 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         super().__init__()
         state_dict = config.get("state_dict")
         config = config.get("config", config)
+        model_conf = config.get("model_conf")
         dpath = config.get("dl_conf").get("lds_args").get("path")
-        if dpath[-3:] != ".pt":
+        if dpath[-3:] != ".pt" and state_dict is None:
             config["dl_conf"]["data_path"] = dpath + "/data_prepped.pt"
             with open(dpath + "/meta.json") as f:
                 meta_dict = json.load(f)
                 self.ntokens = meta_dict["ntokens"]
                 ptensor = torch.tensor(meta_dict["particles"], dtype=torch.int64)
                 self.register_buffer("pdgids_template", ptensor.contiguous())
-                config["model_conf"]["model_args"]["npdgids"] = self.pdgids_template.shape[0] + 1
-            if "ntokens" not in config["model_conf"]["model_args"]:
-                config["model_conf"]["model_args"]["ntokens"] = self.ntokens
-        else:
-            self.pdgids_template = None
-        model_conf = config.get("model_conf")
+                model_conf["model_args"]["npdgids"] = self.pdgids_template.shape[0] + 1
+            if "ntokens" not in model_conf["model_args"]:
+                model_conf["model_args"]["ntokens"] = self.ntokens
+            if "pdgids" not in model_conf["model_args"]:
+                model_conf["pdgids"] = ptensor
+        elif state_dict is not None:
+            self.ntokens = model_conf["model_args"]["ntokens"]
+            self.register_buffer("pdgids_template", model_conf["pdgids"])
         self.t_dist = model_conf.get("t_dist", "uniform")
         self.manifold = eval(model_conf.get("manifold"))
         self.ot_coupling = model_conf.get("ot_coupling", False)
         self.proj_en_out = model_conf.get("proj_en_out", False)
         self.loss_sc_fac = model_conf.get("loss_sc", 0.0)
-        self.model = ProjectModel(CFMTrafo_x(**model_conf.get("model_args")), self.manifold)
-        if state_dict is not None:
-            self.model.vf.load_state_dict(state_dict, strict=False)
+        self.model = ProjectModel(
+            CFMTrafo_x(**model_conf.get("model_args")), self.manifold
+        )
 
-        self.gen_base = GenerateBase(config.get("base_conf").copy())
+        self.gen_base = GenerateBase(config.copy())
         self.ppa = CubeTrace()
 
         opt_conf = config.get("opt_conf").copy()
@@ -125,11 +128,15 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         self.opt = opt(self.model.parameters(), **opt_conf)
 
         self.dl_conf = config.get("dl_conf")
-        self.register_buffer("types_embd",
-            torch.arange(self.ntokens, dtype=torch.int64).clamp_max(3).view(1, -1)
+        self.register_buffer(
+            "types_embd",
+            torch.arange(self.ntokens, dtype=torch.int64).clamp_max(3).view(1, -1),
         )
 
         self.odeint_conf = config.get("odeint_conf", {})
+
+        if state_dict is not None:
+            self.model.vf.load_state_dict(state_dict, strict=False)
 
     @torch.no_grad()
     def on_fit_start(self) -> None:
@@ -156,8 +163,8 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             base[:, 1:] = base[:, 1:].gather(
                 1, assign.unsqueeze(-1).expand_as(base[:, 1:])
             )
-        base = self.gen_base.extend_add(base) # E_dep
-        base = torch.cat((target[:, :1], base), dim=1) # Density
+        base = self.gen_base.extend_add(base)  # E_dep
+        base = torch.cat((target[:, :1], base), dim=1)  # Density
         return base
 
     def _step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
@@ -257,10 +264,15 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             target = torch.cat((target, target[:, -1:].expand(-1, pad_len, -1)), dim=-2)
         if mask.shape[1] < self.ntokens:
             pad_len = self.ntokens - mask.shape[1]
-            mask = torch.cat((mask, torch.zeros_like(mask[:,  -1:]).expand(-1, pad_len, -1)), dim=1)
+            mask = torch.cat(
+                (mask, torch.zeros_like(mask[:, -1:]).expand(-1, pad_len, -1)), dim=1
+            )
         if attn_mask.shape[1] < self.ntokens:
             pad_len = self.ntokens - attn_mask.shape[1]
-            attn_mask = torch.cat((attn_mask, torch.zeros_like(attn_mask[:, -1:]).expand(-1, pad_len)), dim=1)
+            attn_mask = torch.cat(
+                (attn_mask, torch.zeros_like(attn_mask[:, -1:]).expand(-1, pad_len)),
+                dim=1,
+            )
 
         energy, cc, pdgids = target.split([1, 6, 1], dim=-1)
         pdgids_idx = self.convert_pdgids(pdgids)
@@ -275,9 +287,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         pdgids_idx_tp = pdgids_idx.split(split_size, 0)
 
         sols_list = []
-        solver = RiemannianODESolver(
-            velocity_model=self.model, manifold=self.manifold
-        )
+        solver = RiemannianODESolver(velocity_model=self.model, manifold=self.manifold)
         for idx in range(len(init_state_tp)):
             sols_ = solver.sample(
                 x_init=init_state_tp[idx],

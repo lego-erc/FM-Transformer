@@ -18,12 +18,14 @@ class MultLoader(torch.utils.data.Dataset):
     def __init__(self, config: dict, device: str = "cpu", path: str = None):
         self.device = device
         mm_conf = config.get("mm_conf")
-        path = mm_conf.get("path") + "/data_prepped.pt" if path is None else path
+        lds_conf = config.get("dl_conf").get("lds_args").copy()
+        if path is not None:
+            lds_conf["path"] = path
         max_particles = mm_conf.get("max_out_particles")
         use_density = mm_conf.get("use_density", True)
         ptypes = mm_conf.get("ptypes", torch.tensor([11, 22]))
         ptypes_in = mm_conf.get("ptypes_in", torch.tensor([11, 22]))
-        dataset = LEGODataset(**config.get("dl_conf").get("lds_args"))
+        dataset = LEGODataset(**lds_conf)
         density = dataset.target[:, 0, 1:2]
         energy, cc, pdgid = dataset.target[:, 2:].split((1, 6, 1), dim=-1)
         pdgid_in = pdgid[:, 0].squeeze().contiguous()
