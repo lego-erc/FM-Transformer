@@ -15,7 +15,7 @@ class CubeTrace:
     def get_time(self, p, x):
         p_sign = p.sgn()
         p_sign -= p_sign.eq(0).int()
-        x_abs_max = x[0].abs().max()
+        x_abs_max = x.abs().max(dim=-1, keepdim=True).values
         p_ = p_sign * p.abs().clamp(min=1e-8)
         t_surface = (x_abs_max * p_sign - x) / p_
         return t_surface.min(-1, keepdim=True).values

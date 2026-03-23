@@ -40,11 +40,11 @@ class ProjectModel(ModelWrapper, nn.Module):
         pdgids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         proj_mask = attn_mask * (types > (types.max() - 2))
-        x_2d = x.flatten(0, -2).clone()
+        x_2d = x.flatten(0, -2)
         pm_flat = proj_mask.flatten()
         x_projx = self.manifold.projx(x_2d[pm_flat])
         x_2d[pm_flat] = x_projx
-        x = x_2d.view_as(x)
+        x = x_2d.view_as(x).detach()
         t = torch.atleast_2d(t).expand_as(attn_mask)
         t_mask = mask.squeeze(-1) == 1
         t = t_mask * t + ~t_mask
@@ -142,7 +142,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
     def convert_pdgids(self, pdgids: Tensor) -> Tensor:
         cond = torch.isnan(pdgids) | (pdgids == 0) | (pdgids >= 1e8)
         pdgid_idx = torch.searchsorted(self.pdgids_template, pdgids.contiguous()) + 1
-        return pdgid_idx.masked_scatter(cond, torch.zeros_like(pdgid_idx))
+        return pdgid_idx.masked_fill_(cond, 0)
 
     @torch.no_grad()
     def gen_base_wrapper(self, batch: tuple) -> Tensor:
@@ -257,10 +257,10 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             target = torch.cat((target, target[:, -1:].expand(-1, pad_len, -1)), dim=-2)
         if mask.shape[1] < self.ntokens:
             pad_len = self.ntokens - mask.shape[1]
-            mask = torch.cat((mask, torch.zeros_like(mask[:, :pad_len])), dim=1)
+            mask = torch.cat((mask, torch.zeros_like(mask[:,  -1:]).expand(-1, pad_len, -1)), dim=1)
         if attn_mask.shape[1] < self.ntokens:
             pad_len = self.ntokens - attn_mask.shape[1]
-            attn_mask = torch.cat((attn_mask, torch.zeros_like(attn_mask[:, :pad_len])), dim=1)
+            attn_mask = torch.cat((attn_mask, torch.zeros_like(attn_mask[:, -1:]).expand(-1, pad_len)), dim=1)
 
         energy, cc, pdgids = target.split([1, 6, 1], dim=-1)
         pdgids_idx = self.convert_pdgids(pdgids)
@@ -275,10 +275,10 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         pdgids_idx_tp = pdgids_idx.split(split_size, 0)
 
         sols_list = []
+        solver = RiemannianODESolver(
+            velocity_model=self.model, manifold=self.manifold
+        )
         for idx in range(len(init_state_tp)):
-            solver = RiemannianODESolver(
-                velocity_model=self.model, manifold=self.manifold
-            )
             sols_ = solver.sample(
                 x_init=init_state_tp[idx],
                 step_size=step_size,
@@ -292,7 +292,6 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
                 types=self.types_embd,
                 pdgids=pdgids_idx_tp[idx],
             )
-            del solver
             sols_ = sols_.masked_fill(~attn_mask_tp[idx].unsqueeze(-1), torch.nan)
 
             if filter_pdgid is not None:

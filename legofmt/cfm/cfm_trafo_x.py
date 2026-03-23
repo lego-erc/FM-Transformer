@@ -30,6 +30,8 @@ class CFMTrafo_x(nn.Module):
         self.vbo = (self.ntokens, self.in_dim)
 
         self.vf = ContinuousTransformerWrapper(
+            dim_in=h_dim,
+            dim_out=h_dim,
             max_seq_len=ntokens,
             emb_dropout=dropout,
             use_abs_pos_emb=False,

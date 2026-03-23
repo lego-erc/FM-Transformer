@@ -119,6 +119,7 @@ class MultModel(LightningModule, torch.nn.Module):
         )
 
     def proj_in(self, x):
+        x = x.clone()
         x[..., -6:] = self.vmf.to_cube(x[..., -6:])
         x[..., -3:] = 50 * x[..., -3:]
         return self.proj_in_(x)
