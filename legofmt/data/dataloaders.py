@@ -91,10 +91,11 @@ class GetLEGOData:
 
 
 class LEGODataset(Dataset):
-    def __init__(self, path: str, **kwargs) -> None:
+    def __init__(self, data: (str | dict), **kwargs) -> None:
         super().__init__()
-        path = path + "/data_prepped.pt" if path[-3:] != ".pt" else path
-        data = torch.load(path, map_location="cpu", weights_only=False)
+        if isinstance(data, str):
+            path = data + "/data_prepped.pt" if data[-3:] != ".pt" else data
+            data = torch.load(path, map_location="cpu", weights_only=False)
         try:
             self.target, self.mask, self.attn_mask = data
         except ValueError:

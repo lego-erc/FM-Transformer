@@ -26,7 +26,7 @@ class EnergyProjections:
     def in_frac(self, p_x: Tensor) -> Tensor:
         p, x = p_x.split(3, -1)
         in_norm = p[:, 0:1].norm(dim=-1, keepdim=True)
-        p_normed = torch.cat((p[:, 0:1], p[:, 1:] / in_norm), dim=1)
+        p_normed = torch.cat((p[:, :1], p[:, 1:] / in_norm), dim=1)
         return torch.cat((p_normed, x), -1)
 
     def in_mult(self, in_cc: Tensor, out_cc_frac: Tensor) -> Tensor:
@@ -38,13 +38,10 @@ class EnergyProjections:
     def log(self, p_x: Tensor) -> Tensor:
         p, x = p_x.split(3, -1)
         p_norm = p.norm(dim=-1, keepdim=True)
-        norm_fac = p_norm.log() / p_norm
-        return torch.cat((p * norm_fac.abs(), x), -1)
+        norm_fac = (1 - p_norm.log()) / p_norm
+        return torch.cat((p * norm_fac, x), -1)
 
     def exp(self, p_x: Tensor) -> Tensor:
         p, x = p_x.split(3, -1)
         p_norm = p.norm(dim=-1, keepdim=True).nan_to_num(0)
         return torch.cat((p / p_norm * (-p_norm.abs()).exp(), x), -1)
-
-    def factor(self, p_x: Tensor) -> Tensor:
-        return p_x / torch.log(torch.tensor([10 / 300], device=p_x.device)).abs()

@@ -58,7 +58,7 @@ class GenerateBase:
         if self.scale_dist == "sm_norm":
             return base_range * (
                 -(2 * torch.sigmoid(torch.randn((*shape, 1), device=p_norm.device)) - 1.0).abs() + 1
-            )
+            ) + 1
 
     @torch.no_grad()
     def iso_3dmom(self, shape, **kwargs):
