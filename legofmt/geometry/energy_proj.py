@@ -38,13 +38,10 @@ class EnergyProjections:
     def log(self, p_x: Tensor) -> Tensor:
         p, x = p_x.split(3, -1)
         p_norm = p.norm(dim=-1, keepdim=True)
-        norm_fac = p_norm.log() / p_norm
-        return torch.cat((p * norm_fac.abs(), x), -1)
+        norm_fac = (- p_norm.log() + 1) / p_norm
+        return torch.cat((p * norm_fac, x), -1)
 
     def exp(self, p_x: Tensor) -> Tensor:
         p, x = p_x.split(3, -1)
         p_norm = p.norm(dim=-1, keepdim=True).nan_to_num(0)
         return torch.cat((p / p_norm * (-p_norm.abs()).exp(), x), -1)
-
-    def factor(self, p_x: Tensor) -> Tensor:
-        return p_x / torch.log(torch.tensor([10 / 300], device=p_x.device)).abs()
