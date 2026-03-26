@@ -36,7 +36,7 @@ class DataPrep:
             cc = self.pen(cc)
         if self.proj_ray:
             cc[:, 0] = self.ppa(cc[:, 0])
-        cc = self.manifold.projx(cc)
+        cc[:, 1:] = self.manifold.projx(cc[:, 1:])
         return cc
     
     @torch.no_grad()

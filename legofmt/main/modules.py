@@ -10,7 +10,6 @@ from torch.utils.data import DataLoader
 from torch_lap_cuda_lib import solve_lap as slap
 
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
-from legofmt.geometry.energy_proj import EnergyProjections
 from legofmt.geometry.gen_base import GenerateBase
 from legofmt.geometry.path_sample_mult import ProductPathSampler, ProductManifold
 from legofmt.geometry.raytracing_proj import CubeTrace
@@ -39,7 +38,7 @@ class ProjectModel(ModelWrapper, nn.Module):
         types: torch.Tensor,
         pdgids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        proj_mask = attn_mask * (types > (types.max() - 2))
+        proj_mask = attn_mask * (types > (types.max() - 1)) # change to "- 1" if no condition projection
         x_2d = x.flatten(0, -2)
         pm_flat = proj_mask.flatten()
         x_projx = self.manifold.projx(x_2d[pm_flat])
@@ -155,7 +154,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
     def gen_base_wrapper(self, batch: tuple) -> Tensor:
         target, mask_, attn_mask_ = batch
         cc, mask, attn_mask = target[:, 2:], mask_[:, 2:], attn_mask_[:, 2:]
-        base = self.gen_base(mask[:, 1:].shape[:-1], cc[:, :1])
+        base = self.gen_base(mask[:, 1:].shape[:-1], self.manifold.projx(cc[:, :1]))
         if self.ot_coupling and self.model.training:
             base = attn_mask.unsqueeze(-1) * base + ~attn_mask.unsqueeze(-1) * cc
             cost = attn_mask[:, 1:].unsqueeze(-1) * torch.cdist(cc[:, 1:], base[:, 1:])
@@ -171,6 +170,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         with torch.no_grad():
             target, mask, attn_mask = batch
             energy, cc, pdgids = target.split([1, 6, 1], dim=-1)
+            cc[:, 2, 3:] /= 50.
             base = self.gen_base_wrapper((cc, mask, attn_mask))
             pdgid_idx = self.convert_pdgids(pdgids)
             if self.t_dist == "sm_norm":
@@ -178,8 +178,10 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             elif self.t_dist == "uniform":
                 t = torch.rand_like(base[:, 0, 0])
             ps_ = self.ps.sample(base, cc, t)
+            position = ps_.x_t
+            position[:, 2] = cc[:, 2]
         v_out = self.model(
-            ps_.x_t,
+            position,
             ps_.t,
             mask=mask,
             attn_mask=attn_mask,
@@ -277,6 +279,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         energy, cc, pdgids = target.split([1, 6, 1], dim=-1)
         pdgids_idx = self.convert_pdgids(pdgids)
 
+        cc[:, 2, 3:] /= 50.
         base = self.gen_base_wrapper((cc, mask, attn_mask))
         if return_base:
             return base.masked_fill(~attn_mask.unsqueeze(-1), torch.nan)
