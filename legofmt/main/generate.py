@@ -13,6 +13,7 @@ class GenerateOut(torch.nn.Module):
         super().__init__()
         flow_conf = torch.load(flow_conf_path, map_location=device, weights_only=False)
         self.model = LEGOLtng(flow_conf).to(device)
+        self.model.pdgid_is_idx = True
 
         mult_conf = torch.load(mult_conf_path, map_location=device, weights_only=False)
         self.gen_mult = MultModel(mult_conf).to(device)
@@ -20,25 +21,20 @@ class GenerateOut(torch.nn.Module):
         self.pdgid_in = mult_conf["config"]["mm_conf"]["ptypes_in"]
 
         self.ntokens = flow_conf["config"]["model_conf"]["model_args"]["ntokens"]
-        self.proj_en = flow_conf["config"]["model_conf"]["proj_en"]
-        self.pen = EnergyProjections(self.proj_en)
+        self.pdgids = flow_conf["config"]["model_conf"]["pdgids"]
         self.proj_ray = CubeTrace()
 
     def __call__(self, cond: torch.Tensor, gen_gt: bool = False):
         cond_model = cond.clone()
-        if self.proj_en is not False:
-            cond_model[..., 1:7] = self.pen(cond_model[..., 1:7])
         cond_model[..., 1:7] = self.proj_ray(cond_model[..., 1:7])
-        masks = self.gen_mult_masks(cond_model)
-        cond_fm = cond_model[:, None, :]
-        cond_fm = torch.cat(
-            (torch.zeros_like(cond_fm).expand(-1, 2, -1), cond_fm), dim=1
-        )
-        cond_fm[:, 0, 1] = cond_model[:, 0]
-        batch = (cond_fm, *masks)
+        batch = self.gen_batch(cond_model)
         model_out = self.model(batch)
+
+        if model_out.device.type == "cuda":
+            torch.cuda.empty_cache()
         if not gen_gt:
             return model_out
+        
         import pyg4lego
         cond_gt = cond.clone().cpu()
         mom = cond_gt[0, 1:4].double()
@@ -66,15 +62,26 @@ class GenerateOut(torch.nn.Module):
             "gt_out": gt_out,
         }
 
-    def gen_mult_masks(self, cond: torch.Tensor):
+    def gen_batch(self, cond: torch.Tensor):
         pdgid_in = cond[:, -1].long()
         pdgid_in_idx = torch.searchsorted(self.pdgid_in, pdgid_in)
         mult = self.gen_mult((cond[:, 0:-1], None, pdgid_in_idx))
 
         idx = torch.arange(self.ntokens - 3, device=mult.device)
         attn_mask = idx < mult.sum(-1, keepdim=True)
+        pdgid_pad = torch.zeros_like(attn_mask, dtype=torch.long)
+        pdgid_pad.scatter_add_(-1, mult.cumsum(-1)[..., :-1], torch.ones_like(pdgid_pad)).cumsum_(-1)
+        cond[..., -1] = torch.searchsorted(self.pdgids, pdgid_in) + 1
+        cond = cond[:, None, :]
+        cond_pad_r = cond.expand(-1, self.ntokens - 3, -1).clone()
+        cond_pad_r[..., -1] = attn_mask * (pdgid_pad + 1)
+        cond_fm = torch.cat(
+            (torch.zeros_like(cond).expand(-1, 2, -1), cond, cond_pad_r), dim=1
+        )
 
         attn_mask = torch.cat((torch.ones_like(attn_mask[:, :3]), attn_mask), dim=1)
         mask = attn_mask.clone().long().unsqueeze(2)
-        mask[:, [0, 2]] = 0
-        return mask, attn_mask
+        mask[:, [0, 2], 0] = 0 #Conditions
+        cond_fm[:, 0, 1] = cond[:, 0, 0] #Density
+        cond_fm[:, :2, 2:-1] = 1
+        return cond_fm, mask, attn_mask

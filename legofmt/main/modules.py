@@ -61,7 +61,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
 
             config = {
             "dl_conf": {
-                "path": DATA_PATH,
+                "data": DATA_PATH/data_prepped,
                 "cutoff_mev": 20,
                 "min_particles": 1,
                 "max_e": False,
@@ -95,7 +95,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         state_dict = config.get("state_dict")
         config = config.get("config", config)
         model_conf = config.get("model_conf")
-        dpath = config.get("dl_conf").get("lds_args").get("path")
+        dpath = config.get("dl_conf").get("lds_args").get("data")
         if dpath[-3:] != ".pt" and state_dict is None:
             config["dl_conf"]["data_path"] = dpath + "/data_prepped.pt"
             with open(dpath + "/meta.json") as f:
@@ -115,6 +115,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         self.manifold = eval(model_conf.get("manifold"))
         self.ot_coupling = model_conf.get("ot_coupling", False)
         self.proj_en_out = model_conf.get("proj_en_out", False)
+        self.pdgid_is_idx = model_conf.get("pdgid_is_idx", False)
         self.loss_sc_fac = model_conf.get("loss_sc", 0.0)
         self.model = ProjectModel(
             CFMTrafo_x(**model_conf.get("model_args")), self.manifold
@@ -275,7 +276,11 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             )
 
         energy, cc, pdgids = target.split([1, 6, 1], dim=-1)
-        pdgids_idx = self.convert_pdgids(pdgids)
+
+        if self.pdgid_is_idx:
+            pdgids_idx = pdgids.int()
+        else:
+            pdgids_idx = self.convert_pdgids(pdgids)
 
         base = self.gen_base_wrapper((cc, mask, attn_mask))
         if return_base:
@@ -287,8 +292,8 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         pdgids_idx_tp = pdgids_idx.split(split_size, 0)
 
         sols_list = []
-        solver = RiemannianODESolver(velocity_model=self.model, manifold=self.manifold)
         for idx in range(len(init_state_tp)):
+            solver = RiemannianODESolver(velocity_model=self.model, manifold=self.manifold)
             sols_ = solver.sample(
                 x_init=init_state_tp[idx],
                 step_size=step_size,
@@ -310,5 +315,8 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
                 sols_ = sols_.masked_fill(~pdgid_mask, torch.nan)
 
             sols_list.append(sols_)
+            del solver
+            if sols_.device.type == "cuda":
+                torch.cuda.empty_cache()
 
         return torch.cat(sols_list, dim=-3).contiguous()
