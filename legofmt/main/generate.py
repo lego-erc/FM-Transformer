@@ -18,10 +18,12 @@ class GenerateOut(torch.nn.Module):
         mult_conf = torch.load(mult_conf_path, map_location=device, weights_only=False)
         self.gen_mult = MultModel(mult_conf).to(device)
 
-        self.pdgid_in = mult_conf["config"]["mm_conf"]["ptypes_in"]
+        self.pdgid_in = mult_conf["config"]["mm_conf"]["ptypes_in"].to(device)
+        self.ptypes = mult_conf["config"]["mm_conf"]["ptypes"].to(device)
 
         self.ntokens = flow_conf["config"]["model_conf"]["model_args"]["ntokens"]
-        self.pdgids = flow_conf["config"]["model_conf"]["pdgids"]
+        self.pdgids = flow_conf["config"]["model_conf"]["pdgids"].to(device)
+        self.valid_ptypes_mask = torch.isin(self.ptypes, self.pdgids)
         self.proj_ray = CubeTrace()
 
     def __call__(self, cond: torch.Tensor, gen_gt: bool = False):
@@ -65,7 +67,8 @@ class GenerateOut(torch.nn.Module):
     def gen_batch(self, cond: torch.Tensor):
         pdgid_in = cond[:, -1].long()
         pdgid_in_idx = torch.searchsorted(self.pdgid_in, pdgid_in)
-        mult = self.gen_mult((cond[:, 0:-1], None, pdgid_in_idx))
+        mult = self.gen_mult((cond[:, :-1], None, pdgid_in_idx))
+        mult = mult[:, self.valid_ptypes_mask]
 
         idx = torch.arange(self.ntokens - 3, device=mult.device)
         attn_mask = idx < mult.sum(-1, keepdim=True)
