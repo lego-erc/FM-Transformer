@@ -30,6 +30,7 @@ class ProjectModel(ModelWrapper, nn.Module):
         self.manifold = manifold
         self.kwargs = kwargs
         self.vmf = VMF()
+        self.cond_cube = kwargs.get("cond_cube", False)
 
     def forward(
         self,
@@ -50,8 +51,12 @@ class ProjectModel(ModelWrapper, nn.Module):
         t_mask = mask.squeeze(-1) == 1
         t = t_mask * t + ~t_mask
         x_cube = x.clone()
-        x_cube[:, 2:3] = self.vmf.to_cube(x_cube[:, 2:3])
-        v = self.vf(t, x_cube, mask, attn_mask, types, pdgids)
+        if self.cond_cube:
+            x_cube[:, 2:3] = self.vmf.to_cube(x_cube[:, 2:3])
+            x_surr = x_cube 
+        else:
+            x_surr = x
+        v = self.vf(t, x_surr, mask, attn_mask, types, pdgids)
         v_2d = v.flatten(0, -2)
         v_proj = self.manifold.proju(x_projx, v_2d[pm_flat])
         v_2d[pm_flat] = v_proj
@@ -120,8 +125,10 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         self.proj_en_out = model_conf.get("proj_en_out", False)
         self.pdgid_is_idx = model_conf.get("pdgid_is_idx", False)
         self.loss_sc_fac = model_conf.get("loss_sc", 0.0)
+        cond_cube = model_conf.get("cond_cube", False)
         self.model = ProjectModel(
-            CFMTrafo_x(**model_conf.get("model_args")), self.manifold
+            CFMTrafo_x(**model_conf.get("model_args")), self.manifold,
+            cond_cube=cond_cube,
         )
 
         self.gen_base = GenerateBase(config.copy())
