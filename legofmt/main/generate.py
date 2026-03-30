@@ -67,7 +67,7 @@ class GenerateOut(torch.nn.Module):
     def gen_batch(self, cond: torch.Tensor):
         pdgid_in = cond[:, -1].long()
         pdgid_in_idx = torch.searchsorted(self.pdgid_in, pdgid_in)
-        mult = self.gen_mult((cond[:, 0:-1], None, pdgid_in_idx))
+        mult = self.gen_mult((cond[:, :-1], None, pdgid_in_idx))
         mult = mult[:, self.valid_ptypes_mask]
 
         idx = torch.arange(self.ntokens - 3, device=mult.device)

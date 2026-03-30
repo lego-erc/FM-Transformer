@@ -136,21 +136,12 @@ class CornerHist:
     def plot_tensors(self, sols, truth=None):
         if truth is not None:
             truth_e_dep = truth[:, 1, 0]
-            sols = sols[:, : truth.shape[1]]
-            truth = truth[:, 3:].contiguous().view(-1, 6)
+            sols = sols[:, :truth.shape[1]]
         else:
             truth_e_dep = None
 
         truth_e_dep_tuple = (sols[:, 1, 0], truth_e_dep)
-        en_in = sols[:, 2, :3].norm(dim=-1, keepdim=True)
-        en_in = en_in.expand_as(sols[:, 3:, 0]).reshape(-1, 1)
-        sols = sols[:, 3:].reshape(-1, 6)
         incoming = sols[:, 2:3] if self.cube else None
-
-        norm_fac = torch.log(self.cutoff_en / en_in.clamp_min(1e-3)).abs()
-        sols = sols / norm_fac
-        if truth is not None:
-            truth = truth / norm_fac
 
         return self.arrange_plots_(
             self.fig_sup,
@@ -167,26 +158,17 @@ class CornerHist:
         e_dep = sols[:, 1, 0]
 
         sols_true = (
-            batch[0][:, 3:] if batch[0].shape[-1] == 6 else batch[0][:, 3:, -7:-1]
+            batch[0] if batch[0].shape[-1] == 6 else batch[0][..., -7:-1]
         )
 
-        en_in = sols[:, 2:3, :3].norm(dim=-1, keepdim=True)
-        sols = sols[:, 3:]
-        sols[..., :3] -= sols[..., :3] / sols[..., :3].norm(dim=-1, keepdim=True)
-        sols_true[..., :3] -= sols_true[..., :3] / sols_true[..., :3].norm(dim=-1, keepdim=True)
         sols = sols[:, : sols_true.shape[1]]
-        en_in = en_in.expand_as(sols[..., :1])
         sols_true = torch.where(torch.isnan(sols), torch.nan, sols_true)
-
-        norm_fac = torch.log(en_in.clamp_min(1e-3) / self.cutoff_en)
-        sols = sols / norm_fac
-        sols_true = sols_true / norm_fac
 
         return self.arrange_plots_(
             self.fig_sup,
             self.fig,
-            sols.reshape(-1, 6),
-            sols_true.reshape(-1, 6),
+            sols,
+            sols_true,
             incoming=(batch[0][:, 2:3, -7:-1] if self.cube else None),
             data_add=(e_dep, batch[0][:, 1, 1]),
         )
@@ -233,7 +215,9 @@ class CornerHist:
 
     @torch.no_grad()
     def make_corner(self, data_cc, fig, color="#FF9D00", data_add=None):
-        data = self.vmf_utils.to_sph(self.disp_man.projx(data_cc)).cpu().numpy()
+        data_out = data_cc[:, 3:].flatten(0, 1)
+        en_in = data_cc[:, 2, :3].norm(dim=-1)
+        data = self.vmf_utils.to_sph(self.disp_man.projx(data_out)).cpu().numpy()
         labels = [
             r"$\theta_\mathrm{mom}$",
             r"$\phi_\mathrm{mom}$",
@@ -246,12 +230,13 @@ class CornerHist:
             labels += [
                 r"$-\log \frac{\| \vec{p} \|_2}{\| \vec{p}_\mathrm{incoming} \|_2}$"
             ]
-            data_en = data_cc[..., :3].norm(dim=-1, keepdim=True)
+            norm_fac = torch.log(en_in / self.cutoff_en).view(-1, 1, 1)
+            data_en = (data_cc[:, 3: , :3].norm(dim=-1, keepdim=True) - 1).clamp_min(0.) / norm_fac
             range_ += [(-0.2, 1.2)]
-            data = np.concatenate([data, data_en.cpu().numpy()], axis=-1)
+            data = np.concatenate([data, data_en.view(-1, 1).cpu().numpy()], axis=-1)
         if self.plot_edep is not False:
             labels += [r"$E_\mathrm{dep}$"]
-            data_add = data_add.repeat((data.shape[0] // data_add.shape[0])).unsqueeze(
+            data_add = data_add.repeat_interleave((data.shape[0] // data_add.shape[0])).unsqueeze(
                 -1
             )
             range_ += [(-0.2, 1.2)]
