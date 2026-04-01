@@ -1,11 +1,8 @@
 import torch
 from torch import Tensor
 
-from flow_matching.utils.manifolds import Euclidean, Sphere
-
 from ..geometry.energy_proj import EnergyProjections
 from ..geometry.raytracing_proj import CubeTrace
-from ..geometry.path_sample_mult import ProductPathSampler, ProductManifold
 
 class DataPrep:
     def __init__(self, config):
