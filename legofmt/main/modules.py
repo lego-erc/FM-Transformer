@@ -50,8 +50,8 @@ class ProjectModel(ModelWrapper, nn.Module):
         t = torch.atleast_2d(t).expand_as(attn_mask)
         t_mask = mask.squeeze(-1) == 1
         t = t_mask * t + ~t_mask
-        x_cube = x.clone()
         if self.cond_cube:
+            x_cube = x.clone()
             x_cube[:, 2:3] = self.vmf.to_cube(x_cube[:, 2:3])
             x_surr = x_cube 
         else:
@@ -168,14 +168,17 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         cc, mask, attn_mask = target[:, 2:], mask_[:, 2:], attn_mask_[:, 2:]
         base = self.gen_base(mask[:, 1:].shape[:-1], cc[:, :1])
         if self.ot_coupling and self.model.training:
+            am = attn_mask[:, 1:]
             base = attn_mask.unsqueeze(-1) * base + ~attn_mask.unsqueeze(-1) * cc
-            cost = attn_mask[:, 1:].unsqueeze(-1) * torch.cdist(cc[:, 1:], base[:, 1:])
+            inf_cond = am.unsqueeze(-1).logical_xor(am.unsqueeze(-2))
+            cost = torch.cdist(cc[:, 1:], base[:, 1:])
+            cost = cost + inf_cond * 1e6
             assign = slap(cost, cost.device)
             base[:, 1:] = base[:, 1:].gather(
                 1, assign.unsqueeze(-1).expand_as(base[:, 1:])
             )
-        base = self.gen_base.extend_add(base)  # E_dep
-        base = torch.cat((target[:, :1], base), dim=1)  # Density
+        base = torch.cat((target[:, :2], base), dim=1)
+        base = self.gen_base.insert_add(base)  # E_dep
         return base
 
     def _step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
@@ -185,7 +188,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             base = self.gen_base_wrapper((cc, mask, attn_mask))
             pdgid_idx = self.convert_pdgids(pdgids)
             if self.t_dist == "sm_norm":
-                t = torch.sigmoid(torch.randn_like(base[:, 0, 0]))
+                t = torch.sigmoid(1.4 * torch.randn_like(base[:, 0, 0]))
             elif self.t_dist == "uniform":
                 t = torch.rand_like(base[:, 0, 0])
             ps_ = self.ps.sample(base, cc, t)
@@ -200,7 +203,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         if self.loss_sc_fac > 0:
             pred_sc = (1 - ps_.t).unsqueeze(-1) * v_out + ps_.x_t
             pred_sc_ft = (pred_sc * attn_mask.unsqueeze(-1))[..., :3]
-            target_sc = (target * attn_mask.unsqueeze(-1))[..., :3]
+            target_sc = (cc * attn_mask.unsqueeze(-1))[..., :3]
             loss_sc = self.loss_fn(pred_sc_ft, target_sc)
         else:
             loss_sc = 0.0
