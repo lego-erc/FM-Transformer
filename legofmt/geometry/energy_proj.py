@@ -44,4 +44,4 @@ class EnergyProjections:
     def exp(self, p_x: Tensor) -> Tensor:
         p, x = p_x.split(3, -1)
         p_norm = p.norm(dim=-1, keepdim=True).nan_to_num(0)
-        return torch.cat((p / p_norm * (-p_norm.abs()).exp(), x), -1)
+        return torch.cat((p / p_norm * (1 - p_norm).exp(), x), -1)
