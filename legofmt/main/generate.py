@@ -26,8 +26,8 @@ class GenerateOut(torch.nn.Module):
         self.valid_ptypes_mask = torch.isin(self.ptypes, self.pdgids)
         self.proj_ray = CubeTrace()
 
-    def __call__(self, cond: torch.Tensor, gen_gt: bool = False):
-        model_out = self.proj_ray_pass_to_model(cond)
+    def __call__(self, cond: torch.Tensor, gen_gt: bool = False, prepped: bool = False):
+        model_out = self.proj_ray_pass_to_model(cond, prepped=prepped)
 
         if model_out.device.type == "cuda":
             torch.cuda.empty_cache()
@@ -41,9 +41,10 @@ class GenerateOut(torch.nn.Module):
             "gt_out": gt_out,
         }
 
-    def proj_ray_pass_to_model(self, cond: torch.Tensor):
+    def proj_ray_pass_to_model(self, cond: torch.Tensor, prepped: bool = False):
         cond_model = cond.clone()
-        cond_model[..., 1:7] = self.proj_ray(cond_model[..., 1:7])
+        if not prepped:
+            cond_model[..., 1:7] = self.proj_ray(cond_model[..., 1:7])
         batch = self.gen_batch(cond_model)
         return self.model(batch)
     
