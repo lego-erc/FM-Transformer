@@ -61,8 +61,10 @@ class MultModel(LightningModule, torch.nn.Module):
         self.config = config
         self.mm_conf = config.get("mm_conf", {})
         h_dim = self.mm_conf.get("h_dim", 512)
+        dl_conf = config.get("dl_conf", {})
+        lds_conf = dl_conf.get("lds_args", {})
         if state_dict is None and "ptypes" not in config:
-            with open(self.mm_conf.get("path") + "/meta.json") as f:
+            with open(lds_conf.get("data") + "/meta.json") as f:
                 meta_dict = json.load(f)
                 self.mm_conf["max_out_particles"] = meta_dict["ntokens"] - 3
                 self.mm_conf["ptypes"] = torch.tensor(meta_dict["particles"])
