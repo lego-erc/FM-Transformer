@@ -41,9 +41,8 @@ class ProjectModel(ModelWrapper, nn.Module):
         types: torch.Tensor,
         pdgids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        proj_mask = attn_mask * (types > (types.max() - 2)) # change to "- 1" if no condition projection
         x_2d = x.flatten(0, -2)
-        pm_flat = proj_mask.flatten()
+        pm_flat = attn_mask.flatten()
         x_projx = self.manifold.projx(x_2d[pm_flat])
         x_2d[pm_flat] = x_projx
         x = x_2d.view_as(x).detach()
