@@ -43,7 +43,7 @@ class DataPrep:
     def format_add(self, batch: tuple) -> Tensor:
         cc_ext, mask, attn_mask, data_add = batch
         e_dep = torch.ones_like(cc_ext[:, :1])
-        e_in = cc_ext[:, :1, 0]
+        e_in = cc_ext[:, :1, 1:4].norm(dim=-1)
         e_dep[..., self.slc] = data_add.get("E_dep").view_as(e_dep[..., self.slc]) / e_in
         density = torch.ones_like(cc_ext[:, :1])
         density[..., self.slc] = data_add.get("Density").view_as(density[..., self.slc])
