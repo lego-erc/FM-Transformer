@@ -80,13 +80,6 @@ class GenerateBase:
         return base
 
     @torch.no_grad()
-    def extend_add(self, base):
-        rd = self.e_dep_max * torch.sigmoid(torch.randn_like(base[:, :1, :1]))
-        ext = torch.ones_like(base[:, :1])
-        ext[..., 0] = rd.squeeze(-1)
-        return torch.cat((ext, base), dim=1)
-
-    @torch.no_grad()
     def insert_add(self, base):
         base[:, 1, 0] = self.e_dep_max * torch.sigmoid(torch.randn_like(base[:, 1, 0]))
         return base
