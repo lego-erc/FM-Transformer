@@ -100,7 +100,7 @@ class LEGODataset(Dataset):
             self.target, self.mask, self.attn_mask = data
         except ValueError:
             self.full_data = GetLEGOData(**kwargs)(data) 
-            self.target = self.full_data[0]
+            self.target, self.mask, self.attn_mask, _ = self.full_data
         self.length = self.target.shape[0]
         self.device = kwargs.get("device", "cpu")
 
