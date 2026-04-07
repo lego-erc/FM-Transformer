@@ -62,7 +62,7 @@ class ProjectModel(ModelWrapper, nn.Module):
         return v_2d.view_as(v)
 
 
-class LEGOLtng(ltng.LightningModule, nn.Module):
+class LEGOLtng(ltng.LightningModule):
     def __init__(self, config: dict) -> None:
         """As example input.
 
@@ -119,7 +119,9 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             self.ntokens = model_conf["model_args"]["ntokens"]
             self.register_buffer("pdgids_template", model_conf["pdgids"])
         self.t_dist = model_conf.get("t_dist", "uniform")
-        self.manifold = eval(model_conf.get("manifold"))
+        self.t_dist_scale = model_conf.get("t_dist_scale", 1.4)
+        _MANIFOLD_NS = {"ProductManifold": ProductManifold, "Euclidean": Euclidean, "Sphere": Sphere}
+        self.manifold = eval(model_conf.get("manifold"), {"__builtins__": {}}, _MANIFOLD_NS)
         self.ot_coupling = model_conf.get("ot_coupling", False)
         self.proj_en_out = model_conf.get("proj_en_out", False)
         self.pdgid_is_idx = model_conf.get("pdgid_is_idx", False)
@@ -187,7 +189,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             base = self.gen_base_wrapper((cc, mask, attn_mask))
             pdgid_idx = self.convert_pdgids(pdgids)
             if self.t_dist == "sm_norm":
-                t = torch.sigmoid(1.4 * torch.randn_like(base[:, 0, 0]))
+                t = torch.sigmoid(self.t_dist_scale * torch.randn_like(base[:, 0, 0]))
             elif self.t_dist == "uniform":
                 t = torch.rand_like(base[:, 0, 0])
             ps_ = self.ps.sample(base, cc, t)
@@ -304,8 +306,8 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         pdgids_idx_tp = pdgids_idx.split(split_size, 0)
 
         sols_list = []
+        solver = RiemannianODESolver(velocity_model=self.model, manifold=self.manifold)
         for idx in range(len(init_state_tp)):
-            solver = RiemannianODESolver(velocity_model=self.model, manifold=self.manifold)
             sols_ = solver.sample(
                 x_init=init_state_tp[idx],
                 step_size=step_size,
@@ -327,8 +329,9 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
                 sols_ = sols_.masked_fill(~pdgid_mask, torch.nan)
 
             sols_list.append(sols_)
-            del solver
-            if sols_.device.type == "cuda":
-                torch.cuda.empty_cache()
+
+        if sols_.device.type == "cuda":
+            torch.cuda.empty_cache()
+        del sols_
 
         return torch.cat(sols_list, dim=-3).contiguous()
