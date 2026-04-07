@@ -1,7 +1,5 @@
 import torch
 
-import sys
-
 from ..main.modules import LEGOLtng
 from ..multiplicity.model import MultModel
 from ..geometry.energy_proj import EnergyProjections
@@ -62,7 +60,7 @@ class GenerateOut(torch.nn.Module):
             raise ValueError("Only one of energy and density can have batch size > 1.")
         if pos_s > 1 and (energy_s > 1 or density_s > 1):
             raise ValueError("If different coordinates are given, energy and density must have batch size 1.")
-        
+
         cc = torch.cat((mom, pos), dim=-1).view(-1, 6)
 
         if pos_s > 1:
@@ -96,10 +94,23 @@ class GenerateOut(torch.nn.Module):
         mult = self.gen_mult((cond[:, :-1], None, pdgid_in_idx))
         mult = mult[:, self.valid_ptypes_mask]
 
-        idx = torch.arange(self.ntokens - 3, device=mult.device)
+        max_particles = self.ntokens - 3
+        total = mult.sum(-1, keepdim=True)
+        scale = torch.where(total > max_particles, max_particles / total, torch.ones_like(total))
+        mult = (mult * scale).long()
+        scaled = total > max_particles
+        remaining = (scaled * (max_particles - mult.sum(-1, keepdim=True))).clamp(min=0)
+        r_max = remaining.max().item()
+        if r_max > 0:
+            dist = torch.multinomial(mult.float().clamp(min=1), r_max, replacement=True)
+            valid = (torch.arange(r_max, device=mult.device) < remaining).long()
+            mult.scatter_add_(-1, dist, valid)
+
+        idx = torch.arange(max_particles, device=mult.device)
         attn_mask = idx < mult.sum(-1, keepdim=True)
         pdgid_pad = torch.zeros_like(attn_mask, dtype=torch.long)
-        pdgid_pad.scatter_add_(-1, mult.cumsum(-1)[..., :-1], torch.ones_like(pdgid_pad)).cumsum_(-1)
+        cumsum_idx = mult.cumsum(-1)[..., :-1].clamp(max=max_particles - 1)
+        pdgid_pad.scatter_add_(-1, cumsum_idx, torch.ones_like(pdgid_pad)).cumsum_(-1)
         cond[..., -1] = torch.searchsorted(self.pdgids, pdgid_in) + 1
         cond = cond[:, None, :]
         cond_pad_r = cond.expand(-1, self.ntokens - 3, -1).clone()
