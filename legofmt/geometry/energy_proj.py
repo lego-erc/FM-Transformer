@@ -37,7 +37,7 @@ class EnergyProjections:
 
     def log(self, p_x: Tensor) -> Tensor:
         p, x = p_x.split(3, -1)
-        p_norm = p.norm(dim=-1, keepdim=True)
+        p_norm = p.norm(dim=-1, keepdim=True).clamp_min(1e-8)
         norm_fac = (1 - p_norm.log()) / p_norm
         return torch.cat((p * norm_fac, x), -1)
 
