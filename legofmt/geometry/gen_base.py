@@ -42,7 +42,7 @@ class GenerateBase:
 
     @torch.no_grad()
     def rd_scale(self, shape, p_norm):
-        base_range = - torch.log(self.cutoff_mev / p_norm).view(-1, 1, 1)
+        base_range = torch.log(p_norm / self.cutoff_mev).view(-1, 1, 1)
         if self.scale_dist == "trunc_norm":
             return base_range * (
                 torch.nn.init.trunc_normal_(
@@ -57,7 +57,7 @@ class GenerateBase:
             return base_range * torch.rand((*shape, 1), device=p_norm.device)
         if self.scale_dist == "sm_norm":
             return base_range * (
-                -(2 * torch.sigmoid(torch.randn((*shape, 1), device=p_norm.device)) - 1.0).abs() + 1
+                1 - torch.tanh(torch.randn((*shape, 1), device=p_norm.device).abs() / 2)
             ) + 1
 
     @torch.no_grad()
