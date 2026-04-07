@@ -239,8 +239,6 @@ class CornerHist:
             data_add = data_add.repeat_interleave((data.shape[0] // data_add.shape[0])).unsqueeze(
                 -1
             ).clamp_min(0.)
-            d_isnan = data_cc[:, 3:].isnan().any(axis=-1).flatten()
-            data_add[d_isnan] = torch.nan
             range_ += [(-0.2, 1.2)]
             data = np.concatenate([data, data_add.cpu().numpy()], axis=-1)
 
