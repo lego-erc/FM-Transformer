@@ -24,27 +24,19 @@ class GenerateOut(torch.nn.Module):
         self.valid_ptypes_mask = torch.isin(self.ptypes, self.pdgids)
         self.proj_ray = CubeTrace()
 
-    def __call__(self, cond: torch.Tensor, gen_gt: bool = False, prepped: bool = False):
+    def __call__(self, cond: torch.Tensor, prepped: bool = False):
         model_out = self.proj_ray_pass_to_model(cond, prepped=prepped)
 
         if model_out.device.type == "cuda":
             torch.cuda.empty_cache()
-        if not gen_gt:
-            return model_out
-        
-        gt_out =self.gen_g4_gt(cond)
+        return model_out
 
-        return {
-            "model_out": model_out,
-            "gt_out": gt_out,
-        }
-
-    def proj_ray_pass_to_model(self, cond: torch.Tensor, prepped: bool = False):
+    def proj_ray_pass_to_model(self, cond: torch.Tensor, prepped: bool = False, ret_pdgids: bool = False):
         cond_model = cond.clone()
         if not prepped:
             cond_model[..., 1:7] = self.proj_ray(cond_model[..., 1:7])
         batch = self.gen_batch(cond_model)
-        return self.model(batch)
+        return self.model(batch) if not ret_pdgids else (self.model(batch), batch[0][..., -1])
     
     def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids):
         mom_s = mom.view(-1, 3).shape[0]
@@ -84,9 +76,41 @@ class GenerateOut(torch.nn.Module):
             ptypes = pdgids[torch.randint_like(d, 0, pdgids.shape[0]).int()]
             cond = torch.cat((d, cc, ptypes), dim=-1)
 
-        model_out = self.proj_ray_pass_to_model(cond)
+        input_density = cond[:, 0]
+        input_pdgid = cond[:, -1]
 
-        return model_out
+        model_out, pdgids_full = self.proj_ray_pass_to_model(cond, prepped=False, ret_pdgids=True)
+
+        valid_ptypes = self.ptypes[self.valid_ptypes_mask]
+        out_pdgid_idx = pdgids_full[:, 3:].long()
+
+        def _to_particle(cc_tensor, pdgid_vals):
+            mom_, pos_ = cc_tensor.split(3, -1)
+            e = mom_.norm(dim=-1, keepdim=True)
+            return torch.cat([e, mom_, pdgid_vals.unsqueeze(-1).float(), pos_], dim=-1)
+
+        incoming = _to_particle(model_out[:, 2:3], input_pdgid.unsqueeze(-1))
+
+        out_pdgids = torch.zeros_like(out_pdgid_idx, dtype=valid_ptypes.dtype)
+        valid = out_pdgid_idx > 0
+        out_pdgids[valid] = valid_ptypes[
+            (out_pdgid_idx[valid] - 1).clamp(max=len(valid_ptypes) - 1)
+        ]
+        outgoing = _to_particle(model_out[:, 3:], out_pdgids).nan_to_num(0.0)
+
+        return {
+            "per_event": {
+                "E_dep": model_out[:, 1, 0],
+                "Density": input_density,
+            },
+            "per_particle": {
+                "Incoming": incoming,
+                "Outgoing": outgoing,
+            },
+            "per_voxel": {
+                "E_dep": torch.empty(model_out.shape[0], 0, 4, device=model_out.device),
+            },
+        }
 
     def gen_batch(self, cond: torch.Tensor):
         pdgid_in = cond[:, -1].long()
@@ -125,28 +149,3 @@ class GenerateOut(torch.nn.Module):
         cond_fm[:, 0, 1] = cond[:, 0, 0] #Density
         cond_fm[:, :2, 2:-1] = 1
         return cond_fm, mask, attn_mask
-    
-    def gen_g4_gt(self, cond: torch.Tensor):
-        import pyg4lego
-        cond_gt = cond.clone().cpu()
-        mom = cond_gt[0, 1:4].double()
-        pos = cond_gt[0, 4:7].double()
-        energy = mom.norm(dim=-1, keepdim=True).double()
-        density = cond_gt[0, :1].double()
-        size = torch.tensor([100.0], dtype=torch.float64)
-        pdgids = cond_gt[0, -1:].int()
-
-        gt_out = pyg4lego.run_simulation(
-            cond_gt.shape[0],
-            pos,
-            mom,
-            energy,
-            random_gun=False,
-            density=density,
-            size=size,
-            random_energy=False,
-            SourceParticles=pdgids,
-            savepath=None,
-        )
-
-        return gt_out
