@@ -52,7 +52,7 @@ class MultLoader(torch.utils.data.Dataset):
         )
 
 
-class MultModel(LightningModule, torch.nn.Module):
+class MultModel(LightningModule):
     def __init__(self, config: dict):
         super().__init__()
         state_dict = config.get("state_dict", None)
@@ -60,9 +60,12 @@ class MultModel(LightningModule, torch.nn.Module):
             config = config.get("config")
         self.config = config
         self.mm_conf = config.get("mm_conf", {})
+        self.pos_scale = self.mm_conf.get("pos_scale", 50.0)
         h_dim = self.mm_conf.get("h_dim", 512)
+        dl_conf = config.get("dl_conf", {})
+        lds_conf = dl_conf.get("lds_args", {})
         if state_dict is None and "ptypes" not in config:
-            with open(self.mm_conf.get("path") + "/meta.json") as f:
+            with open(lds_conf.get("data") + "/meta.json") as f:
                 meta_dict = json.load(f)
                 self.mm_conf["max_out_particles"] = meta_dict["ntokens"] - 3
                 self.mm_conf["ptypes"] = torch.tensor(meta_dict["particles"])
@@ -123,7 +126,7 @@ class MultModel(LightningModule, torch.nn.Module):
     def proj_in(self, x):
         x = x.clone()
         x[..., -6:] = self.vmf.to_cube(x[..., -6:])
-        x[..., -3:] = 50 * x[..., -3:]
+        x[..., -3:] = self.pos_scale * x[..., -3:]
         return self.proj_in_(x)
 
     def on_fit_start(self):
@@ -174,21 +177,28 @@ class MultModel(LightningModule, torch.nn.Module):
         self.eval()
         in_cc, _, pdgid_in_idx = batch
         in_embd = self.proj_in(in_cc)
-        pdgid_embd = (in_embd + self.embd_pp_(pdgid_in_idx)).unsqueeze(1)
+        x = (in_embd + self.embd_pp_(pdgid_in_idx)).unsqueeze(1)
+        condition = x[:, 0]
         counts = torch.empty(
-            pdgid_embd.shape[0],
+            x.shape[0],
             self.max_seq_len,
             dtype=torch.long,
             device=in_cc.device,
         )
 
+        cache = None
         for i in range(self.max_seq_len):
-            out = self.model(pdgid_embd, mask=None, condition=pdgid_embd[:, 0])[:, -1]
-            logits = self.proj_out_[i](out)
-
+            out, cache = self.model(
+                x,
+                mask=None,
+                condition=condition,
+                return_intermediates=True,
+                cache=cache,
+                input_not_include_cache=(i > 0),
+            )
+            logits = self.proj_out_[i](out[:, -1])
             sampled = torch.multinomial(logits.softmax(-1), 1).squeeze(-1)
-            embd = self.embd_in_[i](sampled).unsqueeze(1)
-            pdgid_embd = torch.cat((pdgid_embd, embd), dim=1)
+            x = self.embd_in_[i](sampled).unsqueeze(1)
             counts[:, i] = sampled
 
         return counts

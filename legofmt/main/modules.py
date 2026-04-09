@@ -9,8 +9,8 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader
 from torch_lap_cuda_lib import solve_lap as slap
 
+from legofmt.geometry.vmf_sampling import VMF
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
-from legofmt.geometry.energy_proj import EnergyProjections
 from legofmt.geometry.gen_base import GenerateBase
 from legofmt.geometry.path_sample_mult import ProductPathSampler, ProductManifold
 from legofmt.geometry.raytracing_proj import CubeTrace
@@ -29,6 +29,8 @@ class ProjectModel(ModelWrapper, nn.Module):
         self.vf = vf
         self.manifold = manifold
         self.kwargs = kwargs
+        self.vmf = VMF()
+        self.cond_cube = kwargs.get("cond_cube", False)
 
     def forward(
         self,
@@ -39,23 +41,28 @@ class ProjectModel(ModelWrapper, nn.Module):
         types: torch.Tensor,
         pdgids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        proj_mask = attn_mask * (types > (types.max() - 2))
         x_2d = x.flatten(0, -2)
-        pm_flat = proj_mask.flatten()
+        pm_flat = attn_mask.flatten()
         x_projx = self.manifold.projx(x_2d[pm_flat])
         x_2d[pm_flat] = x_projx
         x = x_2d.view_as(x).detach()
         t = torch.atleast_2d(t).expand_as(attn_mask)
         t_mask = mask.squeeze(-1) == 1
         t = t_mask * t + ~t_mask
-        v = self.vf(t, x, mask, attn_mask, types, pdgids)
+        if self.cond_cube:
+            x_cube = x.clone()
+            x_cube[:, 2:3] = self.vmf.to_cube(x_cube[:, 2:3])
+            x_surr = x_cube 
+        else:
+            x_surr = x
+        v = self.vf(t, x_surr, mask, attn_mask, types, pdgids)
         v_2d = v.flatten(0, -2)
         v_proj = self.manifold.proju(x_projx, v_2d[pm_flat])
         v_2d[pm_flat] = v_proj
         return v_2d.view_as(v)
 
 
-class LEGOLtng(ltng.LightningModule, nn.Module):
+class LEGOLtng(ltng.LightningModule):
     def __init__(self, config: dict) -> None:
         """As example input.
 
@@ -112,13 +119,17 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             self.ntokens = model_conf["model_args"]["ntokens"]
             self.register_buffer("pdgids_template", model_conf["pdgids"])
         self.t_dist = model_conf.get("t_dist", "uniform")
-        self.manifold = eval(model_conf.get("manifold"))
+        self.t_dist_scale = model_conf.get("t_dist_scale", 1.4)
+        _MANIFOLD_NS = {"ProductManifold": ProductManifold, "Euclidean": Euclidean, "Sphere": Sphere}
+        self.manifold = eval(model_conf.get("manifold"), {"__builtins__": {}}, _MANIFOLD_NS)
         self.ot_coupling = model_conf.get("ot_coupling", False)
         self.proj_en_out = model_conf.get("proj_en_out", False)
         self.pdgid_is_idx = model_conf.get("pdgid_is_idx", False)
         self.loss_sc_fac = model_conf.get("loss_sc", 0.0)
+        cond_cube = model_conf.get("cond_cube", False)
         self.model = ProjectModel(
-            CFMTrafo_x(**model_conf.get("model_args")), self.manifold
+            CFMTrafo_x(**model_conf.get("model_args")), self.manifold,
+            cond_cube=cond_cube,
         )
 
         self.gen_base = GenerateBase(config.copy())
@@ -158,14 +169,17 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         cc, mask, attn_mask = target[:, 2:], mask_[:, 2:], attn_mask_[:, 2:]
         base = self.gen_base(mask[:, 1:].shape[:-1], cc[:, :1])
         if self.ot_coupling and self.model.training:
+            am = attn_mask[:, 1:]
             base = attn_mask.unsqueeze(-1) * base + ~attn_mask.unsqueeze(-1) * cc
-            cost = attn_mask[:, 1:].unsqueeze(-1) * torch.cdist(cc[:, 1:], base[:, 1:])
+            inf_cond = am.unsqueeze(-1).logical_xor(am.unsqueeze(-2))
+            cost = torch.cdist(cc[:, 1:], base[:, 1:])
+            cost = cost + inf_cond * 1e6
             assign = slap(cost, cost.device)
             base[:, 1:] = base[:, 1:].gather(
                 1, assign.unsqueeze(-1).expand_as(base[:, 1:])
             )
-        base = self.gen_base.extend_add(base)  # E_dep
-        base = torch.cat((target[:, :1], base), dim=1)  # Density
+        base = torch.cat((target[:, :2], base), dim=1)
+        base = self.gen_base.insert_add(base)  # E_dep
         return base
 
     def _step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
@@ -175,7 +189,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
             base = self.gen_base_wrapper((cc, mask, attn_mask))
             pdgid_idx = self.convert_pdgids(pdgids)
             if self.t_dist == "sm_norm":
-                t = torch.sigmoid(torch.randn_like(base[:, 0, 0]))
+                t = torch.sigmoid(self.t_dist_scale * torch.randn_like(base[:, 0, 0]))
             elif self.t_dist == "uniform":
                 t = torch.rand_like(base[:, 0, 0])
             ps_ = self.ps.sample(base, cc, t)
@@ -190,7 +204,7 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         if self.loss_sc_fac > 0:
             pred_sc = (1 - ps_.t).unsqueeze(-1) * v_out + ps_.x_t
             pred_sc_ft = (pred_sc * attn_mask.unsqueeze(-1))[..., :3]
-            target_sc = (target * attn_mask.unsqueeze(-1))[..., :3]
+            target_sc = (cc * attn_mask.unsqueeze(-1))[..., :3]
             loss_sc = self.loss_fn(pred_sc_ft, target_sc)
         else:
             loss_sc = 0.0
@@ -292,8 +306,8 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
         pdgids_idx_tp = pdgids_idx.split(split_size, 0)
 
         sols_list = []
+        solver = RiemannianODESolver(velocity_model=self.model, manifold=self.manifold)
         for idx in range(len(init_state_tp)):
-            solver = RiemannianODESolver(velocity_model=self.model, manifold=self.manifold)
             sols_ = solver.sample(
                 x_init=init_state_tp[idx],
                 step_size=step_size,
@@ -315,8 +329,9 @@ class LEGOLtng(ltng.LightningModule, nn.Module):
                 sols_ = sols_.masked_fill(~pdgid_mask, torch.nan)
 
             sols_list.append(sols_)
-            del solver
-            if sols_.device.type == "cuda":
-                torch.cuda.empty_cache()
+
+        if sols_.device.type == "cuda":
+            torch.cuda.empty_cache()
+        del sols_
 
         return torch.cat(sols_list, dim=-3).contiguous()

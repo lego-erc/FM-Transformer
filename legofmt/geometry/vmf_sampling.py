@@ -24,8 +24,8 @@ class VMF:
         if cc.shape[-1] != 3:
             return self._batched(cc, 3, "to_sph")
         x, y, z = cc.movedim(-1, 0)
-        theta = torch.acos(z.clamp(-(1 - 1e-8), 1 - 1e-8))
-        phi = torch.atan2(y, x.sign() * x.abs().clamp_min(1e-8))
+        theta = torch.acos(z.clamp(1e-8 - 1, 1 - 1e-8))
+        phi = torch.atan2(y, x + (x == 0).to(x.dtype) * 1e-8)
         return torch.stack((theta, phi), dim=-1)
 
     def to_cube(self, p_and_x, d=1.0):

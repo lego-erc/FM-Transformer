@@ -1,7 +1,5 @@
 import torch
 
-import sys
-
 from ..main.modules import LEGOLtng
 from ..multiplicity.model import MultModel
 from ..geometry.energy_proj import EnergyProjections
@@ -26,54 +24,117 @@ class GenerateOut(torch.nn.Module):
         self.valid_ptypes_mask = torch.isin(self.ptypes, self.pdgids)
         self.proj_ray = CubeTrace()
 
-    def __call__(self, cond: torch.Tensor, gen_gt: bool = False):
-        cond_model = cond.clone()
-        cond_model[..., 1:7] = self.proj_ray(cond_model[..., 1:7])
-        batch = self.gen_batch(cond_model)
-        model_out = self.model(batch)
+    def __call__(self, cond: torch.Tensor, prepped: bool = False):
+        model_out = self.proj_ray_pass_to_model(cond, prepped=prepped)
 
         if model_out.device.type == "cuda":
             torch.cuda.empty_cache()
-        if not gen_gt:
-            return model_out
-        
-        import pyg4lego
-        cond_gt = cond.clone().cpu()
-        mom = cond_gt[0, 1:4].double()
-        pos = cond_gt[0, 4:7].double()
-        energy = mom.norm(dim=-1, keepdim=True).double()
-        density = cond_gt[0, :1].double()
-        size = torch.tensor([100.0], dtype=torch.float64)
-        pdgids = cond_gt[0, -1:].int()
+        return model_out
 
-        gt_out = pyg4lego.run_simulation(
-            cond_gt.shape[0],
-            pos,
-            mom,
-            energy,
-            random_gun=False,
-            density=density,
-            size=size,
-            random_energy=False,
-            SourceParticles=pdgids,
-            savepath=None,
-        )
+    def proj_ray_pass_to_model(self, cond: torch.Tensor, prepped: bool = False, ret_pdgids: bool = False):
+        cond_model = cond.clone()
+        if not prepped:
+            cond_model[..., 1:7] = self.proj_ray(cond_model[..., 1:7])
+        batch = self.gen_batch(cond_model)
+        return self.model(batch) if not ret_pdgids else (self.model(batch), batch[0][..., -1])
+    
+    def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids):
+        mom_s = mom.view(-1, 3).shape[0]
+        pos_s = pos.view(-1, 3).shape[0]
+        energy_s = energy.shape[0]
+        density_s = density.shape[0]
+
+        if not size.shape[0] == 1:
+            raise ValueError("Multiple sizes not yet supported.")
+        if not mom_s == pos_s:
+            raise ValueError("Mismatching mom and pos batch size.")
+        if density_s > 1 and not energy_s > 1:
+            raise ValueError("Only one of energy and density can have batch size > 1.")
+        if pos_s > 1 and (energy_s > 1 or density_s > 1):
+            raise ValueError("If different coordinates are given, energy and density must have batch size 1.")
+
+        cc = torch.cat((mom, pos), dim=-1).view(-1, 6)
+
+        if pos_s > 1:
+            cc = cc.repeat_interleave(n, dim=0)
+            d = density.view(-1, 1).expand_as(cc[:, :1])
+            cc[..., :3] = cc[..., :3] * energy.view(1, 1)
+            ptypes = pdgids[torch.randint_like(d, 0, pdgids.shape[0]).int()]
+            cond = torch.cat((d, cc, ptypes), dim=-1)
+
+        elif energy_s > 1:
+            e = energy.repeat_interleave(n, dim=0).view(-1, 1)
+            d = density.view(-1, 1).expand_as(e)
+            cc = torch.cat((cc[..., :3].view(1, 3) * e, cc[..., 3:].view(1, 3) * torch.ones_like(e)), dim=-1)
+            ptypes = pdgids[torch.randint_like(d, 0, pdgids.shape[0]).int()]
+            cond = torch.cat((d, cc, ptypes), dim=-1)
+
+        else:
+            d = density.repeat_interleave(n, dim=0).view(-1, 1)
+            e = energy.view(-1, 1).expand_as(d)
+            cc = torch.cat((cc[..., :3].view(1, 3) * e, cc[..., 3:].view(1, 3) * torch.ones_like(e)), dim=-1)
+            ptypes = pdgids[torch.randint_like(d, 0, pdgids.shape[0]).int()]
+            cond = torch.cat((d, cc, ptypes), dim=-1)
+
+        input_density = cond[:, 0]
+        input_pdgid = cond[:, -1]
+
+        model_out, pdgids_full = self.proj_ray_pass_to_model(cond, prepped=False, ret_pdgids=True)
+
+        valid_ptypes = self.ptypes[self.valid_ptypes_mask]
+        out_pdgid_idx = pdgids_full[:, 3:].long()
+
+        def _to_particle(cc_tensor, pdgid_vals):
+            mom_, pos_ = cc_tensor.split(3, -1)
+            e = mom_.norm(dim=-1, keepdim=True)
+            return torch.cat([e, mom_, pdgid_vals.unsqueeze(-1).float(), pos_], dim=-1)
+
+        incoming = _to_particle(model_out[:, 2:3], input_pdgid.unsqueeze(-1))
+
+        out_pdgids = torch.zeros_like(out_pdgid_idx, dtype=valid_ptypes.dtype)
+        valid = out_pdgid_idx > 0
+        out_pdgids[valid] = valid_ptypes[
+            (out_pdgid_idx[valid] - 1).clamp(max=len(valid_ptypes) - 1)
+        ]
+        outgoing = _to_particle(model_out[:, 3:], out_pdgids).nan_to_num(0.0)
 
         return {
-            "model_out": model_out,
-            "gt_out": gt_out,
+            "per_event": {
+                "E_dep": model_out[:, 1, 0],
+                "Density": input_density,
+            },
+            "per_particle": {
+                "Incoming": incoming,
+                "Outgoing": outgoing,
+            },
+            "per_voxel": {
+                "E_dep": torch.empty(model_out.shape[0], 0, 4, device=model_out.device),
+            },
         }
 
     def gen_batch(self, cond: torch.Tensor):
         pdgid_in = cond[:, -1].long()
         pdgid_in_idx = torch.searchsorted(self.pdgid_in, pdgid_in)
-        mult = self.gen_mult((cond[:, 0:-1], None, pdgid_in_idx))
+        mult = self.gen_mult((cond[:, :-1], None, pdgid_in_idx))
         mult = mult[:, self.valid_ptypes_mask]
 
-        idx = torch.arange(self.ntokens - 3, device=mult.device)
+        max_particles = self.ntokens - 3
+        total = mult.sum(-1, keepdim=True)
+        scale = torch.where(total > max_particles, max_particles / total, torch.ones_like(total))
+        mult = (mult * scale).long()
+        scaled = total > max_particles
+        remaining = (scaled * (max_particles - mult.sum(-1, keepdim=True))).clamp(min=0)
+        r_max = remaining.max().item()
+        if r_max > 0:
+            dist = torch.multinomial(mult.float().clamp(min=1), r_max, replacement=True)
+            valid = (torch.arange(r_max, device=mult.device) < remaining).long()
+            mult.scatter_add_(-1, dist, valid)
+
+        idx = torch.arange(max_particles, device=mult.device)
         attn_mask = idx < mult.sum(-1, keepdim=True)
         pdgid_pad = torch.zeros_like(attn_mask, dtype=torch.long)
-        pdgid_pad.scatter_add_(-1, mult.cumsum(-1)[..., :-1], torch.ones_like(pdgid_pad)).cumsum_(-1)
+        cumsum_idx = mult.cumsum(-1)[..., :-1].clamp(max=max_particles - 1)
+        pdgid_pad.scatter_add_(-1, cumsum_idx, torch.ones_like(pdgid_pad)).cumsum_(-1)
         cond[..., -1] = torch.searchsorted(self.pdgids, pdgid_in) + 1
         cond = cond[:, None, :]
         cond_pad_r = cond.expand(-1, self.ntokens - 3, -1).clone()

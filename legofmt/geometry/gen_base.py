@@ -42,7 +42,7 @@ class GenerateBase:
 
     @torch.no_grad()
     def rd_scale(self, shape, p_norm):
-        base_range = - torch.log(self.cutoff_mev / p_norm).view(-1, 1, 1)
+        base_range = torch.log(p_norm / self.cutoff_mev).view(-1, 1, 1)
         if self.scale_dist == "trunc_norm":
             return base_range * (
                 torch.nn.init.trunc_normal_(
@@ -57,8 +57,8 @@ class GenerateBase:
             return base_range * torch.rand((*shape, 1), device=p_norm.device)
         if self.scale_dist == "sm_norm":
             return base_range * (
-                -(2 * torch.sigmoid(torch.randn((*shape, 1), device=p_norm.device)) - 1.0).abs() + 1
-            )
+                1 - torch.tanh(torch.randn((*shape, 1), device=p_norm.device).abs() / 2)
+            ) + 1
 
     @torch.no_grad()
     def iso_3dmom(self, shape, **kwargs):
@@ -68,21 +68,18 @@ class GenerateBase:
 
     @torch.no_grad()
     def poles(self, shape, incoming_rt, **kwargs):
-        p_norm = incoming_rt[..., :3].norm(dim=-1)
+        p_norm = incoming_rt[..., :3].norm(dim=-1, keepdim=True)
+        p_cc = incoming_rt[..., :3] / p_norm
         loc_cc = incoming_rt[..., -3:]
         rd_scale = self.rd_scale(shape, p_norm)
         x = self.vmf_utils.sample(shape, loc_cc, self.kappa, self.bs_frac)
-        p_ = self.vmf_utils.sample(shape, x, self.kappa, 0.0)
-        p_to_x_sign = torch.einsum("...ij, ...ij -> ...i", x, p_).sgn()
-        p = torch.einsum("...i, ...ij -> ...ij", p_to_x_sign, p_)
-        p_sc = rd_scale * p
+        p_ = self.vmf_utils.sample(shape, p_cc, self.kappa, 0.0)
+        p_sc = rd_scale * p_
         base = torch.cat((p_sc, x), dim=-1)
         base = torch.cat((incoming_rt, base), dim=1)
         return base
 
     @torch.no_grad()
-    def extend_add(self, base):
-        rd = self.e_dep_max * torch.sigmoid(torch.randn_like(base[:, :1, :1]))
-        ext = torch.zeros_like(base[:, :1])
-        ext[..., 0] = rd.squeeze(-1)
-        return torch.cat((ext, base), dim=1)
+    def insert_add(self, base):
+        base[:, 1, 0] = self.e_dep_max * torch.sigmoid(torch.randn_like(base[:, 1, 0]))
+        return base

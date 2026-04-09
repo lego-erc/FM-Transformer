@@ -54,7 +54,7 @@ class GetLEGOData:
 
         """
         dataset, data_add = self.dataset_compact(data)
-        mask_valid = dataset[..., 0] >= self.cutoff_mev
+        mask_valid = dataset[..., 1:4].norm(dim=-1) >= self.cutoff_mev
         max_valid = mask_valid.sum(dim=-1).max()
         mask_valid_sorted = mask_valid.sort(dim=-1, descending=True).values[
             :, :max_valid
@@ -91,15 +91,16 @@ class GetLEGOData:
 
 
 class LEGODataset(Dataset):
-    def __init__(self, path: str, **kwargs) -> None:
+    def __init__(self, data: (str | dict), **kwargs) -> None:
         super().__init__()
-        path = path + "/data_prepped.pt" if path[-3:] != ".pt" else path
-        data = torch.load(path, map_location="cpu", weights_only=False)
+        if isinstance(data, str):
+            path = data + "/data_prepped.pt" if data[-3:] != ".pt" else data
+            data = torch.load(path, map_location="cpu", weights_only=False)
         try:
             self.target, self.mask, self.attn_mask = data
         except ValueError:
             self.full_data = GetLEGOData(**kwargs)(data) 
-            self.target = self.full_data[0]
+            self.target, self.mask, self.attn_mask, _ = self.full_data
         self.length = self.target.shape[0]
         self.device = kwargs.get("device", "cpu")
 
