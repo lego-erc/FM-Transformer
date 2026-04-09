@@ -17,21 +17,27 @@ python = ">=3.14.0,<3.15"
 [pypi-dependencies]
 numpy = ">=2.3.5"
 matplotlib = ">=3.10.7"
-torch = ">=2.9.1"
+torch = ">=2.10.0"
 flow-matching = ">=1.0.10"
 lightning = ">=2.5.6"
 schedulefree = ">=1.4.1"
-x-transformers = ">=2.11.23"
+x-transformers = "==2.17.9"
 pip = ">=25.3,<26"
 ipykernel = "*"
 corner = "*"
 legofmt = { path = ".", editable = true }
 
-[feature.cuda.pypi-dependencies]
-torch-lap-cuda = ">=0.0.3"
+[feature.lap.pypi-dependencies]
+torch-lap-cuda = { git = "https://github.com/rdebrand/torch-lap-cuda" }
+
+[feature.train]
+platforms = ["linux-64"]
+
+[feature.train.pypi-dependencies]
+comet_ml = "*"
 
 [environments]
-default = ["cuda"]
-ci = []
+default = []
+train = ["train", "lap"]
 
 
