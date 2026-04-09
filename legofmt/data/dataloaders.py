@@ -1,6 +1,8 @@
+import os
 import torch
+import torch.nn.functional as F
 from torch import Tensor
-from torch.utils.data import Dataset
+from torch.utils.data import ConcatDataset, Dataset, TensorDataset
 
 
 class GetLEGOData:
@@ -93,19 +95,40 @@ class GetLEGOData:
 class LEGODataset(Dataset):
     def __init__(self, data: (str | dict), **kwargs) -> None:
         super().__init__()
-        if isinstance(data, str):
-            path = data + "/data_prepped.pt" if data[-3:] != ".pt" else data
-            data = torch.load(path, map_location="cpu", weights_only=False)
-        try:
-            self.target, self.mask, self.attn_mask = data
-        except ValueError:
-            self.full_data = GetLEGOData(**kwargs)(data) 
-            self.target, self.mask, self.attn_mask, _ = self.full_data
-        self.length = self.target.shape[0]
+        n_chunks = kwargs.pop("n_chunks", None)
+        if isinstance(data, str) and data[-3:] != ".pt" and n_chunks is not None:
+            all_chunks = [f for f in os.listdir(data) if f.startswith("chunk_") and f.endswith(".pt")]
+            picked = [all_chunks[i] for i in torch.randperm(len(all_chunks))[:n_chunks].tolist()]
+            parts = [torch.load(os.path.join(data, c), map_location="cpu", weights_only=False) for c in picked]
+            max_seq = max(t.shape[1] for t, m, a in parts)
+            datasets = []
+            for t, m, a in parts:
+                pad = max_seq - t.shape[1]
+                if pad > 0:
+                    t = F.pad(t, (0, 0, 0, pad))
+                    t[:, -pad:, 4] = 1.0
+                    m = F.pad(m, (0, 0, 0, pad))
+                    a = F.pad(a, (0, pad))
+                datasets.append(TensorDataset(t, m, a))
+            self._concat = ConcatDataset(datasets)
+            self.length = len(self._concat)
+        else:
+            self._concat = None
+            if isinstance(data, str):
+                path = data + "/data_prepped.pt" if data[-3:] != ".pt" else data
+                data = torch.load(path, map_location="cpu", weights_only=False)
+            try:
+                self.target, self.mask, self.attn_mask = data
+            except ValueError:
+                self.full_data = GetLEGOData(**kwargs)(data)
+                self.target, self.mask, self.attn_mask, _ = self.full_data
+            self.length = self.target.shape[0]
         self.device = kwargs.get("device", "cpu")
 
     def __len__(self) -> int:
         return self.length
 
     def __getitem__(self, idx: int | Tensor) -> tuple[Tensor]:
+        if self._concat is not None:
+            return self._concat[idx]
         return self.target[idx], self.mask[idx], self.attn_mask[idx]
