@@ -9,7 +9,7 @@ class CFMTrafo_x(nn.Module):
         h_dim: int,
         *,
         nhead: int = 8,
-        ntokens: int = 4,
+        max_seq_l: int = 9,
         nvtypes: int = 3,
         in_dim: int = 6,
         ff_mult: int = 1,
@@ -22,17 +22,17 @@ class CFMTrafo_x(nn.Module):
         super().__init__()
         self.h_dim = h_dim
         self.in_dim = in_dim
-        self.ntokens = ntokens
+        self.max_seq_l = max_seq_l
         self.nvtypes = nvtypes
         self.npdgids = npdgids
-        self.vl = (self.ntokens, 2, self.h_dim, self.in_dim)
-        self.vb = (self.ntokens, self.h_dim)
-        self.vbo = (self.ntokens, self.in_dim)
+        self.vl = (2, self.h_dim, self.in_dim)
+        self.vb = (self.h_dim,)
+        self.vbo = (self.in_dim,)
 
         self.vf = ContinuousTransformerWrapper(
             dim_in=h_dim,
             dim_out=h_dim,
-            max_seq_len=ntokens,
+            max_seq_len=max_seq_l,
             emb_dropout=dropout,
             use_abs_pos_emb=False,
             attn_layers=Encoder(
@@ -50,9 +50,9 @@ class CFMTrafo_x(nn.Module):
         self.l_mask_ = nn.Parameter(torch.empty(self.nvtypes, 2, self.h_dim, self.in_dim))
         self.b_mask_ = nn.Parameter(torch.empty(self.nvtypes, self.h_dim))
         self.bo_mask_ = nn.Parameter(torch.empty(self.nvtypes, self.in_dim))
-        self.l_types_ = nn.Parameter(torch.empty(self.ntokens, 2, self.h_dim, self.in_dim))
-        self.b_types_ = nn.Parameter(torch.empty(self.ntokens, self.h_dim))
-        self.bo_types_ = nn.Parameter(torch.empty(self.ntokens, self.in_dim))
+        self.l_types_ = nn.Parameter(torch.empty(self.max_seq_l, 2, self.h_dim, self.in_dim))
+        self.b_types_ = nn.Parameter(torch.empty(self.max_seq_l, self.h_dim))
+        self.bo_types_ = nn.Parameter(torch.empty(self.max_seq_l, self.in_dim))
         self.l_pdgids_ = nn.Parameter(torch.empty(self.npdgids, 2, self.h_dim, self.in_dim))
         self.b_pdgids_ = nn.Parameter(torch.empty(self.npdgids, self.h_dim))
         self.bo_pdgids_ = nn.Parameter(torch.empty(self.npdgids, self.in_dim))
@@ -92,17 +92,18 @@ class CFMTrafo_x(nn.Module):
         types: Tensor,
         pdgids: Tensor | None,
     ) -> Tensor:
-        l_mask = self.l_mask_.index_select(0, mask.view(-1)).view(-1, *self.vl)
-        b_mask = self.b_mask_.index_select(0, mask.view(-1)).view(-1, *self.vb)
-        bo_mask = self.bo_mask_.index_select(0, mask.view(-1)).view(-1, *self.vbo)
+        n_tokens = states_mask.shape[1]
+        l_mask = self.l_mask_.index_select(0, mask.view(-1)).view(-1, n_tokens, *self.vl)
+        b_mask = self.b_mask_.index_select(0, mask.view(-1)).view(-1, n_tokens, *self.vb)
+        bo_mask = self.bo_mask_.index_select(0, mask.view(-1)).view(-1, n_tokens, *self.vbo)
 
-        l_types = self.l_types_.index_select(0, types.view(-1)).view(-1, *self.vl)
-        b_types = self.b_types_.index_select(0, types.view(-1)).view(-1, *self.vb)
-        bo_types = self.bo_types_.index_select(0, types.view(-1)).view(-1, *self.vbo)
+        l_types = self.l_types_.index_select(0, types.view(-1)[:n_tokens]).view(-1, n_tokens, *self.vl)
+        b_types = self.b_types_.index_select(0, types.view(-1)[:n_tokens]).view(-1, n_tokens, *self.vb)
+        bo_types = self.bo_types_.index_select(0, types.view(-1)[:n_tokens]).view(-1, n_tokens, *self.vbo)
 
-        l_pdgids = self.l_pdgids_.index_select(0, pdgids.view(-1)).view(-1, *self.vl)
-        b_pdgids = self.b_pdgids_.index_select(0, pdgids.view(-1)).view(-1, *self.vb)
-        bo_pdgids = self.bo_pdgids_.index_select(0, pdgids.view(-1)).view(-1, *self.vbo)
+        l_pdgids = self.l_pdgids_.index_select(0, pdgids.view(-1)).view(-1, n_tokens, *self.vl)
+        b_pdgids = self.b_pdgids_.index_select(0, pdgids.view(-1)).view(-1, n_tokens, *self.vb)
+        bo_pdgids = self.bo_pdgids_.index_select(0, pdgids.view(-1)).view(-1, n_tokens, *self.vbo)
 
         t_freqs = torch.einsum("ij, k -> ijk", t, self.freqs)
         embd_t = self.mask_freqs * t_freqs.sin() + self.mask_freqs_rolled * t_freqs.cos()
