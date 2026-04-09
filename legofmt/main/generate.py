@@ -19,7 +19,7 @@ class GenerateOut(torch.nn.Module):
         self.pdgid_in = mult_conf["config"]["mm_conf"]["ptypes_in"].to(device)
         self.ptypes = mult_conf["config"]["mm_conf"]["ptypes"].to(device)
 
-        self.ntokens = flow_conf["config"]["model_conf"]["model_args"]["ntokens"]
+        self.max_seq_l = flow_conf["config"]["model_conf"]["model_args"]["max_seq_l"]
         self.pdgids = flow_conf["config"]["model_conf"]["pdgids"].to(device)
         self.valid_ptypes_mask = torch.isin(self.ptypes, self.pdgids)
         self.proj_ray = CubeTrace()
@@ -118,7 +118,7 @@ class GenerateOut(torch.nn.Module):
         mult = self.gen_mult((cond[:, :-1], None, pdgid_in_idx))
         mult = mult[:, self.valid_ptypes_mask]
 
-        max_particles = self.ntokens - 3
+        max_particles = self.max_seq_l - 3
         total = mult.sum(-1, keepdim=True)
         scale = torch.where(total > max_particles, max_particles / total, torch.ones_like(total))
         mult = (mult * scale).long()
@@ -137,7 +137,7 @@ class GenerateOut(torch.nn.Module):
         pdgid_pad.scatter_add_(-1, cumsum_idx, torch.ones_like(pdgid_pad)).cumsum_(-1)
         cond[..., -1] = torch.searchsorted(self.pdgids, pdgid_in) + 1
         cond = cond[:, None, :]
-        cond_pad_r = cond.expand(-1, self.ntokens - 3, -1).clone()
+        cond_pad_r = cond.expand(-1, self.max_seq_l - 3, -1).clone()
         cond_pad_r[..., -1] = attn_mask * (pdgid_pad + 1)
         cond_fm = torch.cat(
             (torch.zeros_like(cond).expand(-1, 2, -1), cond, cond_pad_r), dim=1

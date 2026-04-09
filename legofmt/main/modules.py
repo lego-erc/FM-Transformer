@@ -82,7 +82,7 @@ class LEGOLtng(ltng.LightningModule):
             },
             "model_conf": {
                     "h_dim": 2**7,
-                    "ntokens": 9,
+                    "max_seq_l": 9,
                     "in_dim": 6,
                     "nlayers": 4,
                     "nhead": 8,
@@ -107,16 +107,16 @@ class LEGOLtng(ltng.LightningModule):
             config["dl_conf"]["data_path"] = dpath + "/data_prepped.pt"
             with open(dpath + "/meta.json") as f:
                 meta_dict = json.load(f)
-                self.ntokens = meta_dict["ntokens"]
-                ptensor = torch.tensor(meta_dict["particles"], dtype=torch.int64)
+                self.max_seq_l = meta_dict["ntokens"]
+                ptensor = torch.tensor(meta_dict["particles"], dtype=torch.int64).sort().values
                 self.register_buffer("pdgids_template", ptensor.contiguous())
                 model_conf["model_args"]["npdgids"] = self.pdgids_template.shape[0] + 1
-            if "ntokens" not in model_conf["model_args"]:
-                model_conf["model_args"]["ntokens"] = self.ntokens
+            if "max_seq_l" not in model_conf["model_args"]:
+                model_conf["model_args"]["max_seq_l"] = self.max_seq_l
             if "pdgids" not in model_conf["model_args"]:
                 model_conf["pdgids"] = ptensor
         elif state_dict is not None:
-            self.ntokens = model_conf["model_args"]["ntokens"]
+            self.max_seq_l = model_conf["model_args"]["max_seq_l"]
             self.register_buffer("pdgids_template", model_conf["pdgids"])
         self.t_dist = model_conf.get("t_dist", "uniform")
         self.t_dist_scale = model_conf.get("t_dist_scale", 1.4)
@@ -142,7 +142,7 @@ class LEGOLtng(ltng.LightningModule):
         self.dl_conf = config.get("dl_conf")
         self.register_buffer(
             "types_embd",
-            torch.arange(self.ntokens, dtype=torch.int64).clamp_max(3).view(1, -1),
+            torch.arange(self.max_seq_l, dtype=torch.int64).clamp_max(3).view(1, -1),
         )
 
         self.odeint_conf = config.get("odeint_conf", {})
