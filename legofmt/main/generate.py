@@ -31,14 +31,22 @@ class GenerateOut(torch.nn.Module):
             torch.cuda.empty_cache()
         return model_out
 
-    def proj_ray_pass_to_model(self, cond: torch.Tensor, prepped: bool = False, ret_pdgids: bool = False):
+    def proj_ray_pass_to_model(self, cond: torch.Tensor, prepped: bool = False, ret_pdgids: bool = False, return_base: bool = False):
         cond_model = cond.clone()
         if not prepped:
             cond_model[..., 1:7] = self.proj_ray(cond_model[..., 1:7])
         batch = self.gen_batch(cond_model)
-        return self.model(batch) if not ret_pdgids else (self.model(batch), batch[0][..., -1])
+        prev = self.model.odeint_conf.get("return_base", False)
+        self.model.odeint_conf["return_base"] = return_base
+        model_out = self.model(batch)
+        self.model.odeint_conf["return_base"] = prev
+        return model_out if not ret_pdgids else (model_out, batch[0][..., -1])
     
-    def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids):
+    def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, return_base=False):
+        device = next(self.model.parameters()).device
+        pos, mom, energy, density, size, pdgids = (
+            t.to(device) for t in (pos, mom, energy, density, size, pdgids)
+        )
         mom_s = mom.view(-1, 3).shape[0]
         pos_s = pos.view(-1, 3).shape[0]
         energy_s = energy.shape[0]
@@ -79,7 +87,7 @@ class GenerateOut(torch.nn.Module):
         input_density = cond[:, 0]
         input_pdgid = cond[:, -1]
 
-        model_out, pdgids_full = self.proj_ray_pass_to_model(cond, prepped=False, ret_pdgids=True)
+        model_out, pdgids_full = self.proj_ray_pass_to_model(cond, prepped=False, ret_pdgids=True, return_base=return_base)
 
         valid_ptypes = self.ptypes[self.valid_ptypes_mask]
         out_pdgid_idx = pdgids_full[:, 3:].long()

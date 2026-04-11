@@ -7,7 +7,10 @@ from flow_matching.utils.manifolds import Euclidean, Sphere
 from legofmt.data.dataloaders import LEGODataset
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
-from torch_lap_cuda_lib import solve_lap as slap
+try:
+    from torch_lap_cuda_lib import solve_lap as slap
+except ModuleNotFoundError:
+    slap = None
 
 from legofmt.geometry.vmf_sampling import VMF
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x

@@ -4,6 +4,7 @@ channels = ["conda-forge", "pytorch", "nvidia"]
 name = "legofmt"
 platforms = ["linux-64", "osx-arm64"]
 version = "0.1.0"
+preview = ["pixi-build"]
 
 [tasks.build]
 args = [
@@ -13,6 +14,7 @@ cmd = "{{ mode }} pip install ."
 
 [dependencies]
 python = ">=3.14.0,<3.15"
+pyg4lego = { git = "https://github.com/lego-erc/pyg4lego.git", rev = "cf02e1efed7145ca1c138b0c3884cf751f151de9" }
 
 [pypi-dependencies]
 numpy = ">=2.3.5"
@@ -31,7 +33,8 @@ legofmt = { path = ".", editable = true }
 torch-lap-cuda = ">=0.0.3"
 
 [environments]
-default = ["cuda"]
+default = []
+inference = []
 ci = []
 
 
