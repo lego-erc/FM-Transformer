@@ -7,7 +7,10 @@ from flow_matching.utils.manifolds import Euclidean, Sphere
 from legofmt.data.dataloaders import LEGODataset
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
-from torch_lap_cuda_lib import solve_lap as slap
+try:
+    from torch_lap_cuda_lib import solve_lap as slap
+except ImportError:
+    slap = None
 
 from legofmt.geometry.vmf_sampling import VMF
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
@@ -275,21 +278,6 @@ class LEGOLtng(ltng.LightningModule):
 
         target, mask, attn_mask = batch
 
-        if target.shape[-2] < self.ntokens:
-            pad_len = self.ntokens - target.shape[-2]
-            target = torch.cat((target, target[:, -1:].expand(-1, pad_len, -1)), dim=-2)
-        if mask.shape[1] < self.ntokens:
-            pad_len = self.ntokens - mask.shape[1]
-            mask = torch.cat(
-                (mask, torch.zeros_like(mask[:, -1:]).expand(-1, pad_len, -1)), dim=1
-            )
-        if attn_mask.shape[1] < self.ntokens:
-            pad_len = self.ntokens - attn_mask.shape[1]
-            attn_mask = torch.cat(
-                (attn_mask, torch.zeros_like(attn_mask[:, -1:]).expand(-1, pad_len)),
-                dim=1,
-            )
-
         energy, cc, pdgids = target.split([1, 6, 1], dim=-1)
 
         if self.pdgid_is_idx:
@@ -333,6 +321,8 @@ class LEGOLtng(ltng.LightningModule):
 
         if sols_.device.type == "cuda":
             torch.cuda.empty_cache()
+        if sols_.device.type == "mps":
+            torch.mps.empty_cache()
         del sols_
 
         return torch.cat(sols_list, dim=-3).contiguous()
