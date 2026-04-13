@@ -5,39 +5,28 @@ name = "legofmt"
 platforms = ["linux-64", "osx-arm64"]
 version = "0.1.0"
 
-[tasks.build]
-args = [
-  { "arg" = "mode", "default" = "" },
-]
-cmd = "{{ mode }} pip install ."
-
-[dependencies]
-python = ">=3.14.0,<3.15"
-
-[pypi-dependencies]
-numpy = ">=2.3.5"
-matplotlib = ">=3.10.7"
-torch = ">=2.10.0"
-flow-matching = ">=1.0.10"
-lightning = ">=2.5.6"
+[feature.base.dependencies]
+python = ">=3.13.0,<3.15"
+pytorch = ">=2.10"
+numpy = "*"
+matplotlib = "*"
+lightning = "*"
 schedulefree = ">=1.4.1"
-x-transformers = "==2.17.9"
 pip = ">=25.3,<26"
 ipykernel = "*"
 corner = "*"
+
+[pypi-dependencies]
+flow-matching = ">=1.0.10"
+x-transformers = "==2.17.9"
 legofmt = { path = ".", editable = true }
 
-[feature.lap.pypi-dependencies]
-torch-lap-cuda = { git = "https://github.com/rdebrand/torch-lap-cuda" }
+[feature.train.dependencies]
+comet-ml = "*"
 
-[feature.train]
-platforms = ["linux-64"]
-
-[feature.train.pypi-dependencies]
-comet_ml = "*"
+[feature.train.activation]
+scripts = ["scripts/train-setup.sh"]
 
 [environments]
-default = []
-train = ["train", "lap"]
-
-
+default = ["base"]
+train = { features = ["base", "train"], no-default-feature = true }
