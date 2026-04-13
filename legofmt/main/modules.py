@@ -218,10 +218,8 @@ class LEGOLtng(ltng.LightningModule):
     def training_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
         loss = self._step(batch, _batch_idx)
         if loss.isnan():
-            for name, p in self.model.named_parameters():
-                if p.isnan().any():
-                    break
-            raise ValueError(f"NaN loss encountered during training. \n {name}")
+            nan_params = [n for n, p in self.model.named_parameters() if p.isnan().any()]
+            raise ValueError(f"NaN loss encountered during training. \n {nan_params or 'no NaN params (NaN is in activations/data)'}")
         return loss
 
     @torch.no_grad()
