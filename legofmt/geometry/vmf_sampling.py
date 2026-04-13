@@ -51,6 +51,7 @@ class VMF:
         samples_theta = ((
             2 / kappa * torch.randn(n, device=loc_cc.device) + torch.pi
         ) % (2 * torch.pi) - torch.pi).abs()
+        # samples_theta = torch.pi * ((torch.randn(n, device=loc_cc.device) / kappa).tanh()).abs()
         samples_phi = 2 * torch.pi * torch.rand_like(samples_theta)
         samples = torch.stack((samples_theta, samples_phi), dim=-1)
         cc = self.to_cc(samples)
