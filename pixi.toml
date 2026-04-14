@@ -8,7 +8,6 @@ preview = ["pixi-build"]
 
 [feature.base.dependencies]
 python = ">=3.13.0,<3.15"
-pytorch = ">=2.10"
 numpy = "*"
 matplotlib = "*"
 lightning = "*"
@@ -20,12 +19,13 @@ corner = "*"
 [feature.geant4.dependencies]
 pyg4lego = { git = "https://github.com/lego-erc/pyg4lego.git" }
 
-[feature.base.target.linux-64.dependencies]
-cuda-version = "12.*"
-
 [feature.base.pypi-dependencies]
+torch = ">=2.10"
 flow-matching = ">=1.0.10"
 legofmt = { path = ".", editable = true }
+
+[feature.base.target.linux-64.pypi-options]
+extra-index-urls = ["https://download.pytorch.org/whl/cu128"]
 
 [feature.modern.pypi-dependencies]
 x-transformers = "==2.17.9"
