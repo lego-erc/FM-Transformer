@@ -21,7 +21,7 @@ corner = "*"
 pyg4lego = { git = "https://github.com/lego-erc/pyg4lego.git" }
 
 [feature.base.target.linux-64.dependencies]
-pytorch-cuda = "12.*"
+cuda-version = "12.*"
 
 [feature.base.pypi-dependencies]
 flow-matching = ">=1.0.10"
