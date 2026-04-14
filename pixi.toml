@@ -10,7 +10,6 @@ preview = ["pixi-build"]
 python = ">=3.13.0,<3.15"
 numpy = "*"
 matplotlib = "*"
-lightning = "*"
 schedulefree = ">=1.4.1"
 pip = ">=25.3,<26"
 ipykernel = "*"
@@ -20,6 +19,7 @@ corner = "*"
 pyg4lego = { git = "https://github.com/lego-erc/pyg4lego.git" }
 
 [feature.base.pypi-dependencies]
+lightning = "*"
 flow-matching = ">=1.0.10"
 legofmt = { path = ".", editable = true }
 torch = { version = ">=2.11", index = "https://download.pytorch.org/whl/cu130" }
