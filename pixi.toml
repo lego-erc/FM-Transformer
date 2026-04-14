@@ -9,7 +9,6 @@ preview = ["pixi-build"]
 [feature.base.dependencies]
 python = ">=3.13.0,<3.15"
 pytorch = ">=2.10"
-pyg4lego = { git = "https://github.com/lego-erc/pyg4lego.git" }
 numpy = "*"
 matplotlib = "*"
 lightning = "*"
@@ -17,6 +16,9 @@ schedulefree = ">=1.4.1"
 pip = ">=25.3,<26"
 ipykernel = "*"
 corner = "*"
+
+[feature.geant4.dependencies]
+pyg4lego = { git = "https://github.com/lego-erc/pyg4lego.git" }
 
 [feature.base.target.linux-64.dependencies]
 pytorch-cuda = "12.*"
@@ -40,6 +42,10 @@ scripts = ["scripts/train_setup.sh"]
 
 [environments]
 default = ["base", "modern"]
+geant4 = ["base", "modern", "geant4"]
 legacy = ["base", "legacy"]
+legacy-geant4 = ["base", "legacy", "geant4"]
 train = { features = ["base", "modern", "train"], no-default-feature = true }
 train-legacy = { features = ["base", "legacy", "train"], no-default-feature = true }
+train-geant4 = { features = ["base", "modern", "train", "geant4"], no-default-feature = true }
+train-legacy-geant4 = { features = ["base", "legacy", "train", "geant4"], no-default-feature = true }
