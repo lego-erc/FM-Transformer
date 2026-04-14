@@ -8,7 +8,6 @@ version = "0.1.0"
 [feature.base.dependencies]
 python = ">=3.13.0,<3.15"
 pytorch = ">=2.10"
-pytorch-cuda = { version = "12.*", platforms = ["linux-64"] }
 pyg4lego = { git = "https://github.com/lego-erc/pyg4lego.git" }
 numpy = "*"
 matplotlib = "*"
@@ -17,6 +16,9 @@ schedulefree = ">=1.4.1"
 pip = ">=25.3,<26"
 ipykernel = "*"
 corner = "*"
+
+[feature.base.target.linux-64.dependencies]
+pytorch-cuda = "12.*"
 
 [feature.base.pypi-dependencies]
 flow-matching = ">=1.0.10"
