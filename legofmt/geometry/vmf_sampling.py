@@ -33,13 +33,14 @@ class VMF:
         x = x_ / x_.abs().max(-1, keepdim=True).values * d
         return torch.cat((p, x), dim=-1)
 
-    def rotate_theta(self, cc, loc_theta):
-        c, s = loc_theta.cos(), loc_theta.sin()
-        y, z = cc[..., 1], cc[..., 2]
-        out = cc.clone()
-        out[..., 1] = y * c - z * s
-        out[..., 2] = y * s + z * c
-        return out
+    def rotate(self, sph, alpha, beta):
+        """Rotate about x-axis by alpha, then about z-axis by beta, in spherical coords."""
+        st, ct = sph[..., 0].sin(), sph[..., 0].cos()
+        sp, cp = sph[..., 1].sin(), sph[..., 1].cos()
+        sa, ca = alpha.sin(), alpha.cos()
+        theta = torch.acos((st * sp * sa + ct * ca).clamp(-1 + 1e-8, 1 - 1e-8))
+        phi = torch.atan2(st * sp * ca - ct * sa, st * cp) + beta
+        return torch.stack((theta, phi), dim=-1)
 
     def sample(self, n: tuple, loc_cc, kappa: torch.Tensor, bs_frac: float = 0.0):
         loc_theta, loc_phi = self.to_sph(loc_cc).expand((*n, -1)).clone().split(1, -1)
@@ -50,13 +51,8 @@ class VMF:
         ) % (2 * torch.pi) - torch.pi).abs()
         # samples_theta = torch.pi * ((torch.randn(n, device=loc_cc.device) / kappa).tanh()).abs()
         samples_phi = 2 * torch.pi * torch.rand_like(samples_theta)
-        samples = torch.stack((samples_theta, samples_phi), dim=-1)
-        cc = self.to_cc(samples)
-        cc_rot = self.rotate_theta(cc, loc_theta)
-        return self.to_cc(
-            self.to_sph(cc_rot)
-            + torch.arange(2.0, device=loc_phi.device) * (loc_phi + torch.pi / 2)
-        )
+        sph = torch.stack((samples_theta, samples_phi), dim=-1)
+        return self.to_cc(self.rotate(sph, loc_theta, loc_phi + torch.pi / 2))
 
     def sample_iso(self, n: tuple, mpct, device=None, **kwargs):
         samples_phi = 2 * torch.pi * torch.rand((*n, mpct), device=device)
