@@ -1,10 +1,7 @@
-import re
-
 import torch
 
 from ..main.modules import LEGOLtng
 from ..multiplicity.model import MultModel
-from ..geometry.energy_proj import EnergyProjections
 from ..geometry.raytracing_proj import CubeTrace
 
 
