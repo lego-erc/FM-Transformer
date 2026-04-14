@@ -22,8 +22,14 @@ lightning = "*"
 schedulefree = ">=1.4.1"
 flow-matching = ">=1.0.10"
 legofmt = { path = ".", editable = true }
+
+[feature.base.target.linux-64.pypi-dependencies]
 torch = { version = ">=2.11", index = "https://download.pytorch.org/whl/cu130" }
 torchvision = { version = ">=0.20.1", index = "https://download.pytorch.org/whl/cu130" }
+
+[feature.base.target.osx-arm64.pypi-dependencies]
+torch = ">=2.11"
+torchvision = ">=0.20.1"
 
 [feature.modern.pypi-dependencies]
 x-transformers = "==2.17.9"
