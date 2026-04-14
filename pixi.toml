@@ -20,9 +20,11 @@ corner = "*"
 pyg4lego = { git = "https://github.com/lego-erc/pyg4lego.git" }
 
 [feature.base.pypi-dependencies]
-torch = { version = ">=2.10", index = "https://download.pytorch.org/whl/cu128" }
 flow-matching = ">=1.0.10"
 legofmt = { path = ".", editable = true }
+
+[feature.base.target.linux-64.pypi-dependencies]
+torch = { version = ">=2.10", index = "https://download.pytorch.org/whl/cu128" }
 
 [feature.base.target.osx-arm64.pypi-dependencies]
 torch = ">=2.10"
