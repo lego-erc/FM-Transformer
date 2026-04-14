@@ -1,3 +1,5 @@
+import re
+
 import torch
 
 from ..main.modules import LEGOLtng
@@ -31,12 +33,16 @@ class GenerateOut(torch.nn.Module):
             torch.cuda.empty_cache()
         return model_out
 
-    def proj_ray_pass_to_model(self, cond: torch.Tensor, prepped: bool = False, ret_pdgids: bool = False):
+    def proj_ray_pass_to_model(self, cond: torch.Tensor, prepped: bool = False, ret_pdgids: bool = False, ret_full: bool = False):
         cond_model = cond.clone()
         if not prepped:
             cond_model[..., 1:7] = self.proj_ray(cond_model[..., 1:7])
         batch = self.gen_batch(cond_model)
-        return self.model(batch) if not ret_pdgids else (self.model(batch), batch[0][..., -1])
+        if ret_full:
+            return self.model(batch), batch[1:]
+        if ret_pdgids:
+            return self.model(batch), batch[0][..., -1]
+        return self.model(batch)
     
     def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids):
         mom_s = mom.view(-1, 3).shape[0]
