@@ -10,11 +10,12 @@ preview = ["pixi-build"]
 python = ">=3.13.0,<3.15"
 numpy = "*"
 matplotlib = "*"
+setuptools = "<82"
 pip = ">=25.3,<26"
 ipykernel = "*"
 corner = "*"
 
-[feature.geant4.dependencies]
+[feature.geant4.pypi-dependencies]
 pyg4lego = { git = "https://github.com/lego-erc/pyg4lego.git" }
 
 [feature.base.pypi-dependencies]
