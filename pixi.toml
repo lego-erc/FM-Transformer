@@ -4,6 +4,7 @@ channels = ["conda-forge", "pytorch", "nvidia"]
 name = "legofmt"
 platforms = ["linux-64", "osx-arm64"]
 version = "0.1.0"
+preview = ["pixi-build"]
 
 [feature.base.dependencies]
 python = ">=3.13.0,<3.15"
