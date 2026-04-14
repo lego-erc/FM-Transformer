@@ -34,15 +34,12 @@ class VMF:
         return torch.cat((p, x), dim=-1)
 
     def rotate_theta(self, cc, loc_theta):
-        k_theta = torch.zeros_like(cc)
-        k_theta[..., 0] = 1
-        kv_cr = torch.cross(k_theta, cc, dim=-1)
-        kv_in = (k_theta * cc).sum(dim=-1, keepdim=True)
-        return (
-            cc * loc_theta.cos()
-            + kv_cr * loc_theta.sin()
-            + k_theta * kv_in * (1 - loc_theta.cos())
-        )
+        c, s = loc_theta.cos(), loc_theta.sin()
+        y, z = cc[..., 1], cc[..., 2]
+        out = cc.clone()
+        out[..., 1] = y * c - z * s
+        out[..., 2] = y * s + z * c
+        return out
 
     def sample(self, n: tuple, loc_cc, kappa: torch.Tensor, bs_frac: float = 0.0):
         loc_theta, loc_phi = self.to_sph(loc_cc).expand((*n, -1)).clone().split(1, -1)
