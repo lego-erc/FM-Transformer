@@ -35,12 +35,12 @@ class VMF:
 
     def rotate(self, sph, alpha, beta):
         """Rotate about x-axis by alpha, then about z-axis by beta, in spherical coords."""
-        st, ct = sph[..., 0].sin(), sph[..., 0].cos()
-        sp, cp = sph[..., 1].sin(), sph[..., 1].cos()
+        st, ct = sph[..., 0:1].sin(), sph[..., 0:1].cos()
+        sp, cp = sph[..., 1:2].sin(), sph[..., 1:2].cos()
         sa, ca = alpha.sin(), alpha.cos()
         theta = torch.acos((st * sp * sa + ct * ca).clamp(-1 + 1e-8, 1 - 1e-8))
         phi = torch.atan2(st * sp * ca - ct * sa, st * cp) + beta
-        return torch.stack((theta, phi), dim=-1)
+        return torch.cat((theta, phi), dim=-1)
 
     def sample(self, n: tuple, loc_cc, kappa: torch.Tensor, bs_frac: float = 0.0):
         loc_theta, loc_phi = self.to_sph(loc_cc).expand((*n, -1)).clone().split(1, -1)
