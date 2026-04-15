@@ -7,7 +7,10 @@ from flow_matching.utils.manifolds import Euclidean, Sphere
 from legofmt.data.dataloaders import LEGODataset
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
-from torch_lap_cuda_lib import solve_lap as slap
+try:
+    from torch_lap_cuda_lib import solve_lap as slap
+except ImportError:
+    slap = None
 
 from legofmt.geometry.vmf_sampling import VMF
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
@@ -82,7 +85,7 @@ class LEGOLtng(ltng.LightningModule):
             },
             "model_conf": {
                     "h_dim": 2**7,
-                    "ntokens": 9,
+                    "max_seq_l": 9,
                     "in_dim": 6,
                     "nlayers": 4,
                     "nhead": 8,
@@ -107,16 +110,18 @@ class LEGOLtng(ltng.LightningModule):
             config["dl_conf"]["data_path"] = dpath + "/data_prepped.pt"
             with open(dpath + "/meta.json") as f:
                 meta_dict = json.load(f)
-                self.ntokens = meta_dict["ntokens"]
-                ptensor = torch.tensor(meta_dict["particles"], dtype=torch.int64)
+                self.max_seq_l = meta_dict["ntokens"]
+                ptensor = torch.tensor(meta_dict["particles"], dtype=torch.int64).sort().values
                 self.register_buffer("pdgids_template", ptensor.contiguous())
                 model_conf["model_args"]["npdgids"] = self.pdgids_template.shape[0] + 1
-            if "ntokens" not in model_conf["model_args"]:
-                model_conf["model_args"]["ntokens"] = self.ntokens
+            if "max_seq_l" not in model_conf["model_args"]:
+                model_conf["model_args"]["max_seq_l"] = self.max_seq_l
             if "pdgids" not in model_conf["model_args"]:
                 model_conf["pdgids"] = ptensor
         elif state_dict is not None:
-            self.ntokens = model_conf["model_args"]["ntokens"]
+            if model_conf["model_args"].get("ntokens", False):
+                model_conf["model_args"]["max_seq_l"] = model_conf["model_args"].pop("ntokens")
+            self.max_seq_l = model_conf["model_args"]["max_seq_l"]
             self.register_buffer("pdgids_template", model_conf["pdgids"])
         self.t_dist = model_conf.get("t_dist", "uniform")
         self.t_dist_scale = model_conf.get("t_dist_scale", 1.4)
@@ -142,7 +147,7 @@ class LEGOLtng(ltng.LightningModule):
         self.dl_conf = config.get("dl_conf")
         self.register_buffer(
             "types_embd",
-            torch.arange(self.ntokens, dtype=torch.int64).clamp_max(3).view(1, -1),
+            torch.arange(self.max_seq_l, dtype=torch.int64).clamp_max(3).view(1, -1),
         )
 
         self.odeint_conf = config.get("odeint_conf", {})
@@ -215,10 +220,8 @@ class LEGOLtng(ltng.LightningModule):
     def training_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
         loss = self._step(batch, _batch_idx)
         if loss.isnan():
-            for name, p in self.model.named_parameters():
-                if p.isnan().any():
-                    break
-            raise ValueError(f"NaN loss encountered during training. \n {name}")
+            nan_params = [n for n, p in self.model.named_parameters() if p.isnan().any()]
+            raise ValueError(f"NaN loss encountered during training. \n {nan_params or 'no NaN params (NaN is in activations/data)'}")
         return loss
 
     @torch.no_grad()
@@ -251,6 +254,7 @@ class LEGOLtng(ltng.LightningModule):
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=num_workers > 0,
+            multiprocessing_context="fork" if num_workers > 0 else None,
         )
 
     @torch.no_grad()
@@ -273,21 +277,6 @@ class LEGOLtng(ltng.LightningModule):
             time_grid = torch.tensor([0.0, 1.0], device=self.device)
 
         target, mask, attn_mask = batch
-
-        if target.shape[-2] < self.ntokens:
-            pad_len = self.ntokens - target.shape[-2]
-            target = torch.cat((target, target[:, -1:].expand(-1, pad_len, -1)), dim=-2)
-        if mask.shape[1] < self.ntokens:
-            pad_len = self.ntokens - mask.shape[1]
-            mask = torch.cat(
-                (mask, torch.zeros_like(mask[:, -1:]).expand(-1, pad_len, -1)), dim=1
-            )
-        if attn_mask.shape[1] < self.ntokens:
-            pad_len = self.ntokens - attn_mask.shape[1]
-            attn_mask = torch.cat(
-                (attn_mask, torch.zeros_like(attn_mask[:, -1:]).expand(-1, pad_len)),
-                dim=1,
-            )
 
         energy, cc, pdgids = target.split([1, 6, 1], dim=-1)
 
@@ -332,6 +321,8 @@ class LEGOLtng(ltng.LightningModule):
 
         if sols_.device.type == "cuda":
             torch.cuda.empty_cache()
+        if sols_.device.type == "mps":
+            torch.mps.empty_cache()
         del sols_
 
         return torch.cat(sols_list, dim=-3).contiguous()

@@ -68,8 +68,8 @@ class MultModel(LightningModule):
             with open(lds_conf.get("data") + "/meta.json") as f:
                 meta_dict = json.load(f)
                 self.mm_conf["max_out_particles"] = meta_dict["ntokens"] - 3
-                self.mm_conf["ptypes"] = torch.tensor(meta_dict["particles"])
-                self.mm_conf["ptypes_in"] = torch.tensor(meta_dict["particles_in"])
+                self.mm_conf["ptypes"] = torch.tensor(meta_dict["particles"]).sort().values
+                self.mm_conf["ptypes_in"] = torch.tensor(meta_dict["particles_in"]).sort().values
         self.max_particles = self.mm_conf.get("max_out_particles")
         dropout = self.mm_conf.get("dropout", 0.1)
         self.max_seq_len = self.mm_conf["ptypes"].shape[0]
@@ -169,6 +169,7 @@ class MultModel(LightningModule):
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=num_workers > 0,
+            multiprocessing_context="fork" if num_workers > 0 else None,
         )
 
     @torch.no_grad()

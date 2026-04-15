@@ -9,6 +9,7 @@ class GenerateBase:
         self.cutoff_mev = config["dl_conf"]["lds_args"].get("cutoff_mev", 10.0)
         base_conf = config.get("base_conf")
         base_dist = base_conf.get("base_dist", "iso")
+        self.tanh_theta = base_conf.get("tanh_theta", False)
         self.kappa = base_conf.get("kappa", torch.tensor(10.0))
         self.e_dep_max = base_conf.get("e_dep_max", 1.)
         self.bs_frac = base_conf.get("bs_frac", 0.0)
@@ -72,8 +73,8 @@ class GenerateBase:
         p_cc = incoming_rt[..., :3] / p_norm
         loc_cc = incoming_rt[..., -3:]
         rd_scale = self.rd_scale(shape, p_norm)
-        x = self.vmf_utils.sample(shape, loc_cc, self.kappa, self.bs_frac)
-        p_ = self.vmf_utils.sample(shape, p_cc, self.kappa, 0.0)
+        x = self.vmf_utils.sample(shape, loc_cc, self.kappa, self.bs_frac, self.tanh_theta)
+        p_ = self.vmf_utils.sample(shape, p_cc, self.kappa, 0.0, self.tanh_theta)
         p_sc = rd_scale * p_
         base = torch.cat((p_sc, x), dim=-1)
         base = torch.cat((incoming_rt, base), dim=1)
