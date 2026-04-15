@@ -8,7 +8,6 @@ preview = ["pixi-build"]
 
 [feature.base.dependencies]
 python = ">=3.13.0,<3.15"
-numpy = "*"
 matplotlib = "*"
 setuptools = "<82"
 pip = ">=25.3,<26"
@@ -19,6 +18,7 @@ corner = "*"
 pyg4lego = { git = "https://github.com/lego-erc/pyg4lego.git" }
 
 [feature.base.pypi-dependencies]
+numpy = "*"
 lightning = "*"
 schedulefree = ">=1.4.1"
 flow-matching = ">=1.0.10"
@@ -30,7 +30,6 @@ torchvision = { version = ">=0.20.1", index = "https://download.pytorch.org/whl/
 
 [feature.base.target.osx-arm64.pypi-dependencies]
 torch = ">=2.11"
-torchvision = ">=0.20.1"
 
 [feature.modern.pypi-dependencies]
 x-transformers = "==2.17.9"
@@ -45,6 +44,28 @@ uv = "*"
 [feature.train.activation]
 scripts = ["scripts/train_setup.sh"]
 
+[feature.ci.dependencies]
+python = ">=3.13.0,<3.15"
+setuptools = "<82"
+pip = ">=25.3,<26"
+pytest = "*"
+
+[feature.ci.pypi-dependencies]
+numpy = "*"
+huggingface_hub = "*"
+lightning = "*"
+schedulefree = ">=1.4.1"
+flow-matching = ">=1.0.10"
+x-transformers = "==2.17.9"
+legofmt = { path = ".", editable = true }
+
+[feature.ci.target.linux-64.pypi-dependencies]
+torch = { version = ">=2.11", index = "https://download.pytorch.org/whl/cpu" }
+torchvision = { version = ">=0.20.1", index = "https://download.pytorch.org/whl/cpu" }
+
+[feature.ci.target.osx-arm64.pypi-dependencies]
+torch = ">=2.11"
+
 [environments]
 default = ["base", "modern"]
 geant4 = ["base", "modern", "geant4"]
@@ -54,3 +75,4 @@ train = { features = ["base", "modern", "train"], no-default-feature = true }
 train-legacy = { features = ["base", "legacy", "train"], no-default-feature = true }
 train-geant4 = { features = ["base", "modern", "train", "geant4"], no-default-feature = true }
 train-legacy-geant4 = { features = ["base", "legacy", "train", "geant4"], no-default-feature = true }
+ci = { features = ["ci"], no-default-feature = true }
