@@ -1,0 +1,56 @@
+name: Checkpoint generate test
+
+on:
+  workflow_dispatch:
+    inputs:
+      hf_repo:
+        description: "HF repo id"
+        default: "rdebrand/legofmt-checkpoints"
+      hf_revision:
+        description: "HF branch / tag / commit"
+        default: "main"
+      flow_ckpt:
+        description: "Path to flow checkpoint inside HF repo"
+        default: "flow/latest.pt"
+      mult_ckpt:
+        description: "Path to multiplicity checkpoint inside HF repo"
+        default: "mult/latest.pt"
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "legofmt/main/generate.py"
+      - "legofmt/main/modules.py"
+      - "legofmt/multiplicity/**"
+      - "legofmt/geometry/**"
+      - "legofmt/cfm/**"
+      - "tests/test_generate.py"
+      - "pixi.toml"
+      - ".github/workflows/checkpoint-test.yml"
+
+jobs:
+  test-generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: prefix-dev/setup-pixi@v0.9.4
+        with:
+          pixi-version: latest
+          run-install: false
+
+      - run: pixi install -e ci
+
+      - name: Cache HF hub
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ inputs.hf_repo || 'default' }}-${{ inputs.hf_revision || 'main' }}-${{ inputs.flow_ckpt }}-${{ inputs.mult_ckpt }}
+
+      - name: Run generate tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO: ${{ inputs.hf_repo || 'rdebrand/legofmt-checkpoints' }}
+          HF_REVISION: ${{ inputs.hf_revision || 'main' }}
+          HF_FLOW_CKPT: ${{ inputs.flow_ckpt || 'flow/latest.pt' }}
+          HF_MULT_CKPT: ${{ inputs.mult_ckpt || 'mult/latest.pt' }}
+        run: pixi run -e ci pytest tests/test_generate.py -v
