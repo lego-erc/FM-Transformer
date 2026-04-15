@@ -42,14 +42,16 @@ class VMF:
         phi = torch.atan2(st * sp * ca - ct * sa, st * cp) + beta
         return torch.cat((theta, phi), dim=-1)
 
-    def sample(self, n: tuple, loc_cc, kappa: torch.Tensor, bs_frac: float = 0.0):
+    def sample(self, n: tuple, loc_cc, kappa: torch.Tensor, bs_frac: float = 0.0, tanh_theta: bool = False):
         loc_theta, loc_phi = self.to_sph(loc_cc).expand((*n, -1)).clone().split(1, -1)
         if bs_frac > 0.0:
             loc_theta[: round(bs_frac * n[0])] = loc_theta[0] + torch.pi
-        samples_theta = ((
-            2 / kappa * torch.randn(n, device=loc_cc.device) + torch.pi
-        ) % (2 * torch.pi) - torch.pi).abs()
-        # samples_theta = torch.pi * ((torch.randn(n, device=loc_cc.device) / kappa).tanh()).abs()
+        if not tanh_theta:
+            samples_theta = ((
+                2 / kappa * torch.randn(n, device=loc_cc.device) + torch.pi
+            ) % (2 * torch.pi) - torch.pi).abs()
+        else:
+            samples_theta = torch.pi * ((torch.randn(n, device=loc_cc.device) / kappa).tanh()).abs()
         samples_phi = 2 * torch.pi * torch.rand_like(samples_theta)
         sph = torch.stack((samples_theta, samples_phi), dim=-1)
         return self.to_cc(self.rotate(sph, loc_theta, loc_phi + torch.pi / 2))
