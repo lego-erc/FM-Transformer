@@ -119,6 +119,8 @@ class LEGOLtng(ltng.LightningModule):
             if "pdgids" not in model_conf["model_args"]:
                 model_conf["pdgids"] = ptensor
         elif state_dict is not None:
+            if model_conf["model_args"].get("ntokens", False):
+                model_conf["model_args"]["max_seq_l"] = model_conf["model_args"].pop("ntokens")
             self.max_seq_l = model_conf["model_args"]["max_seq_l"]
             self.register_buffer("pdgids_template", model_conf["pdgids"])
         self.t_dist = model_conf.get("t_dist", "uniform")
