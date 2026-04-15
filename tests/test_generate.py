@@ -21,7 +21,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 @pytest.fixture(scope="module")
 def ckpt_paths(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
     cache = tmp_path_factory.mktemp("hf")
-    token = os.environ.get("HF_TOKEN")  # only needed for private repos
+    token = (os.environ.get("HF_TOKEN") or "").strip() or None  # strip stray newlines, empty -> anonymous
     flow = hf_hub_download(
         repo_id=HF_REPO, filename=FLOW_CKPT, revision=HF_REVISION,
         local_dir=cache, token=token,
