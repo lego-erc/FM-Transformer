@@ -325,4 +325,7 @@ class LEGOLtng(ltng.LightningModule):
             torch.mps.empty_cache()
         del sols_
 
-        return torch.cat(sols_list, dim=-3).contiguous()
+        sols = torch.cat(sols_list, dim=-3)
+        densities = sols[:, :1, :1].expand_as(sols[..., :1])
+
+        return torch.cat((densities, sols, pdgids),dim=-1), mask, attn_mask

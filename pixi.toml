@@ -8,17 +8,19 @@ preview = ["pixi-build"]
 
 [feature.base.dependencies]
 python = ">=3.13.0,<3.15"
-matplotlib = "*"
 setuptools = "<82"
 pip = ">=25.3,<26"
 ipykernel = "*"
+
+[feature.base.target.linux-64.dependencies]
+numpy = "*"
+matplotlib = "*"
 corner = "*"
 
 [feature.geant4.pypi-dependencies]
 pyg4lego = { git = "https://github.com/lego-erc/pyg4lego.git" }
 
 [feature.base.pypi-dependencies]
-numpy = "*"
 lightning = "*"
 schedulefree = ">=1.4.1"
 flow-matching = ">=1.0.10"
@@ -30,6 +32,9 @@ torchvision = { version = ">=0.20.1", index = "https://download.pytorch.org/whl/
 
 [feature.base.target.osx-arm64.pypi-dependencies]
 torch = ">=2.11"
+numpy = "*"
+matplotlib = "*"
+corner = "*"
 
 [feature.modern.pypi-dependencies]
 x-transformers = "==2.17.9"
