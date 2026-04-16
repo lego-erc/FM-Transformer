@@ -60,10 +60,13 @@ def test_instantiation(generator: GenerateOut) -> None:
 @torch.no_grad()
 def test_forward_shape(generator: GenerateOut) -> None:
     cond = _dummy_cond(generator, batch=2)
-    out = generator(cond)
+    out, mask, attn_mask = generator(cond)
     assert out.ndim == 3
     assert out.shape[0] == cond.shape[0]
     assert out.shape[1] == generator.max_seq_l
+    assert out.shape[2] == 8  # density, px, py, pz, x, y, z, pdgid
+    assert mask.shape == (cond.shape[0], generator.max_seq_l, 1)
+    assert attn_mask.shape == (cond.shape[0], generator.max_seq_l)
 
 
 @torch.no_grad()
