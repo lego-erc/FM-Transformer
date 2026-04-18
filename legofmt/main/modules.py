@@ -34,6 +34,7 @@ class ProjectModel(ModelWrapper, nn.Module):
         self.kwargs = kwargs
         self.vmf = VMF()
         self.cond_cube = kwargs.get("cond_cube", False)
+        self.no_detach = kwargs.get("no_detach", False)
 
     def forward(
         self,
@@ -47,20 +48,24 @@ class ProjectModel(ModelWrapper, nn.Module):
         x_2d = x.flatten(0, -2)
         pm_flat = attn_mask.flatten()
         x_projx = self.manifold.projx(x_2d[pm_flat])
+        if self.no_detach:
+            x_2d = x_2d.clone()
         x_2d[pm_flat] = x_projx
-        x = x_2d.view_as(x).detach()
+        x = x_2d.view_as(x) if self.no_detach else x_2d.view_as(x).detach()
         t = torch.atleast_2d(t).expand_as(attn_mask)
         t_mask = mask.squeeze(-1) == 1
         t = t_mask * t + ~t_mask
         if self.cond_cube:
             x_cube = x.clone()
             x_cube[:, 2:3] = self.vmf.to_cube(x_cube[:, 2:3])
-            x_surr = x_cube 
+            x_surr = x_cube
         else:
             x_surr = x
         v = self.vf(t, x_surr, mask, attn_mask, types, pdgids)
         v_2d = v.flatten(0, -2)
         v_proj = self.manifold.proju(x_projx, v_2d[pm_flat])
+        if self.no_detach:
+            v_2d = v_2d.clone()
         v_2d[pm_flat] = v_proj
         return v_2d.view_as(v)
 
