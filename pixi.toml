@@ -18,19 +18,16 @@ matplotlib = "*"
 corner = "*"
 
 [feature.geant4.dependencies]
-cmake = "*"
-scikit-build-core = "*"
-pybind11 = "*"
 geant4 = "*"
 
 [feature.geant4.pypi-dependencies]
 pyg4lego = { git = "https://github.com/lego-erc/pyg4lego.git" }
 
-[feature.geant4.pypi-options]
-no-build-isolation = ["pyg4lego"]
+[feature.geant4.activation.env]
+CMAKE_PREFIX_PATH = "$CONDA_PREFIX"
 
 [feature.geant4.target.osx-arm64.activation.env]
-CMAKE_PREFIX_PATH = "$CONDA_PREFIX"
+KMP_DUPLICATE_LIB_OK = "TRUE"
 
 [feature.base.pypi-dependencies]
 lightning = "*"
