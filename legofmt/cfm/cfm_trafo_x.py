@@ -108,16 +108,23 @@ class CFMTrafo_x(nn.Module):
         t_freqs = torch.einsum("ij, k -> ijk", t, self.freqs)
         embd_t = self.mask_freqs * t_freqs.sin() + self.mask_freqs_rolled * t_freqs.cos()
 
-        l_embd = 1/3 * (l_mask + l_types + l_pdgids)
         b_embd = 1/3 * (b_mask + b_types + b_pdgids)
         bo_embd = 1/3 * (bo_mask + bo_types + bo_pdgids)
 
-        l_embdd = torch.einsum("ijl, ijkl -> ijk", states_mask, l_embd[:, :, 0])
+        l_embdd = torch.stack([                                                                                                      
+            torch.einsum("ijl, ijkl -> ijk", states_mask, w[:, :, 0])                                                                
+            for w in (l_mask, l_types, l_pdgids)                                                                                     
+        ]).sum(0) / 3   
+
         embdd = l_embdd + b_embd + embd_t
 
         trafo_out = self.vf(embdd, mask=attn_mask, condition=embd_t)
+
+        l_out = torch.stack([                                                                                                      
+            torch.einsum("ijk, ijkl -> ijl", trafo_out, w[:, :, 1])                                                                
+            for w in (l_mask, l_types, l_pdgids)                                                                                     
+        ]).sum(0) / 3  
         
-        l_out = torch.einsum("ijk, ijkl -> ijl", trafo_out, l_embd[:, :, 1])
         out = l_out + bo_embd
 
         return (mask == 1) * out

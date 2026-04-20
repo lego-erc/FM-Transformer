@@ -324,11 +324,11 @@ class LEGOLtng(ltng.LightningModule):
 
             sols_list.append(sols_)
 
-        if sols_.device.type == "cuda":
-            torch.cuda.empty_cache()
-        if sols_.device.type == "mps":
-            torch.mps.empty_cache()
-        del sols_
+            if sols_.device.type == "cuda":
+                torch.cuda.empty_cache()
+            if sols_.device.type == "mps":
+                torch.mps.empty_cache()
+            del sols_
 
         sols = torch.cat(sols_list, dim=-3)
         densities = sols[:, :1, :1].expand_as(sols[..., :1])
