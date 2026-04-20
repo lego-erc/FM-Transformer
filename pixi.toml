@@ -21,7 +21,7 @@ corner = "*"
 geant4 = "*"
 
 [feature.geant4.pypi-dependencies]
-pyg4lego = { git = "https://github.com/lego-erc/pyg4lego.git" }
+pyg4lego = { git = "https://github.com/lego-erc/pyg4lego.git", branch= "dep_fix"}
 
 [feature.geant4.activation.env]
 CMAKE_PREFIX_PATH = "$CONDA_PREFIX"
