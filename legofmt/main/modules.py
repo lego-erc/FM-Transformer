@@ -317,11 +317,6 @@ class LEGOLtng(ltng.LightningModule):
             )
             sols_ = sols_.masked_fill(~attn_mask_tp[idx].unsqueeze(-1), torch.nan)
 
-            if filter_pdgid is not None:
-                filter_pdgid_idx = self.convert_pdgids(filter_pdgid)
-                pdgid_mask = torch.isin(pdgids_idx_tp[idx], filter_pdgid_idx)
-                sols_ = sols_.masked_fill(~pdgid_mask, torch.nan)
-
             sols_list.append(sols_)
 
             if sols_.device.type == "cuda":
@@ -332,5 +327,12 @@ class LEGOLtng(ltng.LightningModule):
 
         sols = torch.cat(sols_list, dim=-3)
         densities = sols[:, :1, :1].expand_as(sols[..., :1])
+
+        if filter_pdgid is not None:
+            filter_pdgid_idx = self.convert_pdgids(filter_pdgid)
+            pdgid_mask = torch.isin(pdgids_idx_tp[idx], filter_pdgid_idx)
+            pdgid_mask.logical_or_(pdgids_idx_tp[idx] == 0)
+            sols.masked_fill_(~pdgid_mask, torch.nan)
+            pdgids.masked_fill_(~pdgid_mask, 0)
 
         return torch.cat((densities, sols, pdgids),dim=-1), mask, attn_mask
