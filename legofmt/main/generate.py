@@ -7,7 +7,7 @@ from ..geometry.raytracing_proj import CubeTrace
 
 
 class GenerateOut(torch.nn.Module):
-    def __init__(self, flow_conf_path: str, mult_conf_path: str, device="cpu"):
+    def __init__(self, flow_conf_path: str, mult_conf_path: str, device="cpu", couple_in_out_pdgids=False):
         super().__init__()
         flow_conf = torch.load(flow_conf_path, map_location=device, weights_only=False)
         self.model = LEGOLtng(flow_conf).to(device)
@@ -18,6 +18,9 @@ class GenerateOut(torch.nn.Module):
 
         self.pdgid_in = mult_conf["config"]["mm_conf"]["ptypes_in"].to(device)
         self.ptypes = mult_conf["config"]["mm_conf"]["ptypes"].to(device)
+
+        if couple_in_out_pdgids:
+            self.model.odeint_conf["filter_pdgid"] = self.ptypes_in
 
         self.max_seq_l = flow_conf["config"]["model_conf"]["model_args"]["max_seq_l"]
         self.pdgids = flow_conf["config"]["model_conf"]["pdgids"].to(device)
