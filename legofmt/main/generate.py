@@ -20,7 +20,7 @@ class GenerateOut(torch.nn.Module):
         self.ptypes = mult_conf["config"]["mm_conf"]["ptypes"].to(device)
 
         if couple_in_out_pdgids:
-            self.model.odeint_conf["filter_pdgid"] = self.ptypes_in
+            self.model.odeint_conf["filter_pdgid"] = self.self.pdgid_in
 
         self.max_seq_l = flow_conf["config"]["model_conf"]["model_args"]["max_seq_l"]
         self.pdgids = flow_conf["config"]["model_conf"]["pdgids"].to(device)
