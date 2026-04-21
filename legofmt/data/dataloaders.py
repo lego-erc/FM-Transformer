@@ -99,7 +99,7 @@ class LEGODataset(Dataset):
         elif isinstance(data, dict):
             self.full_data = GetLEGOData(**kwargs)(data) 
             self.target, self.mask, self.attn_mask, _ = self.full_data
-        elif isinstance(data, tuple):
+        if isinstance(data, tuple):
             self.target, self.mask, self.attn_mask = data
         self.length = self.target.shape[0]
         self.device = kwargs.get("device", "cpu")
