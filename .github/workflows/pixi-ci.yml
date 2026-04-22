@@ -13,9 +13,9 @@ on:
       hf_revision:
         default: "main"
       flow_ckpt:
-        default: "rp_fm_v4_100426.pt"
+        default: "checkpoints/fm/rp_fm_v4_100426.pt"
       mult_ckpt:
-        default: "rp_mult_v1_020426.pt"
+        default: "checkpoints/mult/rp_mult_v1_080426.pt"
 
 jobs:
   test:
