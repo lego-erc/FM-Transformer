@@ -64,13 +64,18 @@ class MultModel(LightningModule):
         h_dim = self.mm_conf.get("h_dim", 512)
         dl_conf = config.get("dl_conf", {})
         lds_conf = dl_conf.get("lds_args", {})
-        if state_dict is None and "ptypes" not in config:
+        if state_dict is None:
             with open(lds_conf.get("data") + "/meta.json") as f:
                 meta_dict = json.load(f)
-                self.mm_conf["max_out_particles"] = meta_dict["ntokens"] - 3
-                self.mm_conf["ptypes"] = torch.tensor(meta_dict["particles"]).sort().values
-                self.mm_conf["ptypes_in"] = torch.tensor(meta_dict["particles_in"]).sort().values
-        self.max_particles = self.mm_conf.get("max_out_particles")
+                self.mm_conf.setdefault("max_out_particles", meta_dict["ntokens"] - 3)
+                self.mm_conf.setdefault("ptypes", torch.tensor(meta_dict["particles"]).sort().values)
+                self.mm_conf.setdefault("ptypes_in", torch.tensor(meta_dict["particles_in"]).sort().values)
+            if "max_count" not in self.mm_conf:
+                _tmp_loader = MultLoader(self.config)
+                self.mm_conf["max_count"] = int(_tmp_loader.counts.max().item()) + 1
+                del _tmp_loader
+        self.mm_conf.setdefault("max_count", self.mm_conf.get("max_out_particles"))
+        self.max_particles = self.mm_conf["max_count"]
         dropout = self.mm_conf.get("dropout", 0.1)
         self.max_seq_len = self.mm_conf["ptypes"].shape[0]
         in_dim = self.mm_conf.get("in_dim", 6)
