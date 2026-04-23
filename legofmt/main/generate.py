@@ -85,7 +85,7 @@ class GenerateOut(torch.nn.Module):
             },
             "per_particle": {
                 "Incoming": sols[:, 2:3],
-                "Outgoing": sols[:, 3:],
+                "Outgoing": sols[:, 3:].nan_to_num(),
             },
             "per_voxel": {
                 "E_dep": torch.empty(sols.shape[0], 0, 4, device=sols.device),
