@@ -316,15 +316,15 @@ class LEGOLtng(ltng.LightningModule):
                     types=self.types_embd,
                     pdgids=pdgids_idx_tp[idx],
                 )
-                sols_ = sols_.masked_fill(~attn_mask_tp[idx].unsqueeze(-1), torch.nan)
+                sols_.masked_fill_(~attn_mask_tp[idx].unsqueeze(-1), torch.nan)
 
                 sols_list.append(sols_)
 
+                del sols_
                 if sols_.device.type == "cuda":
                     torch.cuda.empty_cache()
                 if sols_.device.type == "mps":
                     torch.mps.empty_cache()
-                del sols_
 
             sols = torch.cat(sols_list, dim=-3)
 
