@@ -48,8 +48,7 @@ class ProjectModel(ModelWrapper, nn.Module):
         x_2d = x.flatten(0, -2)
         pm_flat = attn_mask.flatten()
         x_projx = self.manifold.projx(x_2d[pm_flat])
-        if self.no_detach:
-            x_2d = x_2d.clone()
+        x_2d = x_2d.clone()
         x_2d[pm_flat] = x_projx
         x = x_2d.view_as(x) if self.no_detach else x_2d.view_as(x).detach()
         t = torch.atleast_2d(t).expand_as(attn_mask)
