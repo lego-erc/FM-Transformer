@@ -273,6 +273,11 @@ class LEGOLtng(ltng.LightningModule):
         filter_pdgid = self.odeint_conf.get("filter_pdgid", None)
         method = self.odeint_conf.get("method", "midpoint")
 
+        if self.odeint_conf.get("fwd_compile", False) and not hasattr(
+            self.model.vf, "_orig_mod"
+        ):
+            self.model.vf = torch.compile(self.model.vf, mode="reduce-overhead")
+
         if return_timesteps:
             time_grid = torch.arange(
                 0, 1 + step_size, step=step_size, device=self.device
