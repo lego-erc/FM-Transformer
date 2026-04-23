@@ -291,48 +291,49 @@ class LEGOLtng(ltng.LightningModule):
             pdgids_idx = self.convert_pdgids(pdgids)
 
         base = self.gen_base_wrapper((cc, mask, attn_mask))
+        densities = base[:, :1, :1].expand_as(base[..., :1])
         if return_base:
-            return base.masked_fill(~attn_mask.unsqueeze(-1), torch.nan)
+            sols = base.masked_fill(~attn_mask.unsqueeze(-1), torch.nan)
 
-        init_state_tp = base.split(split_size, 0)
-        mask_tp = mask.split(split_size, 0)
-        attn_mask_tp = attn_mask.split(split_size, 0)
-        pdgids_idx_tp = pdgids_idx.split(split_size, 0)
+        else:
+            init_state_tp = base.split(split_size, 0)
+            mask_tp = mask.split(split_size, 0)
+            attn_mask_tp = attn_mask.split(split_size, 0)
+            pdgids_idx_tp = pdgids_idx.split(split_size, 0)
 
-        sols_list = []
-        solver = RiemannianODESolver(velocity_model=self.model, manifold=self.manifold)
-        for idx in range(len(init_state_tp)):
-            sols_ = solver.sample(
-                x_init=init_state_tp[idx],
-                step_size=step_size,
-                method=method,
-                projx=False,
-                proju=False,
-                return_intermediates=return_timesteps,
-                time_grid=time_grid,
-                mask=mask_tp[idx],
-                attn_mask=attn_mask_tp[idx],
-                types=self.types_embd,
-                pdgids=pdgids_idx_tp[idx],
-            )
-            sols_ = sols_.masked_fill(~attn_mask_tp[idx].unsqueeze(-1), torch.nan)
+            sols_list = []
+            solver = RiemannianODESolver(velocity_model=self.model, manifold=self.manifold)
+            for idx in range(len(init_state_tp)):
+                sols_ = solver.sample(
+                    x_init=init_state_tp[idx],
+                    step_size=step_size,
+                    method=method,
+                    projx=False,
+                    proju=False,
+                    return_intermediates=return_timesteps,
+                    time_grid=time_grid,
+                    mask=mask_tp[idx],
+                    attn_mask=attn_mask_tp[idx],
+                    types=self.types_embd,
+                    pdgids=pdgids_idx_tp[idx],
+                )
+                sols_ = sols_.masked_fill(~attn_mask_tp[idx].unsqueeze(-1), torch.nan)
 
-            sols_list.append(sols_)
+                sols_list.append(sols_)
 
-            if sols_.device.type == "cuda":
-                torch.cuda.empty_cache()
-            if sols_.device.type == "mps":
-                torch.mps.empty_cache()
-            del sols_
+                if sols_.device.type == "cuda":
+                    torch.cuda.empty_cache()
+                if sols_.device.type == "mps":
+                    torch.mps.empty_cache()
+                del sols_
 
-        sols = torch.cat(sols_list, dim=-3)
-        densities = sols[:, :1, :1].expand_as(sols[..., :1])
+            sols = torch.cat(sols_list, dim=-3)
 
-        if filter_pdgid is not None:
-            filter_pdgid_idx = self.convert_pdgids(filter_pdgid)
-            pdgid_mask = torch.isin(pdgids_idx_tp[idx], filter_pdgid_idx)
-            pdgid_mask.logical_or_(pdgids_idx_tp[idx] == 0)
-            sols.masked_fill_(~pdgid_mask, torch.nan)
-            pdgids.masked_fill_(~pdgid_mask, 0)
+            if filter_pdgid is not None:
+                filter_pdgid_idx = self.convert_pdgids(filter_pdgid)
+                pdgid_mask = torch.isin(pdgids_idx_tp[idx], filter_pdgid_idx)
+                pdgid_mask.logical_or_(pdgids_idx_tp[idx] == 0)
+                sols.masked_fill_(~pdgid_mask, torch.nan)
+                pdgids.masked_fill_(~pdgid_mask, 0)
 
         return torch.cat((densities, sols, pdgids),dim=-1), mask, attn_mask
