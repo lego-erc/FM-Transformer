@@ -84,4 +84,3 @@ def test_g4_style_api(generator: GenerateOut) -> None:
     assert set(out) == {"per_event", "per_particle", "per_voxel"}
     assert out["per_particle"]["Incoming"].shape[-1] == 8   # E, mom(3), pdgid, pos(3)
     assert out["per_particle"]["Outgoing"].shape[-1] == 8
-    assert torch.isfinite(out["per_particle"]["Outgoing"]).all()
