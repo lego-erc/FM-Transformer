@@ -14,7 +14,7 @@ from legofmt.main.generate import GenerateOut
 HF_REPO = os.environ.get("HF_REPO", "lego-erc/legofmt")
 HF_REVISION = os.environ.get("HF_REVISION", "main")
 FLOW_CKPT = os.environ.get("HF_FLOW_CKPT", "checkpoints/fm/rp_fm_v4_100426.pt")
-MULT_CKPT = os.environ.get("HF_MULT_CKPT", "checkpoints/mult/rp_mult_v1_020426.pt")
+MULT_CKPT = os.environ.get("HF_MULT_CKPT", "checkpoints/mult/rp_mult_v1_080426.pt")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
