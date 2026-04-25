@@ -4,12 +4,10 @@ channels = ["conda-forge"]
 name = "legofmt"
 platforms = ["linux-64", "osx-arm64"]
 version = "0.1.0"
-preview = ["pixi-build"]
 
 [feature.base.dependencies]
 python = ">=3.13.0,<3.15"
 setuptools = "<82"
-pip = ">=25.3,<26"
 ipykernel = "*"
 
 [feature.base.target.linux-64.dependencies]
@@ -20,11 +18,17 @@ corner = "*"
 [feature.geant4.dependencies]
 geant4 = "*"
 
-[feature.geant4.pypi-dependencies]
-pyg4lego = { git = "https://github.com/lego-erc/pyg4lego.git", branch= "dep_fix"}
+[feature.geant4.target.linux-64.dependencies]
+cuda-version = "13.*"
+cuda-toolkit = "13.*"
+geant4 = ">=11.3.2"
 
-[feature.geant4.activation.env]
-CMAKE_PREFIX_PATH = "$CONDA_PREFIX"
+[feature.geant4.pypi-dependencies]
+pyg4lego = { git = "https://github.com/lego-erc/pyg4lego.git", branch = "dep_fix"}
+
+[feature.geant4.target.linux-64.activation.env]
+CUDA_PATH = "$CONDA_PREFIX/targets/x86_64-linux"
+LD_LIBRARY_PATH = "$CONDA_PREFIX/lib"
 
 [feature.geant4.target.osx-arm64.activation.env]
 KMP_DUPLICATE_LIB_OK = "TRUE"
