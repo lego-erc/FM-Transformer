@@ -91,16 +91,16 @@ class GetLEGOData:
 
 
 class LEGODataset(Dataset):
-    def __init__(self, data: (str | dict), **kwargs) -> None:
+    def __init__(self, data: (str | dict | tuple), **kwargs) -> None:
         super().__init__()
         if isinstance(data, str):
             path = data + "/data_prepped.pt" if data[-3:] != ".pt" else data
             data = torch.load(path, map_location="cpu", weights_only=False)
-        try:
-            self.target, self.mask, self.attn_mask = data
-        except ValueError:
+        elif isinstance(data, dict):
             self.full_data = GetLEGOData(**kwargs)(data) 
             self.target, self.mask, self.attn_mask, _ = self.full_data
+        if isinstance(data, tuple):
+            self.target, self.mask, self.attn_mask = data
         self.length = self.target.shape[0]
         self.device = kwargs.get("device", "cpu")
 

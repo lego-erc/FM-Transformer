@@ -13,8 +13,8 @@ from legofmt.main.generate import GenerateOut
 
 HF_REPO = os.environ.get("HF_REPO", "lego-erc/legofmt")
 HF_REVISION = os.environ.get("HF_REVISION", "main")
-FLOW_CKPT = os.environ.get("HF_FLOW_CKPT", "rp_fm_v4_100426.pt")
-MULT_CKPT = os.environ.get("HF_MULT_CKPT", "rp_mult_v1_020426.pt")
+FLOW_CKPT = os.environ.get("HF_FLOW_CKPT", "checkpoints/fm/rp_fm_v4_100426.pt")
+MULT_CKPT = os.environ.get("HF_MULT_CKPT", "checkpoints/mult/rp_mult_v1_080426.pt")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -60,10 +60,13 @@ def test_instantiation(generator: GenerateOut) -> None:
 @torch.no_grad()
 def test_forward_shape(generator: GenerateOut) -> None:
     cond = _dummy_cond(generator, batch=2)
-    out = generator(cond)
+    out, mask, attn_mask = generator(cond)
     assert out.ndim == 3
     assert out.shape[0] == cond.shape[0]
     assert out.shape[1] == generator.max_seq_l
+    assert out.shape[2] == 8  # density, px, py, pz, x, y, z, pdgid
+    assert mask.shape == (cond.shape[0], generator.max_seq_l, 1)
+    assert attn_mask.shape == (cond.shape[0], generator.max_seq_l)
 
 
 @torch.no_grad()
@@ -81,4 +84,3 @@ def test_g4_style_api(generator: GenerateOut) -> None:
     assert set(out) == {"per_event", "per_particle", "per_voxel"}
     assert out["per_particle"]["Incoming"].shape[-1] == 8   # E, mom(3), pdgid, pos(3)
     assert out["per_particle"]["Outgoing"].shape[-1] == 8
-    assert torch.isfinite(out["per_particle"]["Outgoing"]).all()

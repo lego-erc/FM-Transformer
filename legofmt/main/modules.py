@@ -34,6 +34,7 @@ class ProjectModel(ModelWrapper, nn.Module):
         self.kwargs = kwargs
         self.vmf = VMF()
         self.cond_cube = kwargs.get("cond_cube", False)
+        self.no_detach = kwargs.get("no_detach", False)
 
     def forward(
         self,
@@ -47,20 +48,23 @@ class ProjectModel(ModelWrapper, nn.Module):
         x_2d = x.flatten(0, -2)
         pm_flat = attn_mask.flatten()
         x_projx = self.manifold.projx(x_2d[pm_flat])
+        x_2d = x_2d.clone()
         x_2d[pm_flat] = x_projx
-        x = x_2d.view_as(x).detach()
+        x = x_2d.view_as(x) if self.no_detach else x_2d.view_as(x).detach()
         t = torch.atleast_2d(t).expand_as(attn_mask)
         t_mask = mask.squeeze(-1) == 1
         t = t_mask * t + ~t_mask
         if self.cond_cube:
             x_cube = x.clone()
             x_cube[:, 2:3] = self.vmf.to_cube(x_cube[:, 2:3])
-            x_surr = x_cube 
+            x_surr = x_cube
         else:
             x_surr = x
         v = self.vf(t, x_surr, mask, attn_mask, types, pdgids)
         v_2d = v.flatten(0, -2)
         v_proj = self.manifold.proju(x_projx, v_2d[pm_flat])
+        if self.no_detach:
+            v_2d = v_2d.clone()
         v_2d[pm_flat] = v_proj
         return v_2d.view_as(v)
 
@@ -269,6 +273,11 @@ class LEGOLtng(ltng.LightningModule):
         filter_pdgid = self.odeint_conf.get("filter_pdgid", None)
         method = self.odeint_conf.get("method", "midpoint")
 
+        if self.odeint_conf.get("fwd_compile", False) and not hasattr(                                                                             
+            self.model.vf, "_orig_mod"                                                                                                             
+        ):                                                                                                                                         
+            self.model.vf = torch.compile(self.model.vf, mode="reduce-overhead")   
+
         if return_timesteps:
             time_grid = torch.arange(
                 0, 1 + step_size, step=step_size, device=self.device
@@ -286,43 +295,49 @@ class LEGOLtng(ltng.LightningModule):
             pdgids_idx = self.convert_pdgids(pdgids)
 
         base = self.gen_base_wrapper((cc, mask, attn_mask))
+        densities = base[:, :1, :1].expand_as(base[..., :1])
         if return_base:
-            return base.masked_fill(~attn_mask.unsqueeze(-1), torch.nan)
+            sols = base.masked_fill(~attn_mask.unsqueeze(-1), torch.nan)
 
-        init_state_tp = base.split(split_size, 0)
-        mask_tp = mask.split(split_size, 0)
-        attn_mask_tp = attn_mask.split(split_size, 0)
-        pdgids_idx_tp = pdgids_idx.split(split_size, 0)
+        else:
+            init_state_tp = base.split(split_size, 0)
+            mask_tp = mask.split(split_size, 0)
+            attn_mask_tp = attn_mask.split(split_size, 0)
+            pdgids_idx_tp = pdgids_idx.split(split_size, 0)
 
-        sols_list = []
-        solver = RiemannianODESolver(velocity_model=self.model, manifold=self.manifold)
-        for idx in range(len(init_state_tp)):
-            sols_ = solver.sample(
-                x_init=init_state_tp[idx],
-                step_size=step_size,
-                method=method,
-                projx=False,
-                proju=False,
-                return_intermediates=return_timesteps,
-                time_grid=time_grid,
-                mask=mask_tp[idx],
-                attn_mask=attn_mask_tp[idx],
-                types=self.types_embd,
-                pdgids=pdgids_idx_tp[idx],
-            )
-            sols_ = sols_.masked_fill(~attn_mask_tp[idx].unsqueeze(-1), torch.nan)
+            sols_list = []
+            solver = RiemannianODESolver(velocity_model=self.model, manifold=self.manifold)
+            for idx in range(len(init_state_tp)):
+                sols_ = solver.sample(
+                    x_init=init_state_tp[idx],
+                    step_size=step_size,
+                    method=method,
+                    projx=False,
+                    proju=False,
+                    return_intermediates=return_timesteps,
+                    time_grid=time_grid,
+                    mask=mask_tp[idx],
+                    attn_mask=attn_mask_tp[idx],
+                    types=self.types_embd,
+                    pdgids=pdgids_idx_tp[idx],
+                )
+                sols_.masked_fill_(~attn_mask_tp[idx].unsqueeze(-1), torch.nan)
+
+                sols_list.append(sols_)
+
+                del sols_
+                if self.device.type == "cuda":
+                    torch.cuda.empty_cache()
+                if self.device.type == "mps":
+                    torch.mps.empty_cache()
+
+            sols = torch.cat(sols_list, dim=-3)
 
             if filter_pdgid is not None:
                 filter_pdgid_idx = self.convert_pdgids(filter_pdgid)
                 pdgid_mask = torch.isin(pdgids_idx_tp[idx], filter_pdgid_idx)
-                sols_ = sols_.masked_fill(~pdgid_mask, torch.nan)
+                pdgid_mask.logical_or_(pdgids_idx_tp[idx] == 0)
+                sols.masked_fill_(~pdgid_mask, torch.nan)
+                pdgids.masked_fill_(~pdgid_mask, 0)
 
-            sols_list.append(sols_)
-
-        if sols_.device.type == "cuda":
-            torch.cuda.empty_cache()
-        if sols_.device.type == "mps":
-            torch.mps.empty_cache()
-        del sols_
-
-        return torch.cat(sols_list, dim=-3).contiguous()
+        return torch.cat((densities, sols, pdgids),dim=-1), mask, attn_mask

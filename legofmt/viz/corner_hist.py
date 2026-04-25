@@ -1,5 +1,6 @@
 import corner
 import matplotlib.pyplot as plt
+import shutil
 import numpy as np
 import torch
 from flow_matching.utils.manifolds import Sphere
@@ -14,7 +15,7 @@ from .plot_geom import PlotGeom
 plt.rcParams.update(
     {
         "axes.labelpad": 8,
-        "text.usetex": True,
+        "text.usetex": all(shutil.which(b) is not None for b in ("latex", "dvipng", "gs")),
         "font.serif": "Computer Modern",
         "axes.labelsize": 20,
         "axes.titlesize": 16,
@@ -111,7 +112,7 @@ class CornerHist:
             return self.plot_tensors(batch, truth)
 
         if self.anim_intermediates:
-            sols = self.model(batch)
+            sols, mask, attn_mask = self.model(batch)
 
             def anim_wrapper_(i):
                 for axis in (self.fig[1] if self.cube else self.fig).get_axes():
@@ -134,40 +135,49 @@ class CornerHist:
         return anim
 
     def plot_tensors(self, sols, truth=None):
+        is_8d = sols.shape[-1] == 8
+
         if truth is not None:
-            truth_e_dep = truth[:, 1, 0]
+            truth_e_dep = truth[:, 1, 1] if is_8d else truth[:, 1, 0]
             sols = sols[:, :truth.shape[1]]
         else:
             truth_e_dep = None
 
-        truth_e_dep_tuple = (sols[:, 1, 0], truth_e_dep)
-        incoming = sols[:, 2:3] if self.cube else None
+        e_dep = sols[:, 1, 1] if is_8d else sols[:, 1, 0]
+
+        sols_cc = sols[..., 1:7] if is_8d else sols
+        truth_cc = (truth[..., 1:7] if is_8d else truth) if truth is not None else None
+        incoming = sols_cc[:, 2:3] if self.cube else None
 
         return self.arrange_plots_(
             self.fig_sup,
             self.fig,
-            sols,
-            sols_true=truth,
+            sols_cc,
+            sols_true=truth_cc,
             incoming=incoming,
-            data_add=truth_e_dep_tuple,
+            data_add=(e_dep, truth_e_dep),
         )
 
     def prep(self, batch, sols=None):
         if sols is None:
-            sols = self.model(batch)
-        e_dep = sols[:, 1, 0]
+            sols, mask, attn_mask = self.model(batch)
+
+        is_8d = sols.shape[-1] == 8
+        e_dep = sols[:, 1, 1] if is_8d else sols[:, 1, 0]
+
+        sols_cc = sols[..., 1:7] if is_8d else sols
 
         sols_true = (
             batch[0] if batch[0].shape[-1] == 6 else batch[0][..., -7:-1]
         )
 
-        sols = sols[:, : sols_true.shape[1]]
-        sols_true = torch.where(torch.isnan(sols), torch.nan, sols_true)
+        sols_cc = sols_cc[:, : sols_true.shape[1]]
+        sols_true = torch.where(torch.isnan(sols_cc), torch.nan, sols_true)
 
         return self.arrange_plots_(
             self.fig_sup,
             self.fig,
-            sols,
+            sols_cc,
             sols_true,
             incoming=(batch[0][:, 2:3, -7:-1] if self.cube else None),
             data_add=(e_dep, batch[0][:, 1, 1]),
