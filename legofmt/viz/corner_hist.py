@@ -1,5 +1,6 @@
 import corner
 import matplotlib.pyplot as plt
+import shutil
 import numpy as np
 import torch
 from flow_matching.utils.manifolds import Sphere
@@ -14,7 +15,7 @@ from .plot_geom import PlotGeom
 plt.rcParams.update(
     {
         "axes.labelpad": 8,
-        "text.usetex": False,
+        "text.usetex": all(shutil.which(b) is not None for b in ("latex", "dvipng", "gs")),
         "font.serif": "Computer Modern",
         "axes.labelsize": 20,
         "axes.titlesize": 16,
