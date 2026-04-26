@@ -53,7 +53,7 @@ class ProjectModel(ModelWrapper, nn.Module):
         x_2d[pm_flat] = x_projx
         x = x_2d.view_as(x) if self.no_detach else x_2d.view_as(x).detach()
         t = torch.atleast_2d(t).expand_as(attn_mask)
-        t = torch.where(mask.squeeze(-1) == 1, 1.)
+        t = torch.where(mask.squeeze(-1) == 1, t, 1.)
         if self.cond_cube:
             x_cube = x.clone()
             x_cube[:, 2:3] = self.vmf.to_cube(x_cube[:, 2:3])
