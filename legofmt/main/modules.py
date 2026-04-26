@@ -53,8 +53,7 @@ class ProjectModel(ModelWrapper, nn.Module):
         x_2d[pm_flat] = x_projx
         x = x_2d.view_as(x) if self.no_detach else x_2d.view_as(x).detach()
         t = torch.atleast_2d(t).expand_as(attn_mask)
-        t_mask = mask.squeeze(-1) == 1
-        t = t_mask * t + ~t_mask
+        t = torch.where(mask.squeeze(-1) == 1, 1.)
         if self.cond_cube:
             x_cube = x.clone()
             x_cube[:, 2:3] = self.vmf.to_cube(x_cube[:, 2:3])
@@ -193,7 +192,7 @@ class LEGOLtng(ltng.LightningModule):
         base = self.gen_base(mask[:, 1:].shape[:-1], cc[:, :1])
         if self.ot_coupling and self.model.training:
             am = attn_mask[:, 1:]
-            base = attn_mask.unsqueeze(-1) * base + ~attn_mask.unsqueeze(-1) * cc
+            base = base.where(attn_mask.unsqueeze(-1), cc)
             inf_cond = am.unsqueeze(-1).logical_xor(am.unsqueeze(-2))
             cost = torch.cdist(cc[:, 1:], base[:, 1:])
             cost = cost + inf_cond * 1e6
@@ -314,12 +313,14 @@ class LEGOLtng(ltng.LightningModule):
         target, mask, attn_mask = batch
         _, cc, pdgids = target.split([1, 6, 1], dim=-1)
         pdgids_idx = pdgids.int() if self.pdgid_is_idx else self.convert_pdgids(pdgids)
+        cc = cc.where(attn_mask.unsqueeze(-1), cc[:, 2:3, :])
+        if x_init is not None and x_init.shape == cc.shape:
+            x_init = x_init.where(attn_mask.unsqueeze(-1), x_init[:, 2:3, :])
 
         solver = ODESolver(velocity_model=self.model)
         common = dict(step_size=step_size, method=method, types=self.types_embd)
 
         if compute_ll:
-            cc = cc.where(attn_mask.unsqueeze(-1), cc[:, 2:3, :])
             self.model.no_detach = True
             try:
                 _, log_ll = solver.compute_likelihood(

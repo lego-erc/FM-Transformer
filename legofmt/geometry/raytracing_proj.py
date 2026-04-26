@@ -13,8 +13,7 @@ class CubeTrace:
         return self.project_particles_cc(*args, **kwargs)
 
     def get_time(self, p, x):
-        p_sign = p.sgn()
-        p_sign -= p_sign.eq(0).int()
+        p_sign = torch.where(p > 0, 1.0, -1.0).to(p.dtype)
         x_abs_max = x.abs().max(dim=-1, keepdim=True).values
         p_ = p_sign * p.abs().clamp(min=1e-8)
         t_surface = (x_abs_max * p_sign - x) / p_
@@ -39,7 +38,8 @@ class CubeTrace:
             Tensor of shape (..., 6) containing the projected points and momenta.
         """
         p, x = p_x.split(3, -1)
-        coord_max = x.abs().argmax(dim=-1)
-        coord_max_sgn = torch.sign(x[..., coord_max])
-        p[..., coord_max] = coord_max_sgn * p[..., coord_max].abs()
+        coord_max = x.abs().argmax(dim=-1, keepdim=True)
+        sgn = torch.gather(x, -1, coord_max).sign()
+        p_at_max = torch.gather(p, -1, coord_max)
+        p = p.scatter(-1, coord_max, sgn * p_at_max.abs())
         return torch.cat((p, x), dim=-1)
