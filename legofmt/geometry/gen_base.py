@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 
 from legofmt.geometry.vmf_sampling import VMF
 
@@ -70,7 +71,7 @@ class GenerateBase:
     @torch.no_grad()
     def poles(self, shape, incoming_rt, **kwargs):
         p_norm = incoming_rt[..., :3].norm(dim=-1, keepdim=True)
-        p_cc = incoming_rt[..., :3] / p_norm
+        p_cc = F.normalize(incoming_rt[..., :3], dim=-1)
         loc_cc = incoming_rt[..., -3:]
         rd_scale = self.rd_scale(shape, p_norm)
         x = self.vmf_utils.sample(shape, loc_cc, self.kappa, self.bs_frac, self.tanh_theta)

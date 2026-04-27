@@ -4,7 +4,7 @@ from torch.utils.data import DataLoader
 
 import json
 
-from pytorch_lightning import LightningModule
+from lightning import LightningModule
 
 from x_transformers import ContinuousTransformerWrapper, Decoder
 

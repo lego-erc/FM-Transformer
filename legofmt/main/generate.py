@@ -100,7 +100,7 @@ class GenerateOut(torch.nn.Module):
 
         max_particles = self.max_seq_l - 3
         total = mult.sum(-1, keepdim=True)
-        scale = torch.where(total > max_particles, max_particles / total, torch.ones_like(total))
+        scale = (max_particles / total).clamp(max=1.0)
         mult = (mult * scale).long()
         scaled = total > max_particles
         remaining = (scaled * (max_particles - mult.sum(-1, keepdim=True))).clamp(min=0)

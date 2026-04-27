@@ -1,4 +1,4 @@
-import pytorch_lightning as ltng
+import lightning as ltng
 import torch
 import json
 from flow_matching.solver import ODESolver
@@ -197,9 +197,7 @@ class LEGOLtng(ltng.LightningModule):
             cost = torch.cdist(cc[:, 1:], base[:, 1:])
             cost = cost + inf_cond * 1e6
             assign = slap(cost, cost.device)
-            base[:, 1:] = base[:, 1:].gather(
-                1, assign.unsqueeze(-1).expand_as(base[:, 1:])
-            )
+            base[:, 1:] = torch.take_along_dim(base[:, 1:], assign.unsqueeze(-1), dim=1)
         base = torch.cat((target[:, :2], base), dim=1)
         base = self.gen_base.insert_add(base)  # E_dep
         return base
