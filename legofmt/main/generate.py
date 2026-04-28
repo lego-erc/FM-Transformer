@@ -36,7 +36,9 @@ class GenerateOut(torch.nn.Module):
         if not prepped:
             cond_model[..., 1:7] = self.proj_ray(cond_model[..., 1:7])
         batch = self.gen_batch(cond_model)
-        return self.model(batch)
+        sols, mask, attn_mask = self.model(batch)
+        sols[..., -1] = torch.cat([sols.new_zeros(1), self.pdgids.to(sols.dtype)])[sols[..., -1].long()]
+        return sols, mask, attn_mask
     
     def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids):
         mom_s = mom.view(-1, 3).shape[0]
