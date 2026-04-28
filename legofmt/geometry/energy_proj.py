@@ -4,10 +4,7 @@ from torch import Tensor
 
 class EnergyProjections:
     def __init__(self, norm_type: str | bool = "in_frac"):
-        try:
-            self.func = self.__getattribute__(norm_type)
-        except TypeError:
-            self.func = self.identity
+        self.func = getattr(self, norm_type) if isinstance(norm_type, str) else self.identity
 
     def __call__(self, *args, **kwargs):
         return self.func(*args, **kwargs)

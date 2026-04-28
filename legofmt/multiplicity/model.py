@@ -187,12 +187,7 @@ class MultModel(LightningModule):
         in_embd = self.proj_in(in_cc)
         x = (in_embd + self.embd_pp_(pdgid_in_idx)).unsqueeze(1)
         condition = x[:, 0]
-        counts = torch.empty(
-            x.shape[0],
-            self.max_seq_len,
-            dtype=torch.long,
-            device=in_cc.device,
-        )
+        counts = in_cc.new_empty(x.shape[0], self.max_seq_len, dtype=torch.long)
 
         cache = None
         for i in range(self.max_seq_len):

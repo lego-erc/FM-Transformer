@@ -16,8 +16,7 @@ class CubeTrace:
         p_sign = torch.where(p > 0, 1.0, -1.0).to(p.dtype)
         x_abs_max = x.abs().max(dim=-1, keepdim=True).values
         p_ = p_sign * p.abs().clamp(min=1e-8)
-        t_surface = (x_abs_max * p_sign - x) / p_
-        return t_surface.min(-1, keepdim=True).values
+        return ((x_abs_max * p_sign - x) / p_).min(-1, keepdim=True).values
 
     def project_particles_cc(self, cc):
         p, x = cc.split(3, -1)

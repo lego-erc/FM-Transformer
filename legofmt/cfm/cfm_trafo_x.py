@@ -57,28 +57,16 @@ class CFMTrafo_x(nn.Module):
         self.b_pdgids_ = nn.Parameter(torch.empty(self.npdgids, self.h_dim))
         self.bo_pdgids_ = nn.Parameter(torch.empty(self.npdgids, self.in_dim))
 
-        par_list = [
-            self.l_mask_,
-            self.b_mask_,
-            self.bo_mask_,
-            self.l_types_,
-            self.b_types_,
-            self.bo_types_,
-            self.l_pdgids_,
-            self.b_pdgids_,
-            self.bo_pdgids_,
-            ]
-        
-        for p in par_list:
+        for p in (self.l_mask_, self.b_mask_, self.bo_mask_,
+            self.l_types_, self.b_types_, self.bo_types_,
+            self.l_pdgids_, self.b_pdgids_, self.bo_pdgids_):
             nn.init.xavier_normal_(p, gain=xavier_gain)
 
         self.freqs = nn.Parameter(
             self.h_dim * 1e-4 ** (torch.arange(self.h_dim) / self.h_dim),
             requires_grad=False,
         )
-        even = torch.arange(self.h_dim) % 2
-        self.mask_freqs = nn.Parameter(even, requires_grad=False)
-        self.mask_freqs_rolled = nn.Parameter(1 - even, requires_grad=False)
+        self.register_buffer("mask_freqs", torch.arange(self.h_dim) % 2)
 
     def forward(
         self,
@@ -95,18 +83,18 @@ class CFMTrafo_x(nn.Module):
         pdgids_idx = pdgids.view(-1)
 
         b_embd = (
-            self.b_mask_.index_select(0, mask_idx).view(-1, n_tokens, *self.vb)
-            + self.b_types_.index_select(0, types_idx).view(-1, n_tokens, *self.vb)
-            + self.b_pdgids_.index_select(0, pdgids_idx).view(-1, n_tokens, *self.vb)
+            self.b_mask_[mask_idx].view(-1, n_tokens, *self.vb)
+            + self.b_types_[types_idx].view(-1, n_tokens, *self.vb)
+            + self.b_pdgids_[pdgids_idx].view(-1, n_tokens, *self.vb)
         ) / 3
         bo_embd = (
-            self.bo_mask_.index_select(0, mask_idx).view(-1, n_tokens, *self.vbo)
-            + self.bo_types_.index_select(0, types_idx).view(-1, n_tokens, *self.vbo)
-            + self.bo_pdgids_.index_select(0, pdgids_idx).view(-1, n_tokens, *self.vbo)
+            self.bo_mask_[mask_idx].view(-1, n_tokens, *self.vbo)
+            + self.bo_types_[types_idx].view(-1, n_tokens, *self.vbo)
+            + self.bo_pdgids_[pdgids_idx].view(-1, n_tokens, *self.vbo)
         ) / 3
 
         t_freqs = t.unsqueeze(-1) * self.freqs
-        embd_t = self.mask_freqs * t_freqs.sin() + self.mask_freqs_rolled * t_freqs.cos()
+        embd_t = embd_t = torch.where(self.mask_freqs.bool(), t_freqs.sin(), t_freqs.cos())
 
         l_embdd = 0
         for w_full, idx in (
@@ -114,7 +102,7 @@ class CFMTrafo_x(nn.Module):
             (self.l_types_, types_idx),
             (self.l_pdgids_, pdgids_idx),
         ):
-            w_in = w_full[:, 0].index_select(0, idx).view(-1, n_tokens, self.h_dim, self.in_dim)
+            w_in = w_full[idx, 0].view(-1, n_tokens, self.h_dim, self.in_dim)
             l_embdd = l_embdd + torch.einsum("ijl, ijkl -> ijk", states_mask, w_in)
         l_embdd = l_embdd / 3
 
@@ -133,7 +121,7 @@ class CFMTrafo_x(nn.Module):
             (self.l_types_, types_idx),
             (self.l_pdgids_, pdgids_idx),
         ):
-            w_out = w_full[:, 1].index_select(0, idx).view(-1, n_tokens, self.h_dim, self.in_dim)
+            w_out = w_full[idx, 1].view(-1, n_tokens, self.h_dim, self.in_dim)
             l_out = l_out + torch.einsum("ijk, ijkl -> ijl", trafo_out, w_out)
         l_out = l_out / 3
 

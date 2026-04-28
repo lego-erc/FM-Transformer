@@ -99,12 +99,8 @@ class PlotGeom:
         arr_lr: float = 0.1,
         arr_c: str = "y",
     ) -> None:
-        vertices = torch.unique(
-            torch.combinations(
-                torch.tensor([-1, 1, -1, 1]), r=3, with_replacement=True
-            ),
-            dim=0,
-        )
+        v = torch.tensor([-1, 1])
+        vertices = torch.cartesian_prod(v, v, v)
         cc_edges = vertices[torch.combinations(torch.arange(8), r=2)]
         cc_edges = cc_edges[cc_edges.diff(dim=1).squeeze(1).abs().sum(dim=-1) == 2.0]
 

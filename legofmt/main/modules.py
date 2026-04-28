@@ -336,10 +336,7 @@ class LEGOLtng(ltng.LightningModule):
         if x_init is None:
             x_init = self.gen_base_wrapper((cc, mask, attn_mask))
         if time_grid is None:
-            time_grid = torch.tensor(
-                [1.0, 0.0] if reverse else [0.0, 1.0],
-                device=x_init.device,
-            )
+            time_grid = x_init.new_tensor([1.0, 0.0] if reverse else [0.0, 1.0])
 
         def _sample(x_init, mask, attn_mask, pdgids_idx):
             return solver.sample(

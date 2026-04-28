@@ -61,24 +61,21 @@ class GenerateOut(torch.nn.Module):
             cc = cc.repeat_interleave(n, dim=0)
             d = density.view(-1, 1).expand_as(cc[:, :1])
             cc[..., :3] = cc[..., :3] * energy.view(1, 1)
-            ptypes = pdgids[torch.randint_like(d, 0, pdgids.shape[0]).int()]
-            cond = torch.cat((d, cc, ptypes), dim=-1)
 
         elif energy_s > 1:
             e = energy.repeat_interleave(n, dim=0).view(-1, 1)
             d = density.view(-1, 1).expand_as(e)
-            cc = torch.cat((cc[..., :3].view(1, 3) * e, cc[..., 3:].view(1, 3) * torch.ones_like(e)), dim=-1)
-            ptypes = pdgids[torch.randint_like(d, 0, pdgids.shape[0]).int()]
-            cond = torch.cat((d, cc, ptypes), dim=-1)
+            cc = torch.cat((cc[..., :3].view(1, 3) * e, cc[..., 3:].view(1, 3).expand(e.shape[0], -1)), dim=-1)
 
         else:
             d = density.repeat_interleave(n, dim=0).view(-1, 1)
             e = energy.view(-1, 1).expand_as(d)
-            cc = torch.cat((cc[..., :3].view(1, 3) * e, cc[..., 3:].view(1, 3) * torch.ones_like(e)), dim=-1)
-            ptypes = pdgids[torch.randint_like(d, 0, pdgids.shape[0]).int()]
-            cond = torch.cat((d, cc, ptypes), dim=-1)
+            cc = torch.cat((cc[..., :3].view(1, 3) * e, cc[..., 3:].view(1, 3).expand(e.shape[0], -1)), dim=-1)
 
-        sols, mask, attn_mask = self.proj_ray_pass_to_model(cond, prepped=False)
+        ptypes = pdgids[torch.randint(pdgids.shape[0], d.shape, device=d.device)]
+        cond = torch.cat((d, cc, ptypes), dim=-1)
+
+        sols, _, _ = self.proj_ray_pass_to_model(cond, prepped=False)
 
         return {
             "per_event": {
@@ -90,7 +87,7 @@ class GenerateOut(torch.nn.Module):
                 "Outgoing": sols[:, 3:],
             },
             "per_voxel": {
-                "E_dep": torch.empty(sols.shape[0], 0, 4, device=sols.device),
+                "E_dep": sols.new_empty(sols.shape[0], 0, 4),
             },
         }
 
@@ -119,7 +116,7 @@ class GenerateOut(torch.nn.Module):
         pdgid_pad.scatter_add_(-1, cumsum_idx, torch.ones_like(pdgid_pad)).cumsum_(-1)
         cond[..., -1] = torch.searchsorted(self.pdgids, pdgid_in) + 1
         cond = cond[:, None, :]
-        cond_pad_r = cond.expand(-1, self.max_seq_l - 3, -1).clone()
+        cond_pad_r = cond.repeat(1, self.max_seq_l - 3, 1)
         cond_pad_r[..., -1] = attn_mask * (pdgid_pad + 1)
         cond_fm = torch.cat(
             (torch.zeros_like(cond).expand(-1, 2, -1), cond, cond_pad_r), dim=1
