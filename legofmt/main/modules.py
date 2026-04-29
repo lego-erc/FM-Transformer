@@ -196,7 +196,7 @@ class LEGOLtng(ltng.LightningModule):
             inf_cond = am.unsqueeze(-1).logical_xor(am.unsqueeze(-2))
             cost = torch.cdist(cc[:, 1:], base[:, 1:])
             cost = cost + inf_cond * 1e6
-            assign = slap(cost, cost.device)
+            assign = slap(cost, cost.device).long()
             base[:, 1:] = torch.take_along_dim(base[:, 1:], assign.unsqueeze(-1), dim=1)
         base = torch.cat((target[:, :2], base), dim=1)
         base = self.gen_base.insert_add(base)  # E_dep
