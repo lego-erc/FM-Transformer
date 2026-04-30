@@ -28,7 +28,7 @@ class MultLoader(torch.utils.data.Dataset):
         dataset = LEGODataset(**lds_conf)
         density = dataset.target[:, 0, 1:2]
         energy, cc, pdgid = dataset.target[:, 2:].split((1, 6, 1), dim=-1)
-        pdgid_in = pdgid[:, 0].squeeze().contiguous()
+        pdgid_in = pdgid[:, 0].squeeze(-1).contiguous()
 
         self.counts = (
             (pdgid[:, 1:] == ptypes.view(1, 1, -1)).sum(1).clamp_max(max_particles - 1)
@@ -81,7 +81,7 @@ class MultModel(LightningModule):
         dropout = self.mm_conf.get("dropout", 0.1)
         self.max_seq_len = self.mm_conf["ptypes"].shape[0]
         in_dim = self.mm_conf.get("in_dim", 6)
-        self.n_ptypes_in = self.mm_conf.get("ptypes_in", 2).shape[0]
+        self.n_ptypes_in = self.mm_conf.get("ptypes_in").shape[0]
         self.vmf = VMF()
 
         self.model = ContinuousTransformerWrapper(
