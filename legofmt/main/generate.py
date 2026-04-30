@@ -71,16 +71,16 @@ class GenerateOut(torch.nn.Module):
             cc = torch.cat((mom.view(-1, 3) * energy.view(-1, 1), pos.view(-1, 3)), dim=-1)
             cc = cc.repeat_interleave(n, dim=0)
             d = density.view(-1, 1).repeat_interleave(n, dim=0)
-            ptypes = pdgids.view(-1, 1).repeat_interleave(n, dim=0).to(cc.dtype)
+            pdgids_b = pdgids.view(-1, 1).repeat_interleave(n, dim=0).to(cc.dtype)
         else:
             e = energy.view(-1, 1).expand(B, 1)
             mom_b = mom.view(-1, 3).expand(B, 3)
             pos_b = pos.view(-1, 3).expand(B, 3)
             d = density.view(-1, 1).expand(B, 1).repeat_interleave(n, dim=0)
-            ptypes = ptypes.view(-1, 1).expand(B, 1).repeat_interleave(n, dim=0)
+            pdgids_b = pdgids.view(-1, 1).expand(B, 1).repeat_interleave(n, dim=0)
             cc = torch.cat((mom_b * e, pos_b), dim=-1).repeat_interleave(n, dim=0)
 
-        cond = torch.cat((d, cc, ptypes), dim=-1)
+        cond = torch.cat((d, cc, pdgids_b), dim=-1)
 
         sols, _, _ = self.proj_ray_pass_to_model(cond, prepped=False)
 
