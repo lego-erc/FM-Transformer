@@ -24,8 +24,8 @@ class VMF:
         if cc.shape[-1] != 3:
             return self._batched(cc, 3, "to_sph")
         x, y, z = cc.movedim(-1, 0)
-        theta = torch.acos(z.clamp(1e-8 - 1, 1 - 1e-8))
-        phi = torch.atan2(y, x)
+        theta = z.clamp(1e-8 - 1, 1 - 1e-8).acos()
+        phi = y.atan2(x)
         return torch.stack((theta, phi), dim=-1)
 
     def to_cube(self, p_and_x, d=1.0):
@@ -38,8 +38,8 @@ class VMF:
         st, ct = sph[..., 0:1].sin(), sph[..., 0:1].cos()
         sp, cp = sph[..., 1:2].sin(), sph[..., 1:2].cos()
         sa, ca = alpha.sin(), alpha.cos()
-        theta = torch.acos((st * sp * sa + ct * ca).clamp(-1 + 1e-8, 1 - 1e-8))
-        phi = torch.atan2(st * sp * ca - ct * sa, st * cp) + beta
+        theta = (st * sp * sa + ct * ca).clamp(-1 + 1e-8, 1 - 1e-8).acos()
+        phi = (st * sp * ca - ct * sa).atan2(st * cp) + beta
         return torch.cat((theta, phi), dim=-1)
 
     def sample(self, n: tuple, loc_cc, kappa: torch.Tensor, bs_frac: float = 0.0, tanh_theta: bool = False):
@@ -59,6 +59,6 @@ class VMF:
     def sample_iso(self, n: tuple, mpct, device=None, **kwargs):
         samples_phi = 2 * torch.pi * torch.rand((*n, mpct), device=device)
         samples_cos_theta = 2 * torch.rand((*n, mpct), device=device) - 1
-        samples_theta = torch.acos(samples_cos_theta)
+        samples_theta = samples_cos_theta.acos()
         angles = torch.stack((samples_theta, samples_phi), dim=-1)
         return self.to_cc(angles).flatten(-2)

@@ -53,7 +53,7 @@ class ProjectModel(ModelWrapper, nn.Module):
         x_2d[pm_flat] = x_projx
         x = x_2d.view_as(x) if self.no_detach else x_2d.view_as(x).detach()
         t = torch.atleast_2d(t).expand_as(attn_mask)
-        t = torch.where(mask.squeeze(-1) == 1, t, 1.)
+        t = t.where(mask.squeeze(-1) == 1, 1.)
         if self.cond_cube:
             x_cube = x.clone()
             x_cube[:, 2:3] = self.vmf.to_cube(x_cube[:, 2:3])
@@ -181,7 +181,7 @@ class LEGOLtng(ltng.LightningModule):
 
     @torch.no_grad()
     def convert_pdgids(self, pdgids: Tensor) -> Tensor:
-        cond = torch.isnan(pdgids) | (pdgids == 0) | (pdgids >= 1e8)
+        cond = pdgids.isnan() | (pdgids == 0) | (pdgids >= 1e8)
         pdgid_idx = torch.searchsorted(self.pdgids_template, pdgids.contiguous()) + 1
         return pdgid_idx.masked_fill_(cond, 0)
 
@@ -197,7 +197,7 @@ class LEGOLtng(ltng.LightningModule):
             cost = torch.cdist(cc[:, 1:], base[:, 1:])
             cost = cost + inf_cond * 1e6
             assign = slap(cost, cost.device).long()
-            base[:, 1:] = torch.take_along_dim(base[:, 1:], assign.unsqueeze(-1), dim=1)
+            base[:, 1:] = base[:, 1:].take_along_dim(assign.unsqueeze(-1), dim=1)
         base = torch.cat((target[:, :2], base), dim=1)
         base = self.gen_base.insert_add(base)  # E_dep
         return base
@@ -209,7 +209,7 @@ class LEGOLtng(ltng.LightningModule):
             base = self.gen_base_wrapper((cc, mask, attn_mask))
             pdgid_idx = self.convert_pdgids(pdgids)
             if self.t_dist == "sm_norm":
-                t = torch.sigmoid(self.t_dist_scale * torch.randn_like(base[:, 0, 0]))
+                t = (self.t_dist_scale * torch.randn_like(base[:, 0, 0])).sigmoid()
             elif self.t_dist == "uniform":
                 t = torch.rand_like(base[:, 0, 0])
             ps_ = self.ps.sample(base, cc, t)

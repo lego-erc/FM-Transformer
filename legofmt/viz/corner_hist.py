@@ -172,7 +172,7 @@ class CornerHist:
         )
 
         sols_cc = sols_cc[:, : sols_true.shape[1]]
-        sols_true = torch.where(torch.isnan(sols_cc), torch.nan, sols_true)
+        sols_true = sols_true.masked_fill(sols_cc.isnan(), torch.nan)
 
         return self.arrange_plots_(
             self.fig_sup,
@@ -240,7 +240,7 @@ class CornerHist:
             labels += [
                 r"$-\log \frac{\| \vec{p} \|_2}{\| \vec{p}_\mathrm{incoming} \|_2}$"
             ]
-            norm_fac = torch.log(en_in / self.cutoff_en).view(-1, 1)
+            norm_fac = (en_in / self.cutoff_en).log().view(-1, 1)
             data_en = (data_cc[:, 3: , :3].norm(dim=-1) - 1).clamp_min(0.) / norm_fac
             range_ += [(-0.2, 1.2)]
             data = np.concatenate([data, data_en.reshape(-1, 1).cpu().numpy()], axis=-1)

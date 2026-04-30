@@ -200,7 +200,7 @@ class MultModel(LightningModule):
                 input_not_include_cache=(i > 0),
             )
             logits = self.proj_out_[i](out[:, -1])
-            sampled = torch.multinomial(logits.softmax(-1), 1).squeeze(-1)
+            sampled = logits.softmax(-1).multinomial(1).squeeze(-1)
             x = self.embd_in_[i](sampled).unsqueeze(1)
             counts[:, i] = sampled
 

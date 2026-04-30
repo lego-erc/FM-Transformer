@@ -94,7 +94,7 @@ class CFMTrafo_x(nn.Module):
         ) / 3
 
         t_freqs = t.unsqueeze(-1) * self.freqs
-        embd_t = torch.where(self.mask_freqs.bool(), t_freqs.sin(), t_freqs.cos())
+        embd_t = t_freqs.sin().where(self.mask_freqs.bool(), t_freqs.cos())
 
         l_embdd = 0
         for w_full, idx in (

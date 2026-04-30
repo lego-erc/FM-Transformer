@@ -108,7 +108,7 @@ class GenerateOut(torch.nn.Module):
         remaining = (scaled * (max_particles - mult.sum(-1, keepdim=True))).clamp(min=0)
         r_max = remaining.max().item()
         if r_max > 0:
-            dist = torch.multinomial(mult.float().clamp(min=1), r_max, replacement=True)
+            dist = mult.float().clamp(min=1).multinomial(r_max, replacement=True)
             valid = (torch.arange(r_max, device=mult.device) < remaining).long()
             mult.scatter_add_(-1, dist, valid)
 
