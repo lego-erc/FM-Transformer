@@ -78,9 +78,6 @@ class GenerateOut(torch.nn.Module):
 
         cond = torch.cat((d, cc, ptypes), dim=-1)
 
-        ptypes = pdgids[torch.randint(pdgids.shape[0], d.shape, device=d.device)]
-        cond = torch.cat((d, cc, ptypes), dim=-1)
-
         sols, _, _ = self.proj_ray_pass_to_model(cond, prepped=False)
 
         return {
