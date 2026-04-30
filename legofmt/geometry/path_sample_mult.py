@@ -41,7 +41,7 @@ class ProductPath:
     def __init__(self, paths, view_as_: tuple):
         self.x_t = torch.cat([p.x_t for p in paths], dim=-1).view(*view_as_)
         self.dx_t = torch.cat([p.dx_t for p in paths], dim=-1).view(*view_as_)
-        self.t = paths[0].t.view(*view_as_[:-1])
+        self.t = paths[0].t.view(view_as_[:-1])
 
 
 class ProductPathSampler:

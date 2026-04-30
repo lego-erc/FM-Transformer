@@ -1,12 +1,10 @@
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 class EnergyProjections:
     def __init__(self, norm_type: str | bool = "in_frac"):
-        try:
-            self.func = self.__getattribute__(norm_type)
-        except TypeError:
-            self.func = self.identity
+        self.func = getattr(self, norm_type) if isinstance(norm_type, str) else self.identity
 
     def __call__(self, *args, **kwargs):
         return self.func(*args, **kwargs)
@@ -44,4 +42,4 @@ class EnergyProjections:
     def exp(self, p_x: Tensor) -> Tensor:
         p, x = p_x.split(3, -1)
         p_norm = p.norm(dim=-1, keepdim=True).nan_to_num(0)
-        return torch.cat((p / p_norm * (1 - p_norm).exp(), x), -1)
+        return torch.cat((F.normalize(p, dim=-1) * (1 - p_norm).exp(), x), -1)

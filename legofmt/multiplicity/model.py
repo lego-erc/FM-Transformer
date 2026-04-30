@@ -4,7 +4,7 @@ from torch.utils.data import DataLoader
 
 import json
 
-from pytorch_lightning import LightningModule
+from lightning import LightningModule
 
 from x_transformers import ContinuousTransformerWrapper, Decoder
 
@@ -28,12 +28,10 @@ class MultLoader(torch.utils.data.Dataset):
         dataset = LEGODataset(**lds_conf)
         density = dataset.target[:, 0, 1:2]
         energy, cc, pdgid = dataset.target[:, 2:].split((1, 6, 1), dim=-1)
-        pdgid_in = pdgid[:, 0].squeeze().contiguous()
+        pdgid_in = pdgid[:, 0].squeeze(-1).contiguous()
 
         self.counts = (
-            (pdgid[:, 1:] == ptypes.view(1, 1, -1))
-            .sum(1)
-            .clamp_max(max_particles - 1)
+            (pdgid[:, 1:] == ptypes.view(1, 1, -1)).sum(1).clamp_max(max_particles - 1)
         )
         self.pdgid_in_idx = torch.searchsorted(ptypes_in, pdgid_in)
         self.input = cc[:, 0]
@@ -68,8 +66,12 @@ class MultModel(LightningModule):
             with open(lds_conf.get("data") + "/meta.json") as f:
                 meta_dict = json.load(f)
                 self.mm_conf.setdefault("max_out_particles", meta_dict["ntokens"] - 3)
-                self.mm_conf.setdefault("ptypes", torch.tensor(meta_dict["particles"]).sort().values)
-                self.mm_conf.setdefault("ptypes_in", torch.tensor(meta_dict["particles_in"]).sort().values)
+                self.mm_conf.setdefault(
+                    "ptypes", torch.tensor(meta_dict["particles"]).sort().values
+                )
+                self.mm_conf.setdefault(
+                    "ptypes_in", torch.tensor(meta_dict["particles_in"]).sort().values
+                )
             if "max_count" not in self.mm_conf:
                 _tmp_loader = MultLoader(self.config)
                 self.mm_conf["max_count"] = int(_tmp_loader.counts.max().item()) + 1
@@ -79,7 +81,7 @@ class MultModel(LightningModule):
         dropout = self.mm_conf.get("dropout", 0.1)
         self.max_seq_len = self.mm_conf["ptypes"].shape[0]
         in_dim = self.mm_conf.get("in_dim", 6)
-        self.n_ptypes_in = self.mm_conf.get("ptypes_in", 2).shape[0]
+        self.n_ptypes_in = self.mm_conf.get("ptypes_in").shape[0]
         self.vmf = VMF()
 
         self.model = ContinuousTransformerWrapper(
@@ -155,7 +157,7 @@ class MultModel(LightningModule):
 
         loss_model = F.cross_entropy(
             logits.reshape(-1, self.max_particles), counts.reshape(-1)
-        ).mean()
+        )
 
         self.log("train_loss", loss_model, prog_bar=True, sync_dist=True)
 
@@ -185,12 +187,7 @@ class MultModel(LightningModule):
         in_embd = self.proj_in(in_cc)
         x = (in_embd + self.embd_pp_(pdgid_in_idx)).unsqueeze(1)
         condition = x[:, 0]
-        counts = torch.empty(
-            x.shape[0],
-            self.max_seq_len,
-            dtype=torch.long,
-            device=in_cc.device,
-        )
+        counts = in_cc.new_empty(x.shape[0], self.max_seq_len, dtype=torch.long)
 
         cache = None
         for i in range(self.max_seq_len):

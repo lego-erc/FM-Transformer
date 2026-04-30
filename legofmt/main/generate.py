@@ -36,7 +36,9 @@ class GenerateOut(torch.nn.Module):
         if not prepped:
             cond_model[..., 1:7] = self.proj_ray(cond_model[..., 1:7])
         batch = self.gen_batch(cond_model)
-        return self.model(batch)
+        sols, mask, attn_mask = self.model(batch)
+        sols[..., -1] = torch.cat([sols.new_zeros(1), self.pdgids.to(sols.dtype)])[sols[..., -1].long()]
+        return sols, mask, attn_mask
     
     def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids):
         device = next(self.model.parameters()).device
@@ -76,7 +78,7 @@ class GenerateOut(torch.nn.Module):
 
         cond = torch.cat((d, cc, ptypes), dim=-1)
 
-        sols, mask, attn_mask = self.proj_ray_pass_to_model(cond, prepped=False)
+        sols, _, _ = self.proj_ray_pass_to_model(cond, prepped=False)
 
         return {
             "per_event": {
@@ -88,7 +90,7 @@ class GenerateOut(torch.nn.Module):
                 "Outgoing": sols[:, 3:],
             },
             "per_voxel": {
-                "E_dep": torch.empty(sols.shape[0], 0, 4, device=sols.device),
+                "E_dep": sols.new_empty(sols.shape[0], 0, 4),
             },
         }
 
@@ -100,7 +102,7 @@ class GenerateOut(torch.nn.Module):
 
         max_particles = self.max_seq_l - 3
         total = mult.sum(-1, keepdim=True)
-        scale = torch.where(total > max_particles, max_particles / total, torch.ones_like(total))
+        scale = (max_particles / total).clamp(max=1.0)
         mult = (mult * scale).long()
         scaled = total > max_particles
         remaining = (scaled * (max_particles - mult.sum(-1, keepdim=True))).clamp(min=0)
@@ -117,7 +119,7 @@ class GenerateOut(torch.nn.Module):
         pdgid_pad.scatter_add_(-1, cumsum_idx, torch.ones_like(pdgid_pad)).cumsum_(-1)
         cond[..., -1] = torch.searchsorted(self.pdgids, pdgid_in) + 1
         cond = cond[:, None, :]
-        cond_pad_r = cond.expand(-1, self.max_seq_l - 3, -1).clone()
+        cond_pad_r = cond.repeat(1, self.max_seq_l - 3, 1)
         cond_pad_r[..., -1] = attn_mask * (pdgid_pad + 1)
         cond_fm = torch.cat(
             (torch.zeros_like(cond).expand(-1, 2, -1), cond, cond_pad_r), dim=1
