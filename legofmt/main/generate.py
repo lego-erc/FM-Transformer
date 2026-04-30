@@ -41,36 +41,42 @@ class GenerateOut(torch.nn.Module):
         return sols, mask, attn_mask
     
     def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids):
+        device = next(self.model.parameters()).device
+        pos, mom, energy, density, size, pdgids = (
+            t.to(device) for t in (pos, mom, energy, density, size, pdgids)
+        )
         mom_s = mom.view(-1, 3).shape[0]
         pos_s = pos.view(-1, 3).shape[0]
         energy_s = energy.shape[0]
         density_s = density.shape[0]
+        pdgid_s = pdgids.shape[0]
 
-        if not size.shape[0] == 1:
+        if size.shape[0] != 1:
             raise ValueError("Multiple sizes not yet supported.")
-        if not mom_s == pos_s:
+        if mom_s != pos_s:
             raise ValueError("Mismatching mom and pos batch size.")
-        if density_s > 1 and not energy_s > 1:
-            raise ValueError("Only one of energy and density can have batch size > 1.")
-        if pos_s > 1 and (energy_s > 1 or density_s > 1):
-            raise ValueError("If different coordinates are given, energy and density must have batch size 1.")
 
-        cc = torch.cat((mom, pos), dim=-1).view(-1, 6)
+        fully_batched = pos_s > 1 and energy_s == pos_s == density_s == pdgid_s
 
-        if pos_s > 1:
+        if fully_batched:
+            cc = torch.cat((mom.view(-1, 3) * energy.view(-1, 1), pos.view(-1, 3)), dim=-1)
             cc = cc.repeat_interleave(n, dim=0)
-            d = density.view(-1, 1).expand_as(cc[:, :1])
-            cc[..., :3] = cc[..., :3] * energy.view(1, 1)
-
-        elif energy_s > 1:
-            e = energy.repeat_interleave(n, dim=0).view(-1, 1)
-            d = density.view(-1, 1).expand_as(e)
-            cc = torch.cat((cc[..., :3].view(1, 3) * e, cc[..., 3:].view(1, 3).expand(e.shape[0], -1)), dim=-1)
-
+            d = density.view(-1, 1).repeat_interleave(n, dim=0)
+            ptypes = pdgids.view(-1, 1).repeat_interleave(n, dim=0).to(cc.dtype)
         else:
-            d = density.repeat_interleave(n, dim=0).view(-1, 1)
-            e = energy.view(-1, 1).expand_as(d)
-            cc = torch.cat((cc[..., :3].view(1, 3) * e, cc[..., 3:].view(1, 3).expand(e.shape[0], -1)), dim=-1)
+            if density_s > 1 and energy_s > 1:
+                raise ValueError("Only one of energy and density can have batch size > 1 while their sizes differ.")
+            if pos_s > 1 and (energy_s > 1 or density_s > 1):
+                raise ValueError("If different coordinates are given, energy and density must have batch size 1.")
+            B = max(pos_s, energy_s, density_s)
+            e = energy.view(-1, 1).expand(B, 1)
+            mom_b = mom.view(-1, 3).expand(B, 3)
+            pos_b = pos.view(-1, 3).expand(B, 3)
+            cc = torch.cat((mom_b * e, pos_b), dim=-1).repeat_interleave(n, dim=0)
+            d = density.view(-1, 1).expand(B, 1).repeat_interleave(n, dim=0)
+            ptypes = pdgids[torch.randint_like(d, 0, pdgids.shape[0]).int()]
+
+        cond = torch.cat((d, cc, ptypes), dim=-1)
 
         ptypes = pdgids[torch.randint(pdgids.shape[0], d.shape, device=d.device)]
         cond = torch.cat((d, cc, ptypes), dim=-1)
