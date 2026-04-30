@@ -22,23 +22,3 @@ class CubeTrace:
         p, x = cc.split(3, -1)
         t = self.get_time(p, x)
         return torch.cat((p, x + p * t), -1)
-
-    def iso_half_sphere(self, p_x: torch.Tensor) -> torch.Tensor:
-        """Project samples to outward half of Sphere.
-
-        Projects a point x and a momentum p (both in R^3) to the outward half of the unit sphere
-        centered at the origin. The sign of the maximum absolute coordinate of x is used to determine
-        the sign of the corresponding coordinate of p.
-
-        Args:
-            p_x: Tensor of shape (..., 6) containing points x and momenta p in R^3.
-
-        Returns:
-            Tensor of shape (..., 6) containing the projected points and momenta.
-        """
-        p, x = p_x.split(3, -1)
-        coord_max = x.abs().argmax(dim=-1, keepdim=True)
-        sgn = torch.gather(x, -1, coord_max).sign()
-        p_at_max = torch.gather(p, -1, coord_max)
-        p = p.scatter(-1, coord_max, sgn * p_at_max.abs())
-        return torch.cat((p, x), dim=-1)
