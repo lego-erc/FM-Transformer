@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 
 from ..main.modules import LEGOLtng
 from ..multiplicity.model import MultModel
@@ -36,47 +37,52 @@ class GenerateOut(torch.nn.Module):
         if not prepped:
             cond_model[..., 1:7] = self.proj_ray(cond_model[..., 1:7])
         batch = self.gen_batch(cond_model)
-        return self.model(batch)
+        sols, mask, attn_mask = self.model(batch)
+        sols[..., -1] = torch.cat([sols.new_zeros(1), self.pdgids.to(sols.dtype)])[sols[..., -1].long()]
+        return sols, mask, attn_mask
     
     def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids):
-        mom_s = mom.view(-1, 3).shape[0]
-        pos_s = pos.view(-1, 3).shape[0]
-        energy_s = energy.shape[0]
-        density_s = density.shape[0]
+        device = next(self.model.parameters()).device
+        pos, mom, energy, density, size, pdgids = (
+            t.to(device) for t in (pos, mom, energy, density, size, pdgids)
+        )
 
-        if not size.shape[0] == 1:
+        if size.shape[0] != 1:
             raise ValueError("Multiple sizes not yet supported.")
-        if not mom_s == pos_s:
-            raise ValueError("Mismatching mom and pos batch size.")
-        if density_s > 1 and not energy_s > 1:
-            raise ValueError("Only one of energy and density can have batch size > 1.")
-        if pos_s > 1 and (energy_s > 1 or density_s > 1):
-            raise ValueError("If different coordinates are given, energy and density must have batch size 1.")
+    
+        shapes = {
+            "pos": pos.view(-1, 3).shape[0],                                                                                                       
+            "mom": mom.view(-1, 3).shape[0],                   
+            "energy": energy.shape[0],                                                                                                             
+            "density": density.shape[0],
+            "pdgids": pdgids.shape[0],                                                                                                             
+        }
 
-        cc = torch.cat((mom, pos), dim=-1).view(-1, 6)
+        B = max(shapes.values())
+        err_size = {k: v for k, v in shapes.items() if v not in (1, B)}                                                                                 
+        if err_size:
+            raise ValueError(                                                                                                                      
+                f"Each argument must have either size 1 or batch size {B}; got {err_size}"
+            )
+        
+        mom = F.normalize(mom, dim=-1)
 
-        if pos_s > 1:
+        if all([shape == B for shape in shapes.values()]):
+            cc = torch.cat((mom.view(-1, 3) * energy.view(-1, 1), pos.view(-1, 3)), dim=-1)
             cc = cc.repeat_interleave(n, dim=0)
-            d = density.view(-1, 1).expand_as(cc[:, :1])
-            cc[..., :3] = cc[..., :3] * energy.view(1, 1)
-            ptypes = pdgids[torch.randint_like(d, 0, pdgids.shape[0]).int()]
-            cond = torch.cat((d, cc, ptypes), dim=-1)
-
-        elif energy_s > 1:
-            e = energy.repeat_interleave(n, dim=0).view(-1, 1)
-            d = density.view(-1, 1).expand_as(e)
-            cc = torch.cat((cc[..., :3].view(1, 3) * e, cc[..., 3:].view(1, 3) * torch.ones_like(e)), dim=-1)
-            ptypes = pdgids[torch.randint_like(d, 0, pdgids.shape[0]).int()]
-            cond = torch.cat((d, cc, ptypes), dim=-1)
-
+            d = density.view(-1, 1).repeat_interleave(n, dim=0)
+            pdgids_b = pdgids.view(-1, 1).repeat_interleave(n, dim=0).to(cc.dtype)
         else:
-            d = density.repeat_interleave(n, dim=0).view(-1, 1)
-            e = energy.view(-1, 1).expand_as(d)
-            cc = torch.cat((cc[..., :3].view(1, 3) * e, cc[..., 3:].view(1, 3) * torch.ones_like(e)), dim=-1)
-            ptypes = pdgids[torch.randint_like(d, 0, pdgids.shape[0]).int()]
-            cond = torch.cat((d, cc, ptypes), dim=-1)
+            e = energy.view(-1, 1).expand(B, 1)
+            mom_b = mom.view(-1, 3).expand(B, 3)
+            pos_b = pos.view(-1, 3).expand(B, 3)
+            d = density.view(-1, 1).expand(B, 1).repeat_interleave(n, dim=0)
+            pdgids_b = pdgids.view(-1, 1).expand(B, 1).repeat_interleave(n, dim=0)
+            cc = torch.cat((mom_b * e, pos_b), dim=-1).repeat_interleave(n, dim=0)
 
-        sols, mask, attn_mask = self.proj_ray_pass_to_model(cond, prepped=False)
+        cond = torch.cat((d, cc, pdgids_b), dim=-1)
+
+        sols, _, _ = self.proj_ray_pass_to_model(cond, prepped=False)
 
         return {
             "per_event": {
@@ -88,7 +94,7 @@ class GenerateOut(torch.nn.Module):
                 "Outgoing": sols[:, 3:],
             },
             "per_voxel": {
-                "E_dep": torch.empty(sols.shape[0], 0, 4, device=sols.device),
+                "E_dep": sols.new_empty(sols.shape[0], 0, 4),
             },
         }
 
@@ -100,7 +106,7 @@ class GenerateOut(torch.nn.Module):
 
         max_particles = self.max_seq_l - 3
         total = mult.sum(-1, keepdim=True)
-        scale = torch.where(total > max_particles, max_particles / total, torch.ones_like(total))
+        scale = (max_particles / total).clamp(max=1.0)
         mult = (mult * scale).long()
         scaled = total > max_particles
         remaining = (scaled * (max_particles - mult.sum(-1, keepdim=True))).clamp(min=0)
@@ -117,7 +123,7 @@ class GenerateOut(torch.nn.Module):
         pdgid_pad.scatter_add_(-1, cumsum_idx, torch.ones_like(pdgid_pad)).cumsum_(-1)
         cond[..., -1] = torch.searchsorted(self.pdgids, pdgid_in) + 1
         cond = cond[:, None, :]
-        cond_pad_r = cond.expand(-1, self.max_seq_l - 3, -1).clone()
+        cond_pad_r = cond.repeat(1, self.max_seq_l - 3, 1)
         cond_pad_r[..., -1] = attn_mask * (pdgid_pad + 1)
         cond_fm = torch.cat(
             (torch.zeros_like(cond).expand(-1, 2, -1), cond, cond_pad_r), dim=1

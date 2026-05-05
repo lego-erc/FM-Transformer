@@ -51,5 +51,5 @@ class DataPrep:
         target[..., :2, -1] = 0
         mask = torch.cat((torch.zeros_like(mask[:, :1]), 
                           torch.ones_like(mask[:, :1]), mask), dim=1)
-        attn_mask = torch.cat((torch.ones_like(attn_mask[:, :2]).bool(), attn_mask), dim=1)
+        attn_mask = torch.cat((torch.ones_like(attn_mask[:, :2]), attn_mask), dim=1)
         return target, mask, attn_mask

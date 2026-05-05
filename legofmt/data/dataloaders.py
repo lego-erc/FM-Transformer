@@ -59,7 +59,7 @@ class GetLEGOData:
         mask_valid_sorted = mask_valid.sort(dim=-1, descending=True).values[
             :, :max_valid
         ]
-        dataset_valid = torch.empty_like(dataset)[:, :max_valid].fill_(torch.nan)
+        dataset_valid = torch.full_like(dataset[:, :max_valid], torch.nan)
         dataset_valid[mask_valid_sorted] = dataset[mask_valid]
         idx_rel_events = ~dataset_valid[:, : self.min_particles + 1, 0].isnan().any(
             dim=-1
@@ -72,8 +72,7 @@ class GetLEGOData:
         attn_mask = particle_nan.to(torch.int64)
         mask = attn_mask.clone().unsqueeze(2)
         mask[:, 0] = 0
-        for keys in data_add.keys():
-            data_add[keys] = data_add[keys][idx_rel_events].to(self.dev)
+        data_add = {k: v[idx_rel_events].to(self.dev) for k, v in data_add.items()}
         return data_pp.to(self.dev), mask.to(self.dev), attn_mask.to(self.dev).bool(), data_add
 
     def get_filtered(

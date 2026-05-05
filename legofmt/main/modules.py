@@ -1,12 +1,13 @@
-import pytorch_lightning as ltng
+import lightning as ltng
 import torch
 import json
-from flow_matching.solver import RiemannianODESolver
+from flow_matching.solver import ODESolver
 from flow_matching.utils import ModelWrapper
 from flow_matching.utils.manifolds import Euclidean, Sphere
 from legofmt.data.dataloaders import LEGODataset
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
+
 try:
     from torch_lap_cuda_lib import solve_lap as slap
 except ImportError:
@@ -52,8 +53,7 @@ class ProjectModel(ModelWrapper, nn.Module):
         x_2d[pm_flat] = x_projx
         x = x_2d.view_as(x) if self.no_detach else x_2d.view_as(x).detach()
         t = torch.atleast_2d(t).expand_as(attn_mask)
-        t_mask = mask.squeeze(-1) == 1
-        t = t_mask * t + ~t_mask
+        t = torch.where(mask.squeeze(-1) == 1, t, 1.)
         if self.cond_cube:
             x_cube = x.clone()
             x_cube[:, 2:3] = self.vmf.to_cube(x_cube[:, 2:3])
@@ -115,7 +115,11 @@ class LEGOLtng(ltng.LightningModule):
             with open(dpath + "/meta.json") as f:
                 meta_dict = json.load(f)
                 self.max_seq_l = meta_dict["ntokens"]
-                ptensor = torch.tensor(meta_dict["particles"], dtype=torch.int64).sort().values
+                ptensor = (
+                    torch.tensor(meta_dict["particles"], dtype=torch.int64)
+                    .sort()
+                    .values
+                )
                 self.register_buffer("pdgids_template", ptensor.contiguous())
                 model_conf["model_args"]["npdgids"] = self.pdgids_template.shape[0] + 1
             if "max_seq_l" not in model_conf["model_args"]:
@@ -124,20 +128,29 @@ class LEGOLtng(ltng.LightningModule):
                 model_conf["pdgids"] = ptensor
         elif state_dict is not None:
             if model_conf["model_args"].get("ntokens", False):
-                model_conf["model_args"]["max_seq_l"] = model_conf["model_args"].pop("ntokens")
+                model_conf["model_args"]["max_seq_l"] = model_conf["model_args"].pop(
+                    "ntokens"
+                )
             self.max_seq_l = model_conf["model_args"]["max_seq_l"]
             self.register_buffer("pdgids_template", model_conf["pdgids"])
         self.t_dist = model_conf.get("t_dist", "uniform")
         self.t_dist_scale = model_conf.get("t_dist_scale", 1.4)
-        _MANIFOLD_NS = {"ProductManifold": ProductManifold, "Euclidean": Euclidean, "Sphere": Sphere}
-        self.manifold = eval(model_conf.get("manifold"), {"__builtins__": {}}, _MANIFOLD_NS)
+        _MANIFOLD_NS = {
+            "ProductManifold": ProductManifold,
+            "Euclidean": Euclidean,
+            "Sphere": Sphere,
+        }
+        self.manifold = eval(
+            model_conf.get("manifold"), {"__builtins__": {}}, _MANIFOLD_NS
+        )
         self.ot_coupling = model_conf.get("ot_coupling", False)
         self.proj_en_out = model_conf.get("proj_en_out", False)
         self.pdgid_is_idx = model_conf.get("pdgid_is_idx", False)
         self.loss_sc_fac = model_conf.get("loss_sc", 0.0)
         cond_cube = model_conf.get("cond_cube", False)
         self.model = ProjectModel(
-            CFMTrafo_x(**model_conf.get("model_args")), self.manifold,
+            CFMTrafo_x(**model_conf.get("model_args")),
+            self.manifold,
             cond_cube=cond_cube,
         )
 
@@ -179,14 +192,12 @@ class LEGOLtng(ltng.LightningModule):
         base = self.gen_base(mask[:, 1:].shape[:-1], cc[:, :1])
         if self.ot_coupling and self.model.training:
             am = attn_mask[:, 1:]
-            base = attn_mask.unsqueeze(-1) * base + ~attn_mask.unsqueeze(-1) * cc
+            base = base.where(attn_mask.unsqueeze(-1), cc)
             inf_cond = am.unsqueeze(-1).logical_xor(am.unsqueeze(-2))
             cost = torch.cdist(cc[:, 1:], base[:, 1:])
             cost = cost + inf_cond * 1e6
-            assign = slap(cost, cost.device)
-            base[:, 1:] = base[:, 1:].gather(
-                1, assign.unsqueeze(-1).expand_as(base[:, 1:])
-            )
+            assign = slap(cost, cost.device).long()
+            base[:, 1:] = torch.take_along_dim(base[:, 1:], assign.unsqueeze(-1), dim=1)
         base = torch.cat((target[:, :2], base), dim=1)
         base = self.gen_base.insert_add(base)  # E_dep
         return base
@@ -224,8 +235,12 @@ class LEGOLtng(ltng.LightningModule):
     def training_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
         loss = self._step(batch, _batch_idx)
         if loss.isnan():
-            nan_params = [n for n, p in self.model.named_parameters() if p.isnan().any()]
-            raise ValueError(f"NaN loss encountered during training. \n {nan_params or 'no NaN params (NaN is in activations/data)'}")
+            nan_params = [
+                n for n, p in self.model.named_parameters() if p.isnan().any()
+            ]
+            raise ValueError(
+                f"NaN loss encountered during training. \n {nan_params or 'no NaN params (NaN is in activations/data)'}"
+            )
         return loss
 
     @torch.no_grad()
@@ -237,7 +252,6 @@ class LEGOLtng(ltng.LightningModule):
                 loss.item(),
                 on_step=True,
                 on_epoch=True,
-                # batch_size=self._step_bs,
                 logger=True,
                 sync_dist=True,
             )
@@ -261,83 +275,139 @@ class LEGOLtng(ltng.LightningModule):
             multiprocessing_context="fork" if num_workers > 0 else None,
         )
 
+    def chunked(self, fn, *tensors, split_size=None, dim=0, cat_dim=None):
+
+        if split_size is None or split_size >= tensors[0].shape[dim]:
+            return fn(*tensors)
+        if cat_dim is None:
+            cat_dim = dim
+        empty = getattr(
+            getattr(torch, self.device.type, None), "empty_cache", lambda: None
+        )
+        out = []
+        for chunk in zip(*(t.split(split_size, dim) for t in tensors)):
+            out.append(fn(*chunk))
+            empty()
+        return torch.cat(out, dim=cat_dim)
+
     @torch.no_grad()
-    def forward(self, batch: tuple, _batch_idx: int | Tensor | None = None) -> Tensor:
-        self.model.eval()
-        self.opt.eval()
-
-        split_size = self.odeint_conf.get("split_size", 2**16 - 1)
-        return_base = self.odeint_conf.get("return_base", False)
-        step_size = self.odeint_conf.get("step_size", 0.04)
-        return_timesteps = self.odeint_conf.get("return_timesteps", False)
-        filter_pdgid = self.odeint_conf.get("filter_pdgid", None)
-        method = self.odeint_conf.get("method", "midpoint")
-
-        if self.odeint_conf.get("fwd_compile", False) and not hasattr(                                                                             
-            self.model.vf, "_orig_mod"                                                                                                             
-        ):                                                                                                                                         
-            self.model.vf = torch.compile(self.model.vf, mode="reduce-overhead")   
-
-        if return_timesteps:
-            time_grid = torch.arange(
-                0, 1 + step_size, step=step_size, device=self.device
-            ).clamp_max(1)
-        else:
-            time_grid = torch.tensor([0.0, 1.0], device=self.device)
+    def solve(
+        self,
+        batch: tuple,
+        x_init: Tensor | None = None,
+        reverse: bool = False,
+        compute_ll: bool = False,
+        log_p0=None,
+        split_size: int | None = None,
+        step_size: float = 0.04,
+        method: str = "midpoint",
+        time_grid: Tensor | None = None,
+        return_intermediates: bool = False,
+    ) -> Tensor:
+        if self.model.training:
+            self.model.eval()
+            self.opt.eval()
 
         target, mask, attn_mask = batch
+        _, cc, pdgids = target.split([1, 6, 1], dim=-1)
+        pdgids_idx = pdgids.int() if self.pdgid_is_idx else self.convert_pdgids(pdgids)
+        cc = cc.where(attn_mask.unsqueeze(-1), cc[:, 2:3, :])
+        if x_init is not None and x_init.shape == cc.shape:
+            x_init = x_init.where(attn_mask.unsqueeze(-1), x_init[:, 2:3, :])
 
-        energy, cc, pdgids = target.split([1, 6, 1], dim=-1)
+        solver = ODESolver(velocity_model=self.model)
+        common = dict(step_size=step_size, method=method, types=self.types_embd)
 
-        if self.pdgid_is_idx:
-            pdgids_idx = pdgids.int()
-        else:
-            pdgids_idx = self.convert_pdgids(pdgids)
+        if compute_ll:
+            self.model.no_detach = True
+            try:
+                _, log_ll = solver.compute_likelihood(
+                    x_1=cc,
+                    log_p0=log_p0,
+                    mask=mask,
+                    attn_mask=attn_mask,
+                    pdgids=pdgids_idx,
+                    **common,
+                )
+            finally:
+                self.model.no_detach = False
+            return log_ll
 
+        if x_init is None:
+            x_init = self.gen_base_wrapper((cc, mask, attn_mask))
+        if time_grid is None:
+            time_grid = x_init.new_tensor([1.0, 0.0] if reverse else [0.0, 1.0])
+
+        def _sample(x_init, mask, attn_mask, pdgids_idx):
+            return solver.sample(
+                x_init=x_init,
+                time_grid=time_grid,
+                mask=mask,
+                attn_mask=attn_mask,
+                pdgids=pdgids_idx,
+                return_intermediates=return_intermediates,
+                **common,
+            )
+
+        return self.chunked(
+            _sample,
+            x_init,
+            mask,
+            attn_mask,
+            pdgids_idx,
+            split_size=split_size,
+            cat_dim=-3,
+        )
+
+    @torch.no_grad()
+    def forward(self, batch: tuple, _batch_idx: int | Tensor | None = None) -> tuple:
+        if self.model.training:
+            self.model.eval()
+            self.opt.eval()
+
+        cfg = self.odeint_conf
+        if cfg.get("fwd_compile", False) and not hasattr(self.model.vf, "_orig_mod"):
+            self.model.vf = torch.compile(self.model.vf, mode="reduce-overhead")
+
+        target, mask, attn_mask = batch
+        _, cc, pdgids = target.split([1, 6, 1], dim=-1)
         base = self.gen_base_wrapper((cc, mask, attn_mask))
         densities = base[:, :1, :1].expand_as(base[..., :1])
-        if return_base:
+
+        if cfg.get("return_base", False):
             sols = base.masked_fill(~attn_mask.unsqueeze(-1), torch.nan)
-
         else:
-            init_state_tp = base.split(split_size, 0)
-            mask_tp = mask.split(split_size, 0)
-            attn_mask_tp = attn_mask.split(split_size, 0)
-            pdgids_idx_tp = pdgids_idx.split(split_size, 0)
-
-            sols_list = []
-            solver = RiemannianODESolver(velocity_model=self.model, manifold=self.manifold)
-            for idx in range(len(init_state_tp)):
-                sols_ = solver.sample(
-                    x_init=init_state_tp[idx],
-                    step_size=step_size,
-                    method=method,
-                    projx=False,
-                    proju=False,
-                    return_intermediates=return_timesteps,
-                    time_grid=time_grid,
-                    mask=mask_tp[idx],
-                    attn_mask=attn_mask_tp[idx],
-                    types=self.types_embd,
-                    pdgids=pdgids_idx_tp[idx],
-                )
-                sols_.masked_fill_(~attn_mask_tp[idx].unsqueeze(-1), torch.nan)
-
-                sols_list.append(sols_)
-
-                del sols_
-                if self.device.type == "cuda":
-                    torch.cuda.empty_cache()
-                if self.device.type == "mps":
-                    torch.mps.empty_cache()
-
-            sols = torch.cat(sols_list, dim=-3)
-
+            step_size = cfg.get("step_size", 0.04)
+            time_grid = (
+                torch.arange(
+                    0, 1 + step_size, step=step_size, device=self.device
+                ).clamp_max(1)
+                if cfg.get("return_timesteps", False)
+                else None
+            )
+            sols = self.solve(
+                batch,
+                x_init=base,
+                split_size=cfg.get("split_size"),
+                step_size=step_size,
+                method=cfg.get("method", "midpoint"),
+                time_grid=time_grid,
+                return_intermediates=cfg.get("return_timesteps", False),
+            )
+            sols = sols.masked_fill(~attn_mask.unsqueeze(-1), torch.nan)
+            filter_pdgid = cfg.get("filter_pdgid")
             if filter_pdgid is not None:
-                filter_pdgid_idx = self.convert_pdgids(filter_pdgid)
-                pdgid_mask = torch.isin(pdgids_idx_tp[idx], filter_pdgid_idx)
-                pdgid_mask.logical_or_(pdgids_idx_tp[idx] == 0)
-                sols.masked_fill_(~pdgid_mask, torch.nan)
-                pdgids.masked_fill_(~pdgid_mask, 0)
+                pdgids_idx = (
+                    pdgids.int() if self.pdgid_is_idx else self.convert_pdgids(pdgids)
+                )
+                keep = torch.isin(pdgids_idx, self.convert_pdgids(filter_pdgid)) | (
+                    pdgids_idx == 0
+                )
+                sols.masked_fill_(~keep, torch.nan)
+                pdgids = pdgids.masked_fill(~keep, 0)
 
-        return torch.cat((densities, sols, pdgids),dim=-1), mask, attn_mask
+        if sols.dim() == 4:
+            T = sols.shape[0]
+            densities = densities.unsqueeze(0).expand(T, -1, -1, -1)
+            pdgids = pdgids.unsqueeze(0).expand(T, -1, -1, -1)
+        return torch.cat((densities, sols, pdgids), dim=-1), mask, attn_mask
