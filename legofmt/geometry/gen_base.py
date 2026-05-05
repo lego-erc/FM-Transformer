@@ -17,7 +17,6 @@ class GenerateBase:
         self.scale_dist = base_conf.get("scale_dist", "trunc_norm")
 
         if base_dist == "poles":
-            self.exp_dist = torch.distributions.Exponential(8)
             self.func = self.poles
 
         else:
