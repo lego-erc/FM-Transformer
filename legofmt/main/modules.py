@@ -142,6 +142,7 @@ class LEGOLtng(ltng.LightningModule):
         self.proj_en_out = model_conf.get("proj_en_out", False)
         self.pdgid_is_idx = model_conf.get("pdgid_is_idx", False)
         self.loss_sc_fac = model_conf.get("loss_sc", 0.0)
+        self.min_snr_gamma = model_conf.get("min_snr_gamma", 0.0)
         cond_cube = model_conf.get("cond_cube", False)
         self.model = ProjectModel(
             CFMTrafo_x(**model_conf.get("model_args")),
@@ -154,7 +155,9 @@ class LEGOLtng(ltng.LightningModule):
 
         opt_conf = config.get("opt_conf").copy()
         opt = opt_conf.pop("opt")
+        self._sched_conf = opt_conf.pop("scheduler", None)
         self.opt = opt(self.model.parameters(), **opt_conf)
+        self._opt_is_sf = hasattr(self.opt, "train") and callable(getattr(self.opt, "train", None))
 
         self.dl_conf = config.get("dl_conf")
         self.register_buffer(
@@ -167,12 +170,22 @@ class LEGOLtng(ltng.LightningModule):
         if state_dict is not None:
             self.model.vf.load_state_dict(state_dict, strict=False)
 
+    def _opt_train(self) -> None:
+        """No-op unless the optimizer has a schedule-free .train() method."""
+        if self._opt_is_sf:
+            self.opt.train()
+
+    def _opt_eval(self) -> None:
+        """No-op unless the optimizer has a schedule-free .eval() method."""
+        if self._opt_is_sf:
+            self.opt.eval()
+
     @torch.no_grad()
     def on_fit_start(self) -> None:
         self.loss_fn = nn.MSELoss()
         self.ps = ProductPathSampler(self.manifold)
         self.model.train()
-        self.opt.train()
+        self._opt_train()
 
     @torch.no_grad()
     def convert_pdgids(self, pdgids: Tensor) -> Tensor:
@@ -205,6 +218,9 @@ class LEGOLtng(ltng.LightningModule):
             pdgid_idx = self.convert_pdgids(pdgids)
             if self.t_dist == "sm_norm":
                 t = torch.sigmoid(self.t_dist_scale * torch.randn_like(base[:, 0, 0]))
+            elif self.t_dist == "sd3":
+                u = torch.rand_like(base[:, 0, 0])
+                t = 1 - u + self.t_dist_scale / 3 * ((torch.pi / 2 * u).sin()**2 - u)
             elif self.t_dist == "uniform":
                 t = torch.rand_like(base[:, 0, 0])
             ps_ = self.ps.sample(base, cc, t)
@@ -224,7 +240,14 @@ class LEGOLtng(ltng.LightningModule):
         else:
             loss_sc = 0.0
         v_target = ps_.dx_t * attn_mask.unsqueeze(-1)
-        loss = self.loss_fn(v_out, v_target) + self.loss_sc_fac * loss_sc
+        if self.min_snr_gamma > 0:
+            t_safe = ps_.t.clamp(1e-3, 1 - 1e-3)
+            snr = ((1 - t_safe) / t_safe)**2
+            w = (snr.clamp_max(self.min_snr_gamma) / snr).unsqueeze(-1)
+            loss_v = ((v_out - v_target)**2 * w).mean()
+        else:
+            loss_v = self.loss_fn(v_out, v_target)
+        loss = loss_v + self.loss_sc_fac * loss_sc
         return loss
 
     def training_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
@@ -246,12 +269,21 @@ class LEGOLtng(ltng.LightningModule):
         return loss
 
     @torch.no_grad()
-    def configure_optimizers(self) -> torch.optim.Optimizer:
-        return self.opt
+    def configure_optimizers(self):
+        if self._sched_conf is None:
+            return self.opt
+        cfg = dict(self._sched_conf)
+        sched_cls = cfg.pop("cls")
+        interval = cfg.pop("interval", "step")
+        scheduler = sched_cls(self.opt, **cfg)
+        return {
+            "optimizer": self.opt,
+            "lr_scheduler": {"scheduler": scheduler, "interval": interval},
+        }
 
     @torch.no_grad()
     def train_dataloader(self) -> DataLoader:
-        num_workers = self.dl_conf.get("num_workers", 32)
+        num_workers = self.dl_conf.get("num_workers", 4)
         dataset_train = LEGODataset(**self.dl_conf.get("lds_args"))
         return DataLoader(
             dataset_train,
@@ -260,7 +292,7 @@ class LEGOLtng(ltng.LightningModule):
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=num_workers > 0,
-            multiprocessing_context="fork" if num_workers > 0 else None,
+            multiprocessing_context="spawn" if num_workers > 0 else None,
         )
 
     def chunked(self, fn, *tensors, split_size=None, dim=0, cat_dim=None):
@@ -290,7 +322,7 @@ class LEGOLtng(ltng.LightningModule):
     ) -> Tensor:
         if self.model.training:
             self.model.eval()
-            self.opt.eval()
+            self._opt_eval()
 
         target, mask, attn_mask = batch
         _, cc, pdgids = target.split([1, 6, 1], dim=-1)
@@ -347,11 +379,11 @@ class LEGOLtng(ltng.LightningModule):
     def forward(self, batch: tuple, _batch_idx: int | Tensor | None = None) -> tuple:
         if self.model.training:
             self.model.eval()
-            self.opt.eval()
+            self._opt_eval()
 
         cfg = self.odeint_conf
         if cfg.get("fwd_compile", False) and not hasattr(self.model.vf, "_orig_mod"):
-            self.model.vf = torch.compile(self.model.vf, mode="reduce-overhead")
+            self.model.vf = torch.compile(self.model.vf, fullgraph=True, dynamic=False)
 
         target, mask, attn_mask = batch
         _, cc, pdgids = target.split([1, 6, 1], dim=-1)
