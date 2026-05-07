@@ -127,4 +127,4 @@ class CFMTrafo_x(nn.Module):
 
         out = l_out + bo_embd
 
-        return (mask == 1) * out
+        return (mask == 1).unsqueeze(-1) * out

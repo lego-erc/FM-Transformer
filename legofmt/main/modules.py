@@ -53,7 +53,7 @@ class ProjectModel(ModelWrapper, nn.Module):
         x_2d[pm_flat] = x_projx
         x = x_2d.view_as(x) if self.no_detach else x_2d.view_as(x).detach()
         t = torch.atleast_2d(t).expand_as(attn_mask)
-        t = torch.where(mask.squeeze(-1) == 1, t, 1.)
+        t = torch.where(mask == 1, t, 1.)
         if self.cond_cube:
             x_cube = x.clone()
             x_cube[:, 2:3] = self.vmf.to_cube(x_cube[:, 2:3])
@@ -186,49 +186,44 @@ class LEGOLtng(ltng.LightningModule):
         return pdgid_idx.masked_fill_(cond, 0)
 
     @torch.no_grad()
-    def gen_base_wrapper(self, batch: tuple) -> Tensor:
-        target, mask_, attn_mask_ = batch
-        cc, mask, attn_mask = target[:, 2:], mask_[:, 2:], attn_mask_[:, 2:]
-        base = self.gen_base(mask[:, 1:].shape[:-1], cc[:, :1])
+    def gen_base_wrapper(self, ds_t: tuple) -> Tensor:
+        base = self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc)
         if self.ot_coupling and self.model.training:
-            am = attn_mask[:, 1:]
-            base = base.where(attn_mask.unsqueeze(-1), cc)
-            inf_cond = am.unsqueeze(-1).logical_xor(am.unsqueeze(-2))
-            cost = torch.cdist(cc[:, 1:], base[:, 1:])
+            base = base.where(ds_t.am.p[:, :, None], ds_t.f.cc)
+            inf_cond = ds_t.am.out_p[:, :, None].logical_xor(ds_t.am.out_p[:, None, :])
+            cost = torch.cdist(ds_t.f.out_cc, base[:, 1:])
             cost = cost + inf_cond * 1e6
             assign = slap(cost, cost.device).long()
             base[:, 1:] = torch.take_along_dim(base[:, 1:], assign.unsqueeze(-1), dim=1)
-        base = torch.cat((target[:, :2], base), dim=1)
+        base = torch.cat((ds_t.f.non_cc, base), dim=1)
         base = self.gen_base.insert_add(base)  # E_dep
         return base
 
-    def _step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
+    def _step(self, ds_t: tuple, _batch_idx: int | Tensor) -> Tensor:
         with torch.no_grad():
-            target, mask, attn_mask = batch
-            energy, cc, pdgids = target.split([1, 6, 1], dim=-1)
-            base = self.gen_base_wrapper((cc, mask, attn_mask))
-            pdgid_idx = self.convert_pdgids(pdgids)
+            base = self.gen_base_wrapper(ds_t)
+            pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
             if self.t_dist == "sm_norm":
                 t = torch.sigmoid(self.t_dist_scale * torch.randn_like(base[:, 0, 0]))
             elif self.t_dist == "uniform":
                 t = torch.rand_like(base[:, 0, 0])
-            ps_ = self.ps.sample(base, cc, t)
+            ps_ = self.ps.sample(base, ds_t.f.model_in, t)
         v_out = self.model(
             ps_.x_t,
             ps_.t,
-            mask=mask,
-            attn_mask=attn_mask,
+            mask=ds_t.m.full,
+            attn_mask=ds_t.am.full,
             types=self.types_embd,
             pdgids=pdgid_idx,
         )
         if self.loss_sc_fac > 0:
             pred_sc = (1 - ps_.t).unsqueeze(-1) * v_out + ps_.x_t
-            pred_sc_ft = (pred_sc * attn_mask.unsqueeze(-1))[..., :3]
-            target_sc = (cc * attn_mask.unsqueeze(-1))[..., :3]
+            pred_sc_ft = (pred_sc * ds_t.am.full[:, :, None])[..., :3]
+            target_sc = (ds_t.f.mom * ds_t.am.full[:, :, None])
             loss_sc = self.loss_fn(pred_sc_ft, target_sc)
         else:
             loss_sc = 0.0
-        v_target = ps_.dx_t * attn_mask.unsqueeze(-1)
+        v_target = ps_.dx_t * ds_t.am.full[:, :, None]
         loss = self.loss_fn(v_out, v_target) + self.loss_sc_fac * loss_sc
         return loss
 

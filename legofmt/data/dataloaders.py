@@ -2,6 +2,8 @@ import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 
+from .struct import DataStruct
+
 
 class GetLEGOData:
     def __init__(
@@ -70,7 +72,7 @@ class GetLEGOData:
             data_pp = data_pp[rd_idx]
         particle_nan = ~data_pp.isnan().any(dim=-1)
         attn_mask = particle_nan.to(torch.int64)
-        mask = attn_mask.clone().unsqueeze(2)
+        mask = attn_mask.clone()
         mask[:, 0] = 0
         data_add = {k: v[idx_rel_events].to(self.dev) for k, v in data_add.items()}
         return data_pp.to(self.dev), mask.to(self.dev), attn_mask.to(self.dev).bool(), data_add
@@ -90,21 +92,24 @@ class GetLEGOData:
 
 
 class LEGODataset(Dataset):
-    def __init__(self, data: (str | dict | tuple), **kwargs) -> None:
+    def __init__(self, data: (str | dict | tuple), *, prep=None, **kwargs) -> None:
         super().__init__()
         if isinstance(data, str):
             path = data + "/data_prepped.pt" if data[-3:] != ".pt" else data
             data = torch.load(path, map_location="cpu", weights_only=False)
         elif isinstance(data, dict):
-            self.full_data = GetLEGOData(**kwargs)(data) 
-            self.target, self.mask, self.attn_mask, _ = self.full_data
+            if prep is None:
+                raise ValueError(
+                    "LEGODataset(dict, ...) requires `prep` (e.g. DataPrep(config)); "
+                    "GetLEGOData yields pre-format_add layout that DataStruct misaligns."
+                )
+            self.data = DataStruct(*prep(GetLEGOData(**kwargs)(data)))
         if isinstance(data, tuple):
-            self.target, self.mask, self.attn_mask = data
-        self.length = self.target.shape[0]
+            self.data = DataStruct(*data)
         self.device = kwargs.get("device", "cpu")
 
     def __len__(self) -> int:
-        return self.length
+        return len(self.data)
 
-    def __getitem__(self, idx: int | Tensor) -> tuple[Tensor]:
-        return self.target[idx], self.mask[idx], self.attn_mask[idx]
+    def __getitem__(self, idx: int | Tensor) -> DataStruct:
+        return self.data[idx]

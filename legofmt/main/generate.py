@@ -130,8 +130,8 @@ class GenerateOut(torch.nn.Module):
         )
 
         attn_mask = torch.cat((torch.ones_like(attn_mask[:, :3]), attn_mask), dim=1)
-        mask = attn_mask.clone().long().unsqueeze(2)
-        mask[:, [0, 2], 0] = 0 #Conditions
+        mask = attn_mask.clone().long()
+        mask[:, [0, 2]] = 0 #Conditions
         cond_fm[:, 0, 1] = cond[:, 0, 0] #Density
         cond_fm[:, :2, 2:-1] = 1
         return cond_fm, mask, attn_mask
