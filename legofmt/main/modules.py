@@ -229,13 +229,6 @@ class LEGOLtng(ltng.LightningModule):
 
     def training_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
         loss = self._step(batch, _batch_idx)
-        if loss.isnan():
-            nan_params = [
-                n for n, p in self.model.named_parameters() if p.isnan().any()
-            ]
-            raise ValueError(
-                f"NaN loss encountered during training. \n {nan_params or 'no NaN params (NaN is in activations/data)'}"
-            )
         return loss
 
     @torch.no_grad()
@@ -244,7 +237,7 @@ class LEGOLtng(ltng.LightningModule):
         with torch.no_grad():
             self.log(
                 "Validation Loss",
-                loss.item(),
+                loss,
                 on_step=True,
                 on_epoch=True,
                 logger=True,
@@ -276,13 +269,9 @@ class LEGOLtng(ltng.LightningModule):
             return fn(*tensors)
         if cat_dim is None:
             cat_dim = dim
-        empty = getattr(
-            getattr(torch, self.device.type, None), "empty_cache", lambda: None
-        )
         out = []
         for chunk in zip(*(t.split(split_size, dim) for t in tensors)):
             out.append(fn(*chunk))
-            empty()
         return torch.cat(out, dim=cat_dim)
 
     @torch.no_grad()
