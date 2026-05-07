@@ -110,11 +110,9 @@ class GenerateOut(torch.nn.Module):
         mult = (mult * scale).long()
         scaled = total > max_particles
         remaining = (scaled * (max_particles - mult.sum(-1, keepdim=True))).clamp(min=0)
-        r_max = remaining.max().item()
-        if r_max > 0:
-            dist = torch.multinomial(mult.float().clamp(min=1), r_max, replacement=True)
-            valid = (torch.arange(r_max, device=mult.device) < remaining).long()
-            mult.scatter_add_(-1, dist, valid)
+        dist = torch.multinomial(mult.float().clamp(min=1), max_particles, replacement=True)
+        valid = (torch.arange(max_particles, device=mult.device) < remaining).long()
+        mult.scatter_add_(-1, dist, valid)
 
         idx = torch.arange(max_particles, device=mult.device)
         attn_mask = idx < mult.sum(-1, keepdim=True)
