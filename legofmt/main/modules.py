@@ -383,7 +383,7 @@ class LEGOLtng(ltng.LightningModule):
 
         cfg = self.odeint_conf
         if cfg.get("fwd_compile", False) and not hasattr(self.model.vf, "_orig_mod"):
-            self.model.vf = torch.compile(self.model.vf, fullgraph=True, dynamic=False)
+            self.model = torch.compile(self.model, dynamic=False)
 
         target, mask, attn_mask = batch
         _, cc, pdgids = target.split([1, 6, 1], dim=-1)
@@ -410,7 +410,7 @@ class LEGOLtng(ltng.LightningModule):
                 time_grid=time_grid,
                 return_intermediates=cfg.get("return_timesteps", False),
             )
-            sols = sols.masked_fill(~attn_mask.unsqueeze(-1), torch.nan)
+            sols.masked_fill_(~attn_mask.unsqueeze(-1), torch.nan)
             filter_pdgid = cfg.get("filter_pdgid")
             if filter_pdgid is not None:
                 pdgids_idx = (
