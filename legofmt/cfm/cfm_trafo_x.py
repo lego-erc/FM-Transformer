@@ -11,6 +11,7 @@ class CFMTrafo_x(nn.Module):
         nhead: int = 8,
         max_seq_l: int = 9,
         nvtypes: int = 3,
+        ntypes: int | None = None,
         in_dim: int = 6,
         ff_mult: int = 1,
         dropout: float = 0.1,
@@ -24,6 +25,7 @@ class CFMTrafo_x(nn.Module):
         self.in_dim = in_dim
         self.max_seq_l = max_seq_l
         self.nvtypes = nvtypes
+        self.ntypes = ntypes if ntypes is not None else max_seq_l
         self.npdgids = npdgids
 
         self.vf = ContinuousTransformerWrapper(
@@ -47,9 +49,9 @@ class CFMTrafo_x(nn.Module):
         self.l_mask_ = nn.Parameter(torch.empty(self.nvtypes, 2, self.h_dim, self.in_dim))
         self.b_mask_ = nn.Parameter(torch.empty(self.nvtypes, self.h_dim))
         self.bo_mask_ = nn.Parameter(torch.empty(self.nvtypes, self.in_dim))
-        self.l_types_ = nn.Parameter(torch.empty(self.max_seq_l, 2, self.h_dim, self.in_dim))
-        self.b_types_ = nn.Parameter(torch.empty(self.max_seq_l, self.h_dim))
-        self.bo_types_ = nn.Parameter(torch.empty(self.max_seq_l, self.in_dim))
+        self.l_types_ = nn.Parameter(torch.empty(self.ntypes, 2, self.h_dim, self.in_dim))
+        self.b_types_ = nn.Parameter(torch.empty(self.ntypes, self.h_dim))
+        self.bo_types_ = nn.Parameter(torch.empty(self.ntypes, self.in_dim))
         self.l_pdgids_ = nn.Parameter(torch.empty(self.npdgids, 2, self.h_dim, self.in_dim))
         self.b_pdgids_ = nn.Parameter(torch.empty(self.npdgids, self.h_dim))
         self.bo_pdgids_ = nn.Parameter(torch.empty(self.npdgids, self.in_dim))

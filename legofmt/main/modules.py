@@ -144,6 +144,8 @@ class LEGOLtng(ltng.LightningModule):
         self.loss_sc_fac = model_conf.get("loss_sc", 0.0)
         self.min_snr_gamma = model_conf.get("min_snr_gamma", 0.0)
         cond_cube = model_conf.get("cond_cube", False)
+        if state_dict is None:
+            model_conf["model_args"].setdefault("ntypes", 4)
         self.model = ProjectModel(
             CFMTrafo_x(**model_conf.get("model_args")),
             self.manifold,
