@@ -202,7 +202,6 @@ class MultModel(LightningModule):
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=num_workers > 0,
-            multiprocessing_context="spawn" if num_workers > 0 else None,
         )
 
     @torch.no_grad()
