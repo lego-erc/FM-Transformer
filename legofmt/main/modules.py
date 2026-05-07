@@ -292,6 +292,7 @@ class LEGOLtng(ltng.LightningModule):
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=num_workers > 0,
+            multiprocessing_context="fork" if num_workers > 0 else None,
         )
 
     def chunked(self, fn, *tensors, split_size=None, dim=0, cat_dim=None):
