@@ -19,14 +19,27 @@ schedulefree = ">=1.4.1"
 flow-matching = ">=1.0.10"
 legofmt = { path = ".", editable = true }
 
-[feature.cuda.system-requirements]
-cuda = "13"
+[feature.cuda.pypi-options]
+no-build-isolation = ["torch-lap-cuda"]
 
-[feature.cuda.target.linux-64.dependencies]
-pytorch = { version = ">=2.10", build = "cuda130_mkl*" }
-torchvision = { version = ">=0.26", build = "cuda130*" }
+[feature.cuda.system-requirements]                                                                                                         
+cuda = "13"                                                                                                  
+                                                                                                                                            
+[feature.cuda.target.linux-64.dependencies]                                                                                                
+pytorch         = { version = ">=2.10", build = "cuda130_mkl*" }                                                                           
+torchvision     = { version = ">=0.26", build = "cuda130*" }
+cuda-version    = "13.0.*"
+cuda-nvcc       = "*"                                                                                                                      
+cuda-cudart-dev = "*"                                                                                                                      
+cuda-driver-dev = "*"
+cuda-cccl       = "*"                                                                                                                      
+libcublas-dev   = "*"                                                                                                                    
+libcusparse-dev = "*"                                                                                                                      
+libcusolver-dev = "*"                                                                               
+                                                                                                                                            
+[feature.cuda.target.linux-64.pypi-dependencies]                                                                                         
+torch-lap-cuda = { git = "https://github.com/rdebrand/torch-lap-cuda" }
 
-# CPU build of pytorch: no cuda-version constraint, conda picks cpu_mkl by default.
 [feature.cpu.target.linux-64.dependencies]
 torchvision = ">=0.26"
 
@@ -39,9 +52,6 @@ x-transformers = "==2.14.2"
 [feature.train.dependencies]
 comet-ml = "*"
 uv = "*"
-
-[feature.train.activation]
-scripts = ["scripts/train_setup.sh"]
 
 [feature.ci.dependencies]
 pip = ">=25.3,<26"
