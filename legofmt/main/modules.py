@@ -382,7 +382,9 @@ class LEGOLtng(ltng.LightningModule):
             self._opt_eval()
 
         cfg = self.odeint_conf
-        if cfg.get("fwd_compile", False) and not hasattr(self.model.vf, "_orig_mod"):
+        if (cfg.get("fwd_compile", False) 
+        and not (hasattr(self.model, "_orig_mod")
+        or hasattr(self.model.vf, "_orig_mod"))):
             self.model = torch.compile(self.model, dynamic=False)
 
         target, mask, attn_mask = batch

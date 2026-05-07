@@ -25,9 +25,6 @@ class CFMTrafo_x(nn.Module):
         self.max_seq_l = max_seq_l
         self.nvtypes = nvtypes
         self.npdgids = npdgids
-        self.vl = (2, self.h_dim, self.in_dim)
-        self.vb = (self.h_dim,)
-        self.vbo = (self.in_dim,)
 
         self.vf = ContinuousTransformerWrapper(
             dim_in=h_dim,
@@ -83,14 +80,14 @@ class CFMTrafo_x(nn.Module):
         pdgids_idx = pdgids.view(-1)
 
         b_embd = (
-            self.b_mask_[mask_idx].view(-1, n_tokens, *self.vb)
-            + self.b_types_[types_idx].view(-1, n_tokens, *self.vb)
-            + self.b_pdgids_[pdgids_idx].view(-1, n_tokens, *self.vb)
+            self.b_mask_[mask_idx].view(-1, n_tokens, self.h_dim)
+            + self.b_types_[types_idx].view(-1, n_tokens, self.h_dim)
+            + self.b_pdgids_[pdgids_idx].view(-1, n_tokens, self.h_dim)
         ) / 3
         bo_embd = (
-            self.bo_mask_[mask_idx].view(-1, n_tokens, *self.vbo)
-            + self.bo_types_[types_idx].view(-1, n_tokens, *self.vbo)
-            + self.bo_pdgids_[pdgids_idx].view(-1, n_tokens, *self.vbo)
+            self.bo_mask_[mask_idx].view(-1, n_tokens, self.in_dim)
+            + self.bo_types_[types_idx].view(-1, n_tokens, self.in_dim)
+            + self.bo_pdgids_[pdgids_idx].view(-1, n_tokens, self.in_dim)
         ) / 3
 
         t_freqs = t.unsqueeze(-1) * self.freqs
