@@ -46,12 +46,11 @@ class ProjectModel(ModelWrapper, nn.Module):
         types: torch.Tensor,
         pdgids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x_2d = x.flatten(0, -2)
-        pm_flat = attn_mask.flatten()
-        x_projx = self.manifold.projx(x_2d[pm_flat])
-        x_2d = x_2d.clone()
-        x_2d[pm_flat] = x_projx
-        x = x_2d.view_as(x) if self.no_detach else x_2d.view_as(x).detach()
+        pm = attn_mask.unsqueeze(-1)
+        x_proj_dense = self.manifold.projx(x)
+        x = torch.where(pm, x_proj_dense, x)
+        if not self.no_detach:
+            x = x.detach()
         t = torch.atleast_2d(t).expand_as(attn_mask)
         t = torch.where(mask.squeeze(-1) == 1, t, 1.)
         if self.cond_cube:
@@ -61,12 +60,8 @@ class ProjectModel(ModelWrapper, nn.Module):
         else:
             x_surr = x
         v = self.vf(t, x_surr, mask, attn_mask, types, pdgids)
-        v_2d = v.flatten(0, -2)
-        v_proj = self.manifold.proju(x_projx, v_2d[pm_flat])
-        if self.no_detach:
-            v_2d = v_2d.clone()
-        v_2d[pm_flat] = v_proj
-        return v_2d.view_as(v)
+        v_proj_dense = self.manifold.proju(x_proj_dense, v)
+        return torch.where(pm, v_proj_dense, v)
 
 
 class LEGOLtng(ltng.LightningModule):
