@@ -152,6 +152,9 @@ class LEGOLtng(ltng.LightningModule):
             cond_cube=cond_cube,
         )
 
+        self.loss_ema_beta = model_conf.get("loss_ema_beta", 0.99)
+        self.register_buffer("loss_ema", torch.ones(3))  # [edep, mom, pos]
+
         self.gen_base = GenerateBase(config.copy())
         self.ppa = CubeTrace()
 
@@ -241,14 +244,16 @@ class LEGOLtng(ltng.LightningModule):
             loss_sc = self.loss_fn(pred_sc_ft, target_sc)
         else:
             loss_sc = 0.0
-        v_target = ps_.dx_t * attn_mask.unsqueeze(-1)
+        sq = (v_out - ps_.dx_t)**2
         if self.min_snr_gamma > 0:
-            t_safe = ps_.t.clamp(1e-3, 1 - 1e-3)
-            snr = ((1 - t_safe) / t_safe)**2
-            w = (snr.clamp_max(self.min_snr_gamma) / snr).unsqueeze(-1)
-            loss_v = ((v_out - v_target)**2 * w).mean()
-        else:
-            loss_v = self.loss_fn(v_out, v_target)
+            t_s = ps_.t.clamp(1e-3, 1 - 1e-3)
+            snr = ((1 - t_s) / t_s)**2
+            sq = sq * (snr.clamp_max(self.min_snr_gamma) / snr).view(-1, 1, 1)
+        sq_o = sq[:, 3:] * (mask[:, 3:] == 1)
+        means = torch.stack([sq[:, 1].mean(), *(s.mean() for s in sq_o.chunk(2, -1))])
+        if self.training:
+            self.loss_ema.lerp_(means.detach(), 1 - self.loss_ema_beta)
+        loss_v = (means / self.loss_ema).sum()
         loss = loss_v + self.loss_sc_fac * loss_sc
         return loss
 

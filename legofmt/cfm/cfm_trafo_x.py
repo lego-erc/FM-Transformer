@@ -29,8 +29,8 @@ class CFMTrafo_x(nn.Module):
         self.npdgids = npdgids
 
         self.vf = ContinuousTransformerWrapper(
-            dim_in=h_dim,
-            dim_out=h_dim,
+            # dim_in=h_dim,
+            # dim_out=h_dim,
             max_seq_len=max_seq_l,
             emb_dropout=dropout,
             use_abs_pos_emb=False,

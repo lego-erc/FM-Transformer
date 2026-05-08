@@ -38,7 +38,6 @@ class CornerHist:
         corner=True,
         plot_en=False,
         plot_edep=False,
-        return_base=False,
         anim_intermediates=False,
         cutoff_en=10.0,
         **kwargs,
@@ -48,7 +47,6 @@ class CornerHist:
             config["config"]["odeint_conf"] = config["config"].get("odeint_conf", {})
             config["config"]["odeint_conf"].update(
                 {
-                    "return_base": return_base,
                     "return_timesteps": anim_intermediates,
                 }
             )
@@ -136,9 +134,13 @@ class CornerHist:
 
     def plot_tensors(self, sols, truth=None):
         is_8d = sols.shape[-1] == 8
+        if truth is not None:
+            is_8d_truth = truth.shape[-1] == 8
+        else:
+            is_8d_truth = False
 
         if truth is not None:
-            truth_e_dep = truth[:, 1, 1] if is_8d else truth[:, 1, 0]
+            truth_e_dep = truth[:, 1, 1] if is_8d_truth else truth[:, 1, 0]
             sols = sols[:, :truth.shape[1]]
         else:
             truth_e_dep = None
@@ -146,7 +148,7 @@ class CornerHist:
         e_dep = sols[:, 1, 1] if is_8d else sols[:, 1, 0]
 
         sols_cc = sols[..., 1:7] if is_8d else sols
-        truth_cc = (truth[..., 1:7] if is_8d else truth) if truth is not None else None
+        truth_cc = (truth[..., 1:7] if is_8d_truth else truth) if truth is not None else None
         incoming = sols_cc[:, 2:3] if self.cube else None
 
         return self.arrange_plots_(
