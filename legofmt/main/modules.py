@@ -142,7 +142,6 @@ class LEGOLtng(ltng.LightningModule):
         self.proj_en_out = model_conf.get("proj_en_out", False)
         self.pdgid_is_idx = model_conf.get("pdgid_is_idx", False)
         self.loss_sc_fac = model_conf.get("loss_sc", 0.0)
-        self.min_snr_gamma = model_conf.get("min_snr_gamma", 0.0)
         cond_cube = model_conf.get("cond_cube", False)
         if state_dict is None:
             model_conf["model_args"].setdefault("ntypes", 4)
@@ -242,10 +241,6 @@ class LEGOLtng(ltng.LightningModule):
         else:
             loss_sc = 0.0
         sq = (v_out - ps_.dx_t)**2
-        if self.min_snr_gamma > 0:
-            t_s = ps_.t.clamp(1e-3, 1 - 1e-3)
-            snr = ((1 - t_s) / t_s)**2
-            sq = sq * (snr.clamp_max(self.min_snr_gamma) / snr).view(-1, 1, 1)
         losses = torch.stack([s.mean() for s in (sq[:, 3:] * (mask[:, 3:] == 1)).chunk(2, -1)])
         loss_v = sq[:, 1].mean() + (losses * losses.detach().mean() / losses.detach()).sum()
         loss = loss_v + self.loss_sc_fac * loss_sc
