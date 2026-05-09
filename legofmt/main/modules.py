@@ -45,6 +45,7 @@ class ProjectModel(ModelWrapper, nn.Module):
         attn_mask: torch.Tensor,
         types: torch.Tensor,
         pdgids: torch.Tensor | None = None,
+        cache: tuple | None = None,
     ) -> torch.Tensor:
         pm = attn_mask.unsqueeze(-1)
         x_proj_dense = self.manifold.projx(x)
@@ -59,7 +60,7 @@ class ProjectModel(ModelWrapper, nn.Module):
             x_surr = x_cube
         else:
             x_surr = x
-        v = self.vf(t, x_surr, mask, attn_mask, types, pdgids)
+        v = self.vf(t, x_surr, mask, attn_mask, types, pdgids, cache=cache)
         v_proj_dense = self.manifold.proju(x_proj_dense, v)
         return torch.where(pm, v_proj_dense, v)
 
@@ -388,15 +389,19 @@ class LEGOLtng(ltng.LightningModule):
 
     @torch.no_grad()
     def _midpoint_2step(self, x: Tensor, **extras) -> Tensor:
-        try:
-            for t0 in (0.0, 0.5):
-                t = x.new_tensor(t0)
-                v1 = self.model(x, t, **extras)
-                v2 = self.model(x + 0.25 * v1, t + 0.25, **extras)
-                x = x + 0.5 * v2
-            return x
-        finally:
-            self.model.vf._inf_cache = None
+        vf = self.model.vf
+        if hasattr(vf, "_orig_mod"):
+            vf = vf._orig_mod
+        extras = {
+            **extras,
+            "cache": vf.build_cache(extras["mask"], extras["types"], extras["pdgids"], x.shape[1]),
+        }
+        for t0 in (0.0, 0.5):
+            t = x.new_tensor(t0)
+            v1 = self.model(x, t, **extras)
+            v2 = self.model(x + 0.25 * v1, t + 0.25, **extras)
+            x = x + 0.5 * v2
+        return x
 
     @torch.no_grad()
     def forward(self, batch: tuple, _batch_idx: int | Tensor | None = None) -> tuple:
