@@ -241,8 +241,7 @@ class LEGOLtng(ltng.LightningModule):
         else:
             loss_sc = 0.0
         sq = (v_out - ps_.dx_t)**2
-        losses = torch.stack([s.mean() for s in (sq[:, 3:] * (mask[:, 3:] == 1)).chunk(2, -1)])
-        loss_v = sq[:, 1].mean() + (losses * losses.detach().mean() / losses.detach()).sum()
+        loss_v = sq[:, 1].mean() + (sq[:, 3:]  * (mask[:, 3:] == 1)).mean()
         loss = loss_v + self.loss_sc_fac * loss_sc
         return loss
 
