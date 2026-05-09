@@ -355,7 +355,17 @@ class LEGOLtng(ltng.LightningModule):
         if time_grid is None:
             time_grid = x_init.new_tensor([1.0, 0.0] if reverse else [0.0, 1.0])
 
+        use_2step = (
+            method == "midpoint" and step_size == 0.5 and not return_intermediates
+        )
+
         def _sample(x_init, mask, attn_mask, pdgids_idx):
+            if use_2step:
+                return self._midpoint_2step(
+                    x_init,
+                    mask=mask, attn_mask=attn_mask,
+                    types=self.types_embd, pdgids=pdgids_idx,
+                )
             return solver.sample(
                 x_init=x_init,
                 time_grid=time_grid,
@@ -377,13 +387,22 @@ class LEGOLtng(ltng.LightningModule):
         )
 
     @torch.no_grad()
+    def _midpoint_2step(self, x: Tensor, **extras) -> Tensor:
+        for t0 in (0.0, 0.5):
+            t = x.new_tensor(t0)
+            v1 = self.model(x, t, **extras)
+            v2 = self.model(x + 0.25 * v1, t + 0.25, **extras)
+            x = x + 0.5 * v2
+        return x
+
+    @torch.no_grad()
     def forward(self, batch: tuple, _batch_idx: int | Tensor | None = None) -> tuple:
         if self.model.training:
             self.model.eval()
             self._opt_eval()
 
         cfg = self.odeint_conf
-        if (cfg.get("fwd_compile", False) 
+        if (cfg.get("fwd_compile", False)
         and not (hasattr(self.model, "_orig_mod")
         or hasattr(self.model.vf, "_orig_mod"))):
             self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=False)

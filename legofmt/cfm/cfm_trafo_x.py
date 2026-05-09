@@ -95,15 +95,13 @@ class CFMTrafo_x(nn.Module):
         t_freqs = t.unsqueeze(-1) * self.freqs
         embd_t = torch.where(self.mask_freqs.bool(), t_freqs.sin(), t_freqs.cos())
 
-        l_embdd = 0
-        for w_full, idx in (
-            (self.l_mask_, mask_idx),
-            (self.l_types_, types_idx),
-            (self.l_pdgids_, pdgids_idx),
-        ):
-            w_in = w_full[idx, 0].view(-1, n_tokens, self.h_dim, self.in_dim)
-            l_embdd = l_embdd + torch.einsum("ijl, ijkl -> ijk", states_mask, w_in)
-        l_embdd = l_embdd / 3
+        shape4d = (-1, n_tokens, self.h_dim, self.in_dim)
+        w_in = (
+            self.l_mask_[mask_idx, 0].view(shape4d)
+            + self.l_types_[types_idx, 0]
+            + self.l_pdgids_[pdgids_idx, 0].view(shape4d)
+        )
+        l_embdd = torch.einsum("ijl, ijkl -> ijk", states_mask, w_in) / 3
 
         embdd = l_embdd + b_embd + embd_t
 
@@ -114,15 +112,12 @@ class CFMTrafo_x(nn.Module):
         x = self.vf.attn_layers(x, mask=attn_mask, condition=embd_t)
         trafo_out = self.vf.project_out(x)
 
-        l_out = 0
-        for w_full, idx in (
-            (self.l_mask_, mask_idx),
-            (self.l_types_, types_idx),
-            (self.l_pdgids_, pdgids_idx),
-        ):
-            w_out = w_full[idx, 1].view(-1, n_tokens, self.h_dim, self.in_dim)
-            l_out = l_out + torch.einsum("ijk, ijkl -> ijl", trafo_out, w_out)
-        l_out = l_out / 3
+        w_out = (
+            self.l_mask_[mask_idx, 1].view(shape4d)
+            + self.l_types_[types_idx, 1]
+            + self.l_pdgids_[pdgids_idx, 1].view(shape4d)
+        )
+        l_out = torch.einsum("ijk, ijkl -> ijl", trafo_out, w_out) / 3
 
         out = l_out + bo_embd
 
