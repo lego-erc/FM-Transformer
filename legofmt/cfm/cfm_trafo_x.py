@@ -76,49 +76,28 @@ class CFMTrafo_x(nn.Module):
         types: Tensor,
         pdgids: Tensor | None,
     ) -> Tensor:
-        n_tokens = states_mask.shape[1]
-        mask_idx = mask.view(-1)
-        types_idx = types.view(-1)[:n_tokens]
-        pdgids_idx = pdgids.view(-1)
+        n = states_mask.shape[1]
+        key = None if self.training else (id(mask), id(types), id(pdgids), n)
+        cache = getattr(self, "_inf_cache", None)
+        if cache and cache[0] == key:
+            _, b, bo, w_in, w_out, mask_eq1 = cache
+        else:
+            mi, ti, pi = mask.view(-1), types.view(-1)[:n], pdgids.view(-1)
+            s3 = (-1, n, self.h_dim)
+            so = (-1, n, self.in_dim)
+            s4 = (-1, n, self.h_dim, self.in_dim)
+            b = (self.b_mask_[mi].view(s3) + self.b_types_[ti].view(s3) + self.b_pdgids_[pi].view(s3)) / 3
+            bo = (self.bo_mask_[mi].view(so) + self.bo_types_[ti].view(so) + self.bo_pdgids_[pi].view(so)) / 3
+            w_in = self.l_mask_[mi, 0].view(s4) + self.l_types_[ti, 0] + self.l_pdgids_[pi, 0].view(s4)
+            w_out = self.l_mask_[mi, 1].view(s4) + self.l_types_[ti, 1] + self.l_pdgids_[pi, 1].view(s4)
+            mask_eq1 = mask == 1
+            if key is not None:
+                self._inf_cache = (key, b, bo, w_in, w_out, mask_eq1)
 
-        b_embd = (
-            self.b_mask_[mask_idx].view(-1, n_tokens, self.h_dim)
-            + self.b_types_[types_idx].view(-1, n_tokens, self.h_dim)
-            + self.b_pdgids_[pdgids_idx].view(-1, n_tokens, self.h_dim)
-        ) / 3
-        bo_embd = (
-            self.bo_mask_[mask_idx].view(-1, n_tokens, self.in_dim)
-            + self.bo_types_[types_idx].view(-1, n_tokens, self.in_dim)
-            + self.bo_pdgids_[pdgids_idx].view(-1, n_tokens, self.in_dim)
-        ) / 3
-
-        t_freqs = t.unsqueeze(-1) * self.freqs
-        embd_t = torch.where(self.mask_freqs.bool(), t_freqs.sin(), t_freqs.cos())
-
-        shape4d = (-1, n_tokens, self.h_dim, self.in_dim)
-        w_in = (
-            self.l_mask_[mask_idx, 0].view(shape4d)
-            + self.l_types_[types_idx, 0]
-            + self.l_pdgids_[pdgids_idx, 0].view(shape4d)
-        )
-        l_embdd = torch.einsum("ijl, ijkl -> ijk", states_mask, w_in) / 3
-
-        embdd = l_embdd + b_embd + embd_t
-
-        x = self.vf.project_in(embdd)
-        x = x + self.vf.pos_emb(x)
-        x = self.vf.post_emb_norm(x)
-        x = self.vf.emb_dropout(x)
-        x = self.vf.attn_layers(x, mask=attn_mask, condition=embd_t)
-        trafo_out = self.vf.project_out(x)
-
-        w_out = (
-            self.l_mask_[mask_idx, 1].view(shape4d)
-            + self.l_types_[types_idx, 1]
-            + self.l_pdgids_[pdgids_idx, 1].view(shape4d)
-        )
-        l_out = torch.einsum("ijk, ijkl -> ijl", trafo_out, w_out) / 3
-
-        out = l_out + bo_embd
-
-        return (mask == 1) * out
+        tf = t.unsqueeze(-1) * self.freqs
+        embd_t = torch.where(self.mask_freqs.bool(), tf.sin(), tf.cos())
+        embd = torch.einsum("ijl, ijkl -> ijk", states_mask, w_in) / 3 + b + embd_t
+        if self.training:
+            embd = self.vf.emb_dropout(embd)
+        x = self.vf.attn_layers(embd, mask=attn_mask, condition=embd_t)
+        return mask_eq1 * (torch.einsum("ijk, ijkl -> ijl", x, w_out) / 3 + bo)

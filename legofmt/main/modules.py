@@ -388,12 +388,15 @@ class LEGOLtng(ltng.LightningModule):
 
     @torch.no_grad()
     def _midpoint_2step(self, x: Tensor, **extras) -> Tensor:
-        for t0 in (0.0, 0.5):
-            t = x.new_tensor(t0)
-            v1 = self.model(x, t, **extras)
-            v2 = self.model(x + 0.25 * v1, t + 0.25, **extras)
-            x = x + 0.5 * v2
-        return x
+        try:
+            for t0 in (0.0, 0.5):
+                t = x.new_tensor(t0)
+                v1 = self.model(x, t, **extras)
+                v2 = self.model(x + 0.25 * v1, t + 0.25, **extras)
+                x = x + 0.5 * v2
+            return x
+        finally:
+            self.model.vf._inf_cache = None
 
     @torch.no_grad()
     def forward(self, batch: tuple, _batch_idx: int | Tensor | None = None) -> tuple:
