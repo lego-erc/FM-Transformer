@@ -45,7 +45,6 @@ class ProjectModel(ModelWrapper, nn.Module):
         attn_mask: torch.Tensor,
         types: torch.Tensor,
         pdgids: torch.Tensor | None = None,
-        cache: tuple | None = None,
     ) -> torch.Tensor:
         pm = attn_mask.unsqueeze(-1)
         x_proj_dense = self.manifold.projx(x)
@@ -60,7 +59,7 @@ class ProjectModel(ModelWrapper, nn.Module):
             x_surr = x_cube
         else:
             x_surr = x
-        v = self.vf(t, x_surr, mask, attn_mask, types, pdgids, cache=cache)
+        v = self.vf(t, x_surr, mask, attn_mask, types, pdgids)
         v_proj_dense = self.manifold.proju(x_proj_dense, v)
         return torch.where(pm, v_proj_dense, v)
 
@@ -389,13 +388,6 @@ class LEGOLtng(ltng.LightningModule):
 
     @torch.no_grad()
     def _midpoint_2step(self, x: Tensor, **extras) -> Tensor:
-        vf = self.model.vf
-        if hasattr(vf, "_orig_mod"):
-            vf = vf._orig_mod
-        extras = {
-            **extras,
-            "cache": vf.build_cache(extras["mask"], extras["types"], extras["pdgids"], x.shape[1]),
-        }
         for t0 in (0.0, 0.5):
             t = x.new_tensor(t0)
             v1 = self.model(x, t, **extras)

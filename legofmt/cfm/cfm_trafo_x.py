@@ -67,17 +67,6 @@ class CFMTrafo_x(nn.Module):
         )
         self.register_buffer("mask_freqs", torch.arange(self.h_dim) % 2)
 
-    def build_cache(self, mask: Tensor, types: Tensor, pdgids: Tensor, n: int):
-        mi, ti, pi = mask.view(-1), types.view(-1)[:n], pdgids.view(-1)
-        s3 = (-1, n, self.h_dim)
-        so = (-1, n, self.in_dim)
-        s4 = (-1, n, self.h_dim, self.in_dim)
-        b = (self.b_mask_[mi].view(s3) + self.b_types_[ti].view(s3) + self.b_pdgids_[pi].view(s3)) / 3
-        bo = (self.bo_mask_[mi].view(so) + self.bo_types_[ti].view(so) + self.bo_pdgids_[pi].view(so)) / 3
-        w_in = self.l_mask_[mi, 0].view(s4) + self.l_types_[ti, 0] + self.l_pdgids_[pi, 0].view(s4)
-        w_out = self.l_mask_[mi, 1].view(s4) + self.l_types_[ti, 1] + self.l_pdgids_[pi, 1].view(s4)
-        return b, bo, w_in, w_out, mask == 1
-
     def forward(
         self,
         t: Tensor,
@@ -86,11 +75,16 @@ class CFMTrafo_x(nn.Module):
         attn_mask: Tensor,
         types: Tensor,
         pdgids: Tensor | None,
-        cache: tuple | None = None,
     ) -> Tensor:
-        if cache is None:
-            cache = self.build_cache(mask, types, pdgids, states_mask.shape[1])
-        b, bo, w_in, w_out, mask_eq1 = cache
+        n = states_mask.shape[1]
+        mi, ti, pi = mask.view(-1), types.view(-1)[:n], pdgids.view(-1)
+        s3 = (-1, n, self.h_dim)
+        so = (-1, n, self.in_dim)
+        s4 = (-1, n, self.h_dim, self.in_dim)
+        b = (self.b_mask_[mi].view(s3) + self.b_types_[ti].view(s3) + self.b_pdgids_[pi].view(s3)) / 3
+        bo = (self.bo_mask_[mi].view(so) + self.bo_types_[ti].view(so) + self.bo_pdgids_[pi].view(so)) / 3
+        w_in = self.l_mask_[mi, 0].view(s4) + self.l_types_[ti, 0] + self.l_pdgids_[pi, 0].view(s4)
+        w_out = self.l_mask_[mi, 1].view(s4) + self.l_types_[ti, 1] + self.l_pdgids_[pi, 1].view(s4)
 
         tf = t.unsqueeze(-1) * self.freqs
         embd_t = torch.where(self.mask_freqs.bool(), tf.sin(), tf.cos())
@@ -98,4 +92,4 @@ class CFMTrafo_x(nn.Module):
         if self.training:
             embd = self.vf.emb_dropout(embd)
         x = self.vf.attn_layers(embd, mask=attn_mask, condition=embd_t)
-        return mask_eq1 * (torch.einsum("ijk, ijkl -> ijl", x, w_out) / 3 + bo)
+        return (mask == 1) * (torch.einsum("ijk, ijkl -> ijl", x, w_out) / 3 + bo)
