@@ -10,6 +10,7 @@ from matplotlib.lines import Line2D
 from ..main.modules import LEGOLtng
 from ..geometry.path_sample_mult import ProductManifold
 from ..geometry.vmf_sampling import VMF
+from ..data.struct import _F
 from .plot_geom import PlotGeom
 
 plt.rcParams.update(
@@ -138,15 +139,15 @@ class CornerHist:
         is_8d = sols.shape[-1] == 8
 
         if truth is not None:
-            truth_e_dep = truth[:, 1, 1] if is_8d else truth[:, 1, 0]
+            truth_e_dep = _F(truth).edep if is_8d else truth[:, 1, 0]
             sols = sols[:, :truth.shape[1]]
         else:
             truth_e_dep = None
 
-        e_dep = sols[:, 1, 1] if is_8d else sols[:, 1, 0]
+        e_dep = _F(sols).edep if is_8d else sols[:, 1, 0]
 
-        sols_cc = sols[..., 1:7] if is_8d else sols
-        truth_cc = (truth[..., 1:7] if is_8d else truth) if truth is not None else None
+        sols_cc = _F(sols).model_in if is_8d else sols
+        truth_cc = (_F(truth).model_in if is_8d else truth) if truth is not None else None
         incoming = sols_cc[:, 2:3] if self.cube else None
 
         return self.arrange_plots_(
@@ -163,14 +164,11 @@ class CornerHist:
             sols, mask, attn_mask = self.model(batch)
 
         is_8d = sols.shape[-1] == 8
-        e_dep = sols[:, 1, 1] if is_8d else sols[:, 1, 0]
+        e_dep = _F(sols).edep if is_8d else sols[:, 1, 0]
+        sols_cc = _F(sols).model_in if is_8d else sols
 
-        sols_cc = sols[..., 1:7] if is_8d else sols
-
-        sols_true = (
-            batch[0] if batch[0].shape[-1] == 6 else batch[0][..., -7:-1]
-        )
-
+        truth = _F(batch[0])
+        sols_true = batch[0] if batch[0].shape[-1] == 6 else truth.model_in
         sols_cc = sols_cc[:, : sols_true.shape[1]]
         sols_true = torch.where(torch.isnan(sols_cc), torch.nan, sols_true)
 
@@ -179,8 +177,8 @@ class CornerHist:
             self.fig,
             sols_cc,
             sols_true,
-            incoming=(batch[0][:, 2:3, -7:-1] if self.cube else None),
-            data_add=(e_dep, batch[0][:, 1, 1]),
+            incoming=(truth.in_cc if self.cube else None),
+            data_add=(e_dep, truth.edep),
         )
 
     def make_fig(self, title=None, cube=False, corner_=True):

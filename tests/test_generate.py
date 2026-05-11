@@ -65,7 +65,7 @@ def test_forward_shape(generator: GenerateOut) -> None:
     assert out.shape[0] == cond.shape[0]
     assert out.shape[1] == generator.max_seq_l
     assert out.shape[2] == 8  # density, px, py, pz, x, y, z, pdgid
-    assert mask.shape == (cond.shape[0], generator.max_seq_l, 1)
+    assert mask.shape == (cond.shape[0], generator.max_seq_l)
     assert attn_mask.shape == (cond.shape[0], generator.max_seq_l)
 
 

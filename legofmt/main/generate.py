@@ -5,6 +5,7 @@ from ..main.modules import LEGOLtng
 from ..multiplicity.model import MultModel
 from ..geometry.energy_proj import EnergyProjections
 from ..geometry.raytracing_proj import CubeTrace
+from ..data.struct import _F
 
 
 class GenerateOut(torch.nn.Module):
@@ -83,19 +84,11 @@ class GenerateOut(torch.nn.Module):
         cond = torch.cat((d, cc, pdgids_b), dim=-1)
 
         sols, _, _ = self.proj_ray_pass_to_model(cond, prepped=False)
-
+        s = _F(sols)
         return {
-            "per_event": {
-                "E_dep": sols[:, 1, 1],
-                "Density": sols[:, 0, 1],
-            },
-            "per_particle": {
-                "Incoming": sols[:, 2:3],
-                "Outgoing": sols[:, 3:],
-            },
-            "per_voxel": {
-                "E_dep": sols.new_empty(sols.shape[0], 0, 4),
-            },
+            "per_event": {"E_dep": s.edep, "Density": s.d},
+            "per_particle": {"Incoming": s.in_p, "Outgoing": s.out_p},
+            "per_voxel": {"E_dep": sols.new_empty(sols.shape[0], 0, 4)},
         }
 
     def gen_batch(self, cond: torch.Tensor):
