@@ -94,6 +94,7 @@ class GetLEGOData:
 class LEGODataset(Dataset):
     def __init__(self, data: (str | dict | tuple), *, prep=None, **kwargs) -> None:
         super().__init__()
+        self.device = kwargs.get("device", "cpu")
         if isinstance(data, str):
             path = data + "/data_prepped.pt" if data[-3:] != ".pt" else data
             data = torch.load(path, map_location="cpu", weights_only=False)
@@ -106,7 +107,6 @@ class LEGODataset(Dataset):
             self.data = DataStruct(*prep(GetLEGOData(**kwargs)(data)))
         if isinstance(data, tuple):
             self.data = DataStruct(*data)
-        self.device = kwargs.get("device", "cpu")
 
     def __len__(self) -> int:
         return len(self.data)

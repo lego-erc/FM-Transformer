@@ -26,7 +26,8 @@ class GenerateOut(torch.nn.Module):
 
         self.max_seq_l = flow_conf["config"]["model_conf"]["model_args"]["max_seq_l"]
         self.pdgids = flow_conf["config"]["model_conf"]["pdgids"].to(device)
-        self.valid_ptypes_mask = torch.isin(self.ptypes, self.pdgids)
+        self.ptype_idx = torch.searchsorted(self.ptypes, self.pdgids).clamp(max=len(self.ptypes) - 1)
+        self.ptype_in_mask = self.ptypes[self.ptype_idx] == self.pdgids
         self.proj_ray = CubeTrace()
 
     def __call__(self, cond: torch.Tensor, prepped: bool = False):
@@ -96,7 +97,7 @@ class GenerateOut(torch.nn.Module):
         pdgid_in = cond[:, -1].long()
         pdgid_in_idx = torch.searchsorted(self.pdgid_in, pdgid_in)
         mult = self.gen_mult((cond[:, :-1], None, pdgid_in_idx))
-        mult = mult[:, self.valid_ptypes_mask]
+        mult = mult[:, self.ptype_idx] * self.ptype_in_mask
 
         max_particles = self.max_seq_l - 3
         total = mult.sum(-1, keepdim=True)
@@ -104,11 +105,9 @@ class GenerateOut(torch.nn.Module):
         mult = (mult * scale).long()
         scaled = total > max_particles
         remaining = (scaled * (max_particles - mult.sum(-1, keepdim=True))).clamp(min=0)
-        r_max = remaining.max().item()
-        if r_max > 0:
-            dist = torch.multinomial(mult.float().clamp(min=1), r_max, replacement=True)
-            valid = (torch.arange(r_max, device=mult.device) < remaining).long()
-            mult.scatter_add_(-1, dist, valid)
+        dist = torch.multinomial(mult.float().clamp(min=1), max_particles, replacement=True)
+        valid = (torch.arange(max_particles, device=mult.device) < remaining).long()
+        mult.scatter_add_(-1, dist, valid)
 
         idx = torch.arange(max_particles, device=mult.device)
         attn_mask = idx < mult.sum(-1, keepdim=True)
