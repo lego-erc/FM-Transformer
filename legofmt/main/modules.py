@@ -188,14 +188,14 @@ class LEGOLtng(ltng.LightningModule):
 
     @torch.no_grad()
     def gen_base_wrapper(self, ds_t: DataStruct) -> Tensor:
-        base = self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc)
+        base = torch.cat((ds_t.f.non_cc, self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc)), dim=1)
         if self.ot_coupling and self.model.training:
-            base = base.where(ds_t.am.p.unsqueeze(-1), ds_t.f.cc)
+            base = base.where(ds_t.am.full.unsqueeze(-1), ds_t.f.model_in)
             inf_cond = ds_t.am.out_p.unsqueeze(-1).logical_xor(ds_t.am.out_p.unsqueeze(-2))
-            cost = torch.cdist(ds_t.f.out_cc, base[:, 1:]) + inf_cond * 1e6
+            out = _F(base).out_p
+            cost = torch.cdist(ds_t.f.out_cc, out) + inf_cond * 1e6
             assign = slap(cost, cost.device).long()
-            base[:, 1:] = torch.take_along_dim(base[:, 1:], assign.unsqueeze(-1), dim=1)
-        base = torch.cat((ds_t.f.non_cc, base), dim=1)
+            out[:] = torch.take_along_dim(out, assign.unsqueeze(-1), dim=1)
         return self.gen_base.insert_add(base)  # E_dep
 
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
@@ -203,9 +203,9 @@ class LEGOLtng(ltng.LightningModule):
             base = self.gen_base_wrapper(ds_t)
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
             if self.t_dist == "sm_norm":
-                t = torch.sigmoid(self.t_dist_scale * torch.randn_like(base[:, 0, 0]))
+                t = torch.sigmoid(self.t_dist_scale * torch.randn_like(ds_t.f.d))
             elif self.t_dist == "uniform":
-                t = torch.rand_like(base[:, 0, 0])
+                t = torch.rand_like(ds_t.f.d)
             ps_ = self.ps.sample(base, ds_t.f.model_in, t)
         v_out = self.model(
             ps_.x_t, ps_.t,
@@ -349,7 +349,7 @@ class LEGOLtng(ltng.LightningModule):
         pdgids = ds_t.f.pdgids
         am = ds_t.am.full.unsqueeze(-1)
         base = self.gen_base_wrapper(ds_t)
-        densities = base[:, :1, :1].expand_as(base[..., :1])
+        densities = ds_t.f.d[:, None, None].expand_as(base[..., :1])
 
         if cfg.get("return_base", False):
             sols = base.masked_fill(~am, torch.nan)
