@@ -1,5 +1,12 @@
 import comet_ml
 import os
+from pathlib import Path
+
+for _l in (Path(__file__).resolve().parent.parent / ".env").read_text().splitlines():
+    if "=" in _l and not _l.lstrip().startswith("#"):
+        _k, _v = _l.split("=", 1)
+        os.environ.setdefault(_k.strip(), _v.strip().strip('"\''))
+
 import lightning as ltng
 from lightning.pytorch.loggers import CometLogger
 import schedulefree
