@@ -316,7 +316,10 @@ class LEGOLtng(ltng.LightningModule):
         if x_init is not None and x_init.shape == cc.shape:
             x_init = x_init.where(am, _F(x_init).in_p)
 
-        solver = ODESolver(velocity_model=self.model)
+        def _vm(*args, **kwargs):
+            torch.compiler.cudagraph_mark_step_begin()
+            return self.model(*args, **kwargs)
+        solver = ODESolver(velocity_model=_vm)
         common = dict(step_size=step_size, method=method, types=self.types_embd)
 
         if compute_ll:
@@ -377,7 +380,6 @@ class LEGOLtng(ltng.LightningModule):
         and not (hasattr(self.model, "_orig_mod")
         or hasattr(self.model.vf, "_orig_mod"))):
             self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=False)
-            self.model.register_forward_pre_hook(lambda *_: torch.compiler.cudagraph_mark_step_begin())
 
         ds_t = DataStruct(*batch) if isinstance(batch, tuple) else batch
         pdgids = ds_t.f.pdgids
