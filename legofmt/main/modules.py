@@ -316,10 +316,12 @@ class LEGOLtng(ltng.LightningModule):
         if x_init is not None and x_init.shape == cc.shape:
             x_init = x_init.where(am, _F(x_init).in_p)
 
-        def _vm(*args, **kwargs):
-            torch.compiler.cudagraph_mark_step_begin()
-            return self.model(*args, **kwargs)
-        solver = ODESolver(velocity_model=_vm)
+        if method == "rk4":
+            def vm(*args, **kwargs):
+                return self.model(*args, **kwargs).clone()
+        else:
+            vm = self.model
+        solver = ODESolver(velocity_model=vm)
         common = dict(step_size=step_size, method=method, types=self.types_embd)
 
         if compute_ll:
