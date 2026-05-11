@@ -5,6 +5,7 @@ from flow_matching.solver import ODESolver
 from flow_matching.utils import ModelWrapper
 from flow_matching.utils.manifolds import Euclidean, Sphere
 from legofmt.data.dataloaders import LEGODataset
+from legofmt.data.struct import DataStruct
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
 
@@ -186,20 +187,18 @@ class LEGOLtng(ltng.LightningModule):
         return pdgid_idx.masked_fill_(cond, 0)
 
     @torch.no_grad()
-    def gen_base_wrapper(self, ds_t: tuple) -> Tensor:
+    def gen_base_wrapper(self, ds_t: DataStruct) -> Tensor:
         base = self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc)
         if self.ot_coupling and self.model.training:
-            base = base.where(ds_t.am.p[:, :, None], ds_t.f.cc)
-            inf_cond = ds_t.am.out_p[:, :, None].logical_xor(ds_t.am.out_p[:, None, :])
-            cost = torch.cdist(ds_t.f.out_cc, base[:, 1:])
-            cost = cost + inf_cond * 1e6
+            base = base.where(ds_t.am.p.unsqueeze(-1), ds_t.f.cc)
+            inf_cond = ds_t.am.out_p.unsqueeze(-1).logical_xor(ds_t.am.out_p.unsqueeze(-2))
+            cost = torch.cdist(ds_t.f.out_cc, base[:, 1:]) + inf_cond * 1e6
             assign = slap(cost, cost.device).long()
             base[:, 1:] = torch.take_along_dim(base[:, 1:], assign.unsqueeze(-1), dim=1)
         base = torch.cat((ds_t.f.non_cc, base), dim=1)
-        base = self.gen_base.insert_add(base)  # E_dep
-        return base
+        return self.gen_base.insert_add(base)  # E_dep
 
-    def _step(self, ds_t: tuple, _batch_idx: int | Tensor) -> Tensor:
+    def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
         with torch.no_grad():
             base = self.gen_base_wrapper(ds_t)
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
@@ -209,23 +208,17 @@ class LEGOLtng(ltng.LightningModule):
                 t = torch.rand_like(base[:, 0, 0])
             ps_ = self.ps.sample(base, ds_t.f.model_in, t)
         v_out = self.model(
-            ps_.x_t,
-            ps_.t,
-            mask=ds_t.m.full,
-            attn_mask=ds_t.am.full,
-            types=self.types_embd,
-            pdgids=pdgid_idx,
+            ps_.x_t, ps_.t,
+            mask=ds_t.m.full, attn_mask=ds_t.am.full,
+            types=self.types_embd, pdgids=pdgid_idx,
         )
+        am = ds_t.am.full.unsqueeze(-1)
         if self.loss_sc_fac > 0:
-            pred_sc = (1 - ps_.t).unsqueeze(-1) * v_out + ps_.x_t
-            pred_sc_ft = (pred_sc * ds_t.am.full[:, :, None])[..., :3]
-            target_sc = (ds_t.f.mom * ds_t.am.full[:, :, None])
-            loss_sc = self.loss_fn(pred_sc_ft, target_sc)
+            pred_sc = ((1 - ps_.t).unsqueeze(-1) * v_out + ps_.x_t) * am
+            loss_sc = self.loss_fn(pred_sc[..., :3], ds_t.f.mom * am)
         else:
             loss_sc = 0.0
-        v_target = ps_.dx_t * ds_t.am.full[:, :, None]
-        loss = self.loss_fn(v_out, v_target) + self.loss_sc_fac * loss_sc
-        return loss
+        return self.loss_fn(v_out, ps_.dx_t * am) + self.loss_sc_fac * loss_sc
 
     def training_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
         loss = self._step(batch, _batch_idx)
@@ -288,7 +281,7 @@ class LEGOLtng(ltng.LightningModule):
     @torch.no_grad()
     def solve(
         self,
-        batch: tuple,
+        ds_t: DataStruct,
         x_init: Tensor | None = None,
         reverse: bool = False,
         compute_ll: bool = False,
@@ -303,12 +296,12 @@ class LEGOLtng(ltng.LightningModule):
             self.model.eval()
             self.opt.eval()
 
-        target, mask, attn_mask = batch
-        _, cc, pdgids = target.split([1, 6, 1], dim=-1)
+        pdgids = ds_t.f.pdgids
         pdgids_idx = pdgids.int() if self.pdgid_is_idx else self.convert_pdgids(pdgids)
-        cc = cc.where(attn_mask.unsqueeze(-1), cc[:, 2:3, :])
+        am = ds_t.am.full.unsqueeze(-1)
+        cc = ds_t.f.model_in.where(am, ds_t.f.in_cc)
         if x_init is not None and x_init.shape == cc.shape:
-            x_init = x_init.where(attn_mask.unsqueeze(-1), x_init[:, 2:3, :])
+            x_init = x_init.where(am, x_init[:, 2:3, :])
 
         solver = ODESolver(velocity_model=self.model)
         common = dict(step_size=step_size, method=method, types=self.types_embd)
@@ -317,45 +310,33 @@ class LEGOLtng(ltng.LightningModule):
             self.model.no_detach = True
             try:
                 _, log_ll = solver.compute_likelihood(
-                    x_1=cc,
-                    log_p0=log_p0,
-                    mask=mask,
-                    attn_mask=attn_mask,
-                    pdgids=pdgids_idx,
-                    **common,
+                    x_1=cc, log_p0=log_p0,
+                    mask=ds_t.m.full, attn_mask=ds_t.am.full,
+                    pdgids=pdgids_idx, **common,
                 )
             finally:
                 self.model.no_detach = False
             return log_ll
 
         if x_init is None:
-            x_init = self.gen_base_wrapper((cc, mask, attn_mask))
+            x_init = self.gen_base_wrapper(ds_t)
         if time_grid is None:
             time_grid = x_init.new_tensor([1.0, 0.0] if reverse else [0.0, 1.0])
 
         def _sample(x_init, mask, attn_mask, pdgids_idx):
             return solver.sample(
-                x_init=x_init,
-                time_grid=time_grid,
-                mask=mask,
-                attn_mask=attn_mask,
-                pdgids=pdgids_idx,
-                return_intermediates=return_intermediates,
-                **common,
+                x_init=x_init, time_grid=time_grid,
+                mask=mask, attn_mask=attn_mask, pdgids=pdgids_idx,
+                return_intermediates=return_intermediates, **common,
             )
 
         return self.chunked(
-            _sample,
-            x_init,
-            mask,
-            attn_mask,
-            pdgids_idx,
-            split_size=split_size,
-            cat_dim=-3,
+            _sample, x_init, ds_t.m.full, ds_t.am.full, pdgids_idx,
+            split_size=split_size, cat_dim=-3,
         )
 
     @torch.no_grad()
-    def forward(self, batch: tuple, _batch_idx: int | Tensor | None = None) -> tuple:
+    def forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None) -> tuple:
         if self.model.training:
             self.model.eval()
             self.opt.eval()
@@ -364,13 +345,14 @@ class LEGOLtng(ltng.LightningModule):
         if cfg.get("fwd_compile", False) and not hasattr(self.model.vf, "_orig_mod"):
             self.model.vf = torch.compile(self.model.vf, mode="reduce-overhead")
 
-        target, mask, attn_mask = batch
-        _, cc, pdgids = target.split([1, 6, 1], dim=-1)
-        base = self.gen_base_wrapper((cc, mask, attn_mask))
+        ds_t = DataStruct(*batch) if isinstance(batch, tuple) else batch
+        pdgids = ds_t.f.pdgids
+        am = ds_t.am.full.unsqueeze(-1)
+        base = self.gen_base_wrapper(ds_t)
         densities = base[:, :1, :1].expand_as(base[..., :1])
 
         if cfg.get("return_base", False):
-            sols = base.masked_fill(~attn_mask.unsqueeze(-1), torch.nan)
+            sols = base.masked_fill(~am, torch.nan)
         else:
             step_size = cfg.get("step_size", 0.04)
             time_grid = (
@@ -381,23 +363,18 @@ class LEGOLtng(ltng.LightningModule):
                 else None
             )
             sols = self.solve(
-                batch,
-                x_init=base,
+                ds_t, x_init=base,
                 split_size=cfg.get("split_size"),
                 step_size=step_size,
                 method=cfg.get("method", "midpoint"),
                 time_grid=time_grid,
                 return_intermediates=cfg.get("return_timesteps", False),
             )
-            sols = sols.masked_fill(~attn_mask.unsqueeze(-1), torch.nan)
+            sols = sols.masked_fill(~am, torch.nan)
             filter_pdgid = cfg.get("filter_pdgid")
             if filter_pdgid is not None:
-                pdgids_idx = (
-                    pdgids.int() if self.pdgid_is_idx else self.convert_pdgids(pdgids)
-                )
-                keep = torch.isin(pdgids_idx, self.convert_pdgids(filter_pdgid)) | (
-                    pdgids_idx == 0
-                )
+                pdgids_idx = pdgids.int() if self.pdgid_is_idx else self.convert_pdgids(pdgids)
+                keep = torch.isin(pdgids_idx, self.convert_pdgids(filter_pdgid)) | (pdgids_idx == 0)
                 sols.masked_fill_(~keep, torch.nan)
                 pdgids = pdgids.masked_fill(~keep, 0)
 
@@ -405,4 +382,4 @@ class LEGOLtng(ltng.LightningModule):
             T = sols.shape[0]
             densities = densities.unsqueeze(0).expand(T, -1, -1, -1)
             pdgids = pdgids.unsqueeze(0).expand(T, -1, -1, -1)
-        return torch.cat((densities, sols, pdgids), dim=-1), mask, attn_mask
+        return torch.cat((densities, sols, pdgids), dim=-1), ds_t.m.full, ds_t.am.full
