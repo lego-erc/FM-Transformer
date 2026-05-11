@@ -377,6 +377,7 @@ class LEGOLtng(ltng.LightningModule):
         and not (hasattr(self.model, "_orig_mod")
         or hasattr(self.model.vf, "_orig_mod"))):
             self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=False)
+            self.model.register_forward_pre_hook(lambda *_: torch.compiler.cudagraph_mark_step_begin())
 
         ds_t = DataStruct(*batch) if isinstance(batch, tuple) else batch
         pdgids = ds_t.f.pdgids
