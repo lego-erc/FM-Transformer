@@ -15,15 +15,11 @@ class _F:
     @property
     def pdgids(self) -> Tensor: return self.full[..., -1:]
     @property
-    def p(self) -> Tensor: return self.full[..., 2:, :]
-    @property
     def non_p(self) -> Tensor: return self.full[..., :2, :]
     @property
     def in_p(self) -> Tensor: return self.full[..., 2:3, :]
     @property
     def out_p(self) -> Tensor: return self.full[..., 3:, :]
-    @property
-    def cc(self) -> Tensor: return self.full[..., 2:, 1:7]
     @property
     def non_cc(self) -> Tensor: return self.full[..., :2, 1:7]
     @property
@@ -40,10 +36,6 @@ class _M:
 
     def __init__(self, m: Tensor) -> None:
         self.full = m.squeeze(-1) if m.ndim > 2 else m
-    @property
-    def p(self) -> Tensor: return self.full[..., 2:]
-    @property
-    def in_p(self) -> Tensor: return self.full[..., 2:3]
     @property
     def out_p(self) -> Tensor: return self.full[..., 3:]
 

@@ -57,7 +57,8 @@ class ProjectModel(ModelWrapper, nn.Module):
         t = torch.where(mask == 1, t, 1.)
         if self.cond_cube:
             x_cube = x.clone()
-            x_cube[:, 2:3] = self.vmf.to_cube(x_cube[:, 2:3])
+            in_p = _F(x_cube).in_p
+            in_p.copy_(self.vmf.to_cube(in_p))
             x_surr = x_cube
         else:
             x_surr = x

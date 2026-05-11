@@ -36,7 +36,8 @@ class GenerateOut(torch.nn.Module):
     def proj_ray_pass_to_model(self, cond: torch.Tensor, prepped: bool = False):
         cond_model = cond.clone()
         if not prepped:
-            cond_model[..., 1:7] = self.proj_ray(cond_model[..., 1:7])
+            mi = _F(cond_model).model_in
+            mi.copy_(self.proj_ray(mi))
         batch = self.gen_batch(cond_model)
         sols, mask, attn_mask = self.model(batch)
         sols[..., -1] = torch.cat([sols.new_zeros(1), self.pdgids.to(sols.dtype)])[sols[..., -1].long()]
@@ -126,5 +127,5 @@ class GenerateOut(torch.nn.Module):
         mask = attn_mask.clone().long()
         mask[:, [0, 2]] = 0 #Conditions
         cond_fm[:, 0, 1] = cond[:, 0, 0] #Density
-        cond_fm[:, :2, 2:-1] = 1
+        _F(cond_fm).non_p[..., 2:-1] = 1
         return cond_fm, mask, attn_mask

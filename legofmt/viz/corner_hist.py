@@ -148,7 +148,7 @@ class CornerHist:
 
         sols_cc = _F(sols).model_in if is_8d else sols
         truth_cc = (_F(truth).model_in if is_8d else truth) if truth is not None else None
-        incoming = sols_cc[:, 2:3] if self.cube else None
+        incoming = _F(sols_cc).in_p if self.cube else None
 
         return self.arrange_plots_(
             self.fig_sup,
