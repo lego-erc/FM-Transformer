@@ -2,7 +2,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import Dataset
 
-from .struct import DataStruct
+from .struct import DataStruct, _F
 
 
 class GetLEGOData:
@@ -56,7 +56,7 @@ class GetLEGOData:
 
         """
         dataset, data_add = self.dataset_compact(data)
-        mask_valid = dataset[..., 1:4].norm(dim=-1) >= self.cutoff_mev
+        mask_valid = _F(dataset).mom.norm(dim=-1) >= self.cutoff_mev
         max_valid = mask_valid.sum(dim=-1).max()
         mask_valid_sorted = mask_valid.sort(dim=-1, descending=True).values[
             :, :max_valid

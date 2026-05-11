@@ -25,19 +25,16 @@ class MultLoader(torch.utils.data.Dataset):
         use_density = mm_conf.get("use_density", True)
         ptypes = mm_conf.get("ptypes", torch.tensor([11, 22]))
         ptypes_in = mm_conf.get("ptypes_in", torch.tensor([11, 22]))
-        dataset = LEGODataset(**lds_conf)
-        density = dataset.target[:, 0, 1:2]
-        energy, cc, pdgid = dataset.target[:, 2:].split((1, 6, 1), dim=-1)
-        pdgid_in = pdgid[:, 0].squeeze(-1).contiguous()
+        ds_f = LEGODataset(**lds_conf).data.f
+        in_pdgid = ds_f.in_p[..., 0, -1].contiguous()
+        out_pdgids = ds_f.out_p[..., -1:]
 
-        self.counts = (
-            (pdgid[:, 1:] == ptypes.view(1, 1, -1)).sum(1).clamp_max(max_particles - 1)
-        )
-        self.pdgid_in_idx = torch.searchsorted(ptypes_in, pdgid_in)
-        self.input = cc[:, 0]
+        self.counts = (out_pdgids == ptypes.view(1, 1, -1)).sum(1).clamp_max(max_particles - 1)
+        self.pdgid_in_idx = torch.searchsorted(ptypes_in, in_pdgid)
+        self.input = ds_f.in_cc.squeeze(-2)
 
         if use_density:
-            self.input = torch.cat((density, self.input), dim=-1)
+            self.input = torch.cat((ds_f.d.unsqueeze(-1), self.input), dim=-1)
 
     def __len__(self):
         return self.input.shape[0]

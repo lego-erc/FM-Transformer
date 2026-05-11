@@ -5,7 +5,7 @@ from flow_matching.solver import ODESolver
 from flow_matching.utils import ModelWrapper
 from flow_matching.utils.manifolds import Euclidean, Sphere
 from legofmt.data.dataloaders import LEGODataset
-from legofmt.data.struct import DataStruct
+from legofmt.data.struct import DataStruct, _F
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
 
@@ -301,7 +301,7 @@ class LEGOLtng(ltng.LightningModule):
         am = ds_t.am.full.unsqueeze(-1)
         cc = ds_t.f.model_in.where(am, ds_t.f.in_cc)
         if x_init is not None and x_init.shape == cc.shape:
-            x_init = x_init.where(am, x_init[:, 2:3, :])
+            x_init = x_init.where(am, _F(x_init).in_p)
 
         solver = ODESolver(velocity_model=self.model)
         common = dict(step_size=step_size, method=method, types=self.types_embd)

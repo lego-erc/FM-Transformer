@@ -223,7 +223,8 @@ class CornerHist:
 
     @torch.no_grad()
     def make_corner(self, data_cc, fig, color="#FF9D00", data_add=None):
-        data_out = data_cc[:, 3:].reshape(-1, 6)
+        v = _F(data_cc)
+        data_out = v.out_p.reshape(-1, 6)
         en_in = data_cc[:, 2, :3].norm(dim=-1)
         data = self.vmf_utils.to_sph(self.disp_man.projx(data_out)).cpu().numpy()
         labels = [
@@ -239,7 +240,7 @@ class CornerHist:
                 r"$-\log \frac{\| \vec{p} \|_2}{\| \vec{p}_\mathrm{incoming} \|_2}$"
             ]
             norm_fac = torch.log(en_in / self.cutoff_en).view(-1, 1)
-            data_en = (data_cc[:, 3: , :3].norm(dim=-1) - 1).clamp_min(0.) / norm_fac
+            data_en = (v.out_p[..., :3].norm(dim=-1) - 1).clamp_min(0.) / norm_fac
             range_ += [(-0.2, 1.2)]
             data = np.concatenate([data, data_en.reshape(-1, 1).cpu().numpy()], axis=-1)
         if self.plot_edep is not False:
