@@ -51,6 +51,13 @@ class DataStruct:
     def __getitem__(self, idx: int | Tensor) -> "DataStruct":
         return type(self)(self.f.full[idx], self.m.full[idx], self.am.full[idx])
 
+    def to(self, *args, **kwargs) -> "DataStruct":
+        return type(self)(
+            self.f.full.to(*args, **kwargs),
+            self.m.full.to(*args, **kwargs),
+            self.am.full.to(*args, **kwargs),
+        )
+
     @staticmethod
     def _collate(batch, *, collate_fn_map=None) -> "DataStruct":
         return DataStruct(
