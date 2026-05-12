@@ -16,29 +16,30 @@ numpy = "*"
 matplotlib = "*"
 corner = "*"
 schedulefree = ">=1.4.1"
+pytorch-optimizer = "*"
 flow-matching = ">=1.0.10"
 legofmt = { path = ".", editable = true }
 
-[feature.cuda.pypi-options]
-no-build-isolation = ["torch-lap-cuda"]
+[feature.cuda.system-requirements]
+cuda = "13"
 
-[feature.cuda.system-requirements]                                                                                                         
-cuda = "13"                                                                                                  
-                                                                                                                                            
-[feature.cuda.target.linux-64.dependencies]                                                                                                
-pytorch         = { version = ">=2.10", build = "cuda130_mkl*" }                                                                           
+[feature.cuda.dependencies]
+uv = "*"
+
+[feature.cuda.target.linux-64.dependencies]
+pytorch         = { version = ">=2.10", build = "cuda130_mkl*" }
 torchvision     = { version = ">=0.26", build = "cuda130*" }
 cuda-version    = "13.0.*"
-cuda-nvcc       = "*"                                                                                                                      
-cuda-cudart-dev = "*"                                                                                                                      
+cuda-nvcc       = "*"
+cuda-cudart-dev = "*"
 cuda-driver-dev = "*"
-cuda-cccl       = "*"                                                                                                                      
-libcublas-dev   = "*"                                                                                                                    
-libcusparse-dev = "*"                                                                                                                      
-libcusolver-dev = "*"                                                                               
-                                                                                                                                            
-[feature.cuda.target.linux-64.pypi-dependencies]                                                                                         
-torch-lap-cuda = { git = "https://github.com/rdebrand/torch-lap-cuda" }
+cuda-cccl       = "*"
+libcublas-dev   = "*"
+libcusparse-dev = "*"
+libcusolver-dev = "*"
+
+[feature.cuda.target.linux-64.tasks]
+install-lap = "uv pip install --no-build-isolation git+https://github.com/rdebrand/torch-lap-cuda"
 
 [feature.cpu.target.linux-64.dependencies]
 torchvision = ">=0.26"
