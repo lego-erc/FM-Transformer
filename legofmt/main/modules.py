@@ -195,7 +195,9 @@ class LEGOLtng(ltng.LightningModule):
         return pdgid_idx.masked_fill_(cond, 0)
 
     @torch.no_grad()
-    def gen_base_wrapper(self, ds_t: DataStruct) -> Tensor:
+    def gen_base_wrapper(self, ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]") -> Tensor:
+        if not isinstance(ds_t, DataStruct):
+            ds_t = DataStruct(*ds_t)
         base = torch.cat((ds_t.f.non_cc, self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc)), dim=1)
         if self.ot_coupling and self.model.training:
             base = base.where(ds_t.am.full.unsqueeze(-1), ds_t.f.model_in)
@@ -285,7 +287,7 @@ class LEGOLtng(ltng.LightningModule):
     @torch.no_grad()
     def solve(
         self,
-        ds_t: DataStruct,
+        ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]",
         x_init: Tensor | None = None,
         reverse: bool = False,
         compute_ll: bool = False,
@@ -296,6 +298,8 @@ class LEGOLtng(ltng.LightningModule):
         time_grid: Tensor | None = None,
         return_intermediates: bool = False,
     ) -> Tensor:
+        if not isinstance(ds_t, DataStruct):
+            ds_t = DataStruct(*ds_t)
         if self.model.training:
             self.model.eval()
             self._opt_eval()
