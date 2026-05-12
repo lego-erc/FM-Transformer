@@ -19,6 +19,7 @@ from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt.geometry.gen_base import GenerateBase
 from legofmt.geometry.path_sample_mult import ProductPathSampler, ProductManifold
 from legofmt.geometry.raytracing_proj import CubeTrace
+from legofmt.main.optimizers import build_optimizer
 
 
 class ProjectModel(ModelWrapper, nn.Module):
@@ -156,10 +157,7 @@ class LEGOLtng(ltng.LightningModule):
         self.gen_base = GenerateBase(config.copy())
         self.ppa = CubeTrace()
 
-        opt_conf = config.get("opt_conf").copy()
-        opt = opt_conf.pop("opt")
-        self._sched_conf = opt_conf.pop("scheduler", None)
-        self.opt = opt(self.model.parameters(), **opt_conf)
+        self.opt, self._lr_sched = build_optimizer(self.model.parameters(), config["opt_conf"])
         self._opt_is_sf = hasattr(self.opt, "train") and callable(getattr(self.opt, "train", None))
 
         self.dl_conf = config.get("dl_conf")
@@ -255,16 +253,9 @@ class LEGOLtng(ltng.LightningModule):
 
     @torch.no_grad()
     def configure_optimizers(self):
-        if self._sched_conf is None:
+        if self._lr_sched is None:
             return self.opt
-        cfg = dict(self._sched_conf)
-        sched_cls = cfg.pop("cls")
-        interval = cfg.pop("interval", "step")
-        scheduler = sched_cls(self.opt, **cfg)
-        return {
-            "optimizer": self.opt,
-            "lr_scheduler": {"scheduler": scheduler, "interval": interval},
-        }
+        return {"optimizer": self.opt, "lr_scheduler": self._lr_sched}
 
     @torch.no_grad()
     def train_dataloader(self) -> DataLoader:

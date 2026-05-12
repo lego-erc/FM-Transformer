@@ -13,40 +13,9 @@ import schedulefree
 import torch
 from legofmt.main.modules import LEGOLtng
 
-# import torch._inductor.config as ic                      
-# ic.coordinate_descent_tuning = True
-# ic.coordinate_descent_check_all_directions = True                                                        
-# ic.max_autotune_gemm = True 
-
-from pytorch_optimizer import AdEMAMix 
-from pytorch_optimizer import Muon                                                                                                         
-import torch.optim.lr_scheduler as lrs         
-from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR                                                                                                                                                                                                                                 
-
 d_dtype = torch.float32
 torch.set_default_dtype(d_dtype)
-torch.set_float32_matmul_precision("medium")                                                                                              
-                                                                                                                                             
-def muon_factory(params, **kwargs):                                                                                                                           
-    params = list(params)                                                                                                                  
-    muon_p = [p for p in params if p.ndim >= 2]                                                                                            
-    rest_p = [p for p in params if p.ndim < 2]                                                                                             
-    return Muon(                                                                                                                           
-        [{"params": muon_p, "use_muon": True},
-        {"params": rest_p, "use_muon": False}],                                                                                           
-        **kwargs,                                                                                                                        
-    )            
-
-def warmup_cosine(opt, total_steps, warmup_frac=0.05, eta_min=1e-6):                                                                       
-    n_warm = max(1, int(warmup_frac * total_steps))                                                                                        
-    return SequentialLR(                                                                                                                   
-        opt,                                                                                                                             
-        schedulers=[                                                                                                                       
-            LinearLR(opt, start_factor=1e-3, end_factor=1.0, total_iters=n_warm),                                                          
-            CosineAnnealingLR(opt, T_max=total_steps - n_warm, eta_min=eta_min),
-        ],                                                                                                                                 
-        milestones=[n_warm],                                                                                                             
-    )  
+torch.set_float32_matmul_precision("medium")
 
 epochs = 10
 prec = 32
@@ -139,7 +108,7 @@ config = {
         },
     },
       "opt_conf": {                                                                                                                              
-      "opt": muon_factory,                                                                                                                        
+      "opt": "muon",                                                                                                                        
       "lr": 1e-2,                # Keller's recipe                                                                                           
       "momentum": 0.95,                                                                                                                      
       "nesterov": True,                                                                                                                      
@@ -151,7 +120,7 @@ config = {
       "adamw_wd": 1e-2,                                                                                                                      
       "adamw_eps": 1e-8,                                                                     
     "scheduler": {
-        "cls": warmup_cosine,                                                                                                                  
+        "cls": "warmup_cosine",                                                                                                                  
         "total_steps": total_steps,                                                                                                            
         "warmup_frac": 0.05,
         "eta_min": 1e-6,                                                                                                                       
