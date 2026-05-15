@@ -3,6 +3,8 @@
 .pixi/*
 !.pixi/config.toml
 *.egg-info
+.env
+**/.env
 
 
 legofmt/multiplicity/model_are.py

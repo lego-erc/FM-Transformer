@@ -122,13 +122,22 @@ class MultModel(LightningModule):
         if state_dict is not None:
             self.load_state_dict(state_dict, strict=False)
 
-        self.opt = schedulefree.AdamWScheduleFree(
-            self.parameters(),
-            lr=self.mm_conf.get("lr", 1e-3),
-            betas=(0.95, 0.999),
-            weight_decay=self.mm_conf.get("weight_decay", 0.0),
-            warmup_steps=self.mm_conf.get("warmup_steps", 0),
-        )
+        opt_conf = self.mm_conf.get("opt_conf")
+        if opt_conf is None:
+            self.opt = schedulefree.AdamWScheduleFree(
+                self.parameters(),
+                lr=self.mm_conf.get("lr", 1e-3),
+                betas=(0.95, 0.999),
+                weight_decay=self.mm_conf.get("weight_decay", 0.0),
+                warmup_steps=self.mm_conf.get("warmup_steps", 0),
+            )
+            self._sched_conf = None
+        else:
+            cfg = dict(opt_conf)
+            opt_cls = cfg.pop("opt")
+            self._sched_conf = cfg.pop("scheduler", None)
+            self.opt = opt_cls(self.parameters(), **cfg)
+        self._opt_is_sf = hasattr(self.opt, "train") and callable(getattr(self.opt, "train", None))
 
     def proj_in(self, x):
         x = x.clone()
@@ -136,11 +145,19 @@ class MultModel(LightningModule):
         x[..., -3:] = self.pos_scale * x[..., -3:]
         return self.proj_in_(x)
 
+    def _opt_train(self):
+        if self._opt_is_sf:
+            self.opt.train()
+
+    def _opt_eval(self):
+        if self._opt_is_sf:
+            self.opt.eval()
+
     def on_fit_start(self):
-        self.opt.train()
+        self._opt_train()
 
     def on_fit_end(self):
-        self.opt.eval()
+        self._opt_eval()
 
     def training_step(self, batch, batch_idx):
         in_cc, counts, pdgid_in_idx = batch
@@ -164,11 +181,20 @@ class MultModel(LightningModule):
         return loss_model
 
     def configure_optimizers(self):
-        return self.opt
+        if self._sched_conf is None:
+            return self.opt
+        cfg = dict(self._sched_conf)
+        sched_cls = cfg.pop("cls")
+        interval = cfg.pop("interval", "step")
+        scheduler = sched_cls(self.opt, **cfg)
+        return {
+            "optimizer": self.opt,
+            "lr_scheduler": {"scheduler": scheduler, "interval": interval},
+        }
 
     def train_dataloader(self):
         dataset_train = MultLoader(self.config)
-        num_workers = self.config.get("dl_conf").get("num_workers", 16)
+        num_workers = self.config.get("dl_conf").get("num_workers", 4)
         return DataLoader(
             dataset_train,
             batch_size=self.mm_conf.get("bs", 2**12),
@@ -181,7 +207,7 @@ class MultModel(LightningModule):
 
     @torch.no_grad()
     def forward(self, batch: (tuple | torch.Tensor)):
-        self.opt.eval()
+        self._opt_eval()
         self.eval()
         in_cc, _, pdgid_in_idx = batch
         in_embd = self.proj_in(in_cc)
