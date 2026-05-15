@@ -80,7 +80,6 @@ class LEGOLtng(ltng.LightningModule):
                 "is_filtered": True
             },
             "base_conf": {
-                "base_range": 1.,
                 "kappa": torch.tensor(40.),
                 "bs_frac": 0.,
                 "base_dist": "poles",
@@ -109,7 +108,6 @@ class LEGOLtng(ltng.LightningModule):
         model_conf = config.get("model_conf")
         dpath = config.get("dl_conf").get("lds_args").get("data")
         if dpath[-3:] != ".pt" and state_dict is None:
-            config["dl_conf"]["data_path"] = dpath + "/data_prepped.pt"
             with open(dpath + "/meta.json") as f:
                 meta_dict = json.load(f)
                 self.max_seq_l = meta_dict["ntokens"]
@@ -142,12 +140,9 @@ class LEGOLtng(ltng.LightningModule):
             model_conf.get("manifold"), {"__builtins__": {}}, _MANIFOLD_NS
         )
         self.ot_coupling = model_conf.get("ot_coupling", False)
-        self.proj_en_out = model_conf.get("proj_en_out", False)
         self.pdgid_is_idx = model_conf.get("pdgid_is_idx", False)
         self.loss_sc_fac = model_conf.get("loss_sc", 0.0)
         cond_cube = model_conf.get("cond_cube", False)
-        if state_dict is None:
-            model_conf["model_args"].setdefault("ntypes", 4)
         self.model = ProjectModel(
             CFMTrafo_x(**model_conf.get("model_args")),
             self.manifold,

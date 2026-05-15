@@ -8,10 +8,9 @@ from lightning import LightningModule
 
 from x_transformers import ContinuousTransformerWrapper, Decoder
 
-import schedulefree
-
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.geometry.vmf_sampling import VMF
+from legofmt.main.optimizers import build_optimizer
 
 
 class MultLoader(torch.utils.data.Dataset):
@@ -120,20 +119,8 @@ class MultModel(LightningModule):
             self.load_state_dict(state_dict, strict=False)
 
         opt_conf = self.mm_conf.get("opt_conf")
-        if opt_conf is None:
-            self.opt = schedulefree.AdamWScheduleFree(
-                self.parameters(),
-                lr=self.mm_conf.get("lr", 1e-3),
-                betas=(0.95, 0.999),
-                weight_decay=self.mm_conf.get("weight_decay", 0.0),
-                warmup_steps=self.mm_conf.get("warmup_steps", 0),
-            )
-            self._sched_conf = None
-        else:
-            cfg = dict(opt_conf)
-            opt_cls = cfg.pop("opt")
-            self._sched_conf = cfg.pop("scheduler", None)
-            self.opt = opt_cls(self.parameters(), **cfg)
+
+        self.opt, self._sched = build_optimizer(self.parameters(), opt_conf)
         self._opt_is_sf = hasattr(self.opt, "train") and callable(getattr(self.opt, "train", None))
 
     def proj_in(self, x):
@@ -178,16 +165,9 @@ class MultModel(LightningModule):
         return loss_model
 
     def configure_optimizers(self):
-        if self._sched_conf is None:
+        if self._sched is None:
             return self.opt
-        cfg = dict(self._sched_conf)
-        sched_cls = cfg.pop("cls")
-        interval = cfg.pop("interval", "step")
-        scheduler = sched_cls(self.opt, **cfg)
-        return {
-            "optimizer": self.opt,
-            "lr_scheduler": {"scheduler": scheduler, "interval": interval},
-        }
+        return {"optimizer": self.opt, "lr_scheduler": self._sched}
 
     def train_dataloader(self):
         dataset_train = MultLoader(self.config)

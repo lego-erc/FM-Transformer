@@ -10,8 +10,8 @@ class CFMTrafo_x(nn.Module):
         *,
         nhead: int = 8,
         max_seq_l: int = 9,
-        nvtypes: int = 3,
-        ntypes: int | None = None,
+        nvtypes: int = 2,
+        ntypes: int | None = 4,
         in_dim: int = 6,
         ff_mult: int = 1,
         dropout: float = 0.1,
@@ -25,7 +25,7 @@ class CFMTrafo_x(nn.Module):
         self.in_dim = in_dim
         self.max_seq_l = max_seq_l
         self.nvtypes = nvtypes
-        self.ntypes = ntypes if ntypes is not None else max_seq_l
+        self.ntypes = ntypes
         self.npdgids = npdgids
 
         self.vf = ContinuousTransformerWrapper(
