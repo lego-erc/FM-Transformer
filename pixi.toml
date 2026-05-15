@@ -20,8 +20,8 @@ pytorch-optimizer = "*"
 flow-matching = ">=1.0.10"
 legofmt = { path = ".", editable = true }
 
-[feature.cuda.system-requirements]
-cuda = "13"
+[feature.cuda.pypi-options]
+no-build-isolation = ["torch-lap-cuda"]
 
 [feature.cuda.dependencies]
 uv = "*"

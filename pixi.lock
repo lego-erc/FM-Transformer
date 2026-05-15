@@ -432,6 +432,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/93/ef/aac74263f0252806b46f0fd5a52566ee06129744572d0958cd0a77d22b0a/schedulefree-1.4.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0b/2e/7eea398450457ecb54e18e9d10110993fa65561c4f3add5e8eccd2b9cd41/scipy-1.17.1-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
+      - pypi: git+https://github.com/rdebrand/torch-lap-cuda#9555a21b1ac252bf4701ecfe56b8307cc3e47f90
       - pypi: https://files.pythonhosted.org/packages/92/5e/78ef01a3b65c13566ad39321db413c604085a9a92cd8879c50b0d90c587e/torch_einops_utils-0.0.30-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b9/35/537f64f2d0b3cfebaae0f903b4e3a3b239abcc99d0f73cb15b9cee9b8212/torchdiffeq-0.2.5-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b7/b5/bbeb83df7dbd539d270d89f0392cb22e8760589568ff12592b59ecb85f75/x_transformers-2.18.8-py3-none-any.whl
@@ -885,6 +886,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/93/ef/aac74263f0252806b46f0fd5a52566ee06129744572d0958cd0a77d22b0a/schedulefree-1.4.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0b/2e/7eea398450457ecb54e18e9d10110993fa65561c4f3add5e8eccd2b9cd41/scipy-1.17.1-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl
+      - pypi: git+https://github.com/rdebrand/torch-lap-cuda#9555a21b1ac252bf4701ecfe56b8307cc3e47f90
       - pypi: https://files.pythonhosted.org/packages/b9/35/537f64f2d0b3cfebaae0f903b4e3a3b239abcc99d0f73cb15b9cee9b8212/torchdiffeq-0.2.5-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/53/91/c7f220ac8e991c1340ed21ccfaef5088329988e4ca6094888f8822357946/x_transformers-2.14.2-py3-none-any.whl
       - pypi: ./
@@ -1188,6 +1190,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/bd/e3/bfc6f22bbcccf2b824c3e9d84a094d1ca9151a5d8a6c0b7990aeefa5cbb6/pytorch_optimizer-3.10.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/93/ef/aac74263f0252806b46f0fd5a52566ee06129744572d0958cd0a77d22b0a/schedulefree-1.4.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0b/2e/7eea398450457ecb54e18e9d10110993fa65561c4f3add5e8eccd2b9cd41/scipy-1.17.1-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+      - pypi: git+https://github.com/rdebrand/torch-lap-cuda#9555a21b1ac252bf4701ecfe56b8307cc3e47f90
       - pypi: https://files.pythonhosted.org/packages/92/5e/78ef01a3b65c13566ad39321db413c604085a9a92cd8879c50b0d90c587e/torch_einops_utils-0.0.30-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b9/35/537f64f2d0b3cfebaae0f903b4e3a3b239abcc99d0f73cb15b9cee9b8212/torchdiffeq-0.2.5-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/b7/b5/bbeb83df7dbd539d270d89f0392cb22e8760589568ff12592b59ecb85f75/x_transformers-2.18.8-py3-none-any.whl
@@ -1531,6 +1534,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/bd/e3/bfc6f22bbcccf2b824c3e9d84a094d1ca9151a5d8a6c0b7990aeefa5cbb6/pytorch_optimizer-3.10.0-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/93/ef/aac74263f0252806b46f0fd5a52566ee06129744572d0958cd0a77d22b0a/schedulefree-1.4.1-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/0b/2e/7eea398450457ecb54e18e9d10110993fa65561c4f3add5e8eccd2b9cd41/scipy-1.17.1-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+      - pypi: git+https://github.com/rdebrand/torch-lap-cuda#9555a21b1ac252bf4701ecfe56b8307cc3e47f90
       - pypi: https://files.pythonhosted.org/packages/b9/35/537f64f2d0b3cfebaae0f903b4e3a3b239abcc99d0f73cb15b9cee9b8212/torchdiffeq-0.2.5-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/53/91/c7f220ac8e991c1340ed21ccfaef5088329988e4ca6094888f8822357946/x_transformers-2.14.2-py3-none-any.whl
       - pypi: ./
@@ -4618,7 +4622,7 @@ packages:
   license: MIT
   license_family: MIT
   purls:
-  - pkg:pypi/pluggy?source=hash-mapping
+  - pkg:pypi/pluggy?source=compressed-mapping
   size: 25877
   timestamp: 1764896838868
 - conda: https://conda.anaconda.org/conda-forge/linux-64/psutil-7.2.2-py314h0f05182_0.conda
@@ -5537,6 +5541,12 @@ packages:
   - einops>=0.8.1
   - torch>=2.5
   - pytest ; extra == 'test'
+  requires_python: '>=3.9'
+- pypi: git+https://github.com/rdebrand/torch-lap-cuda#9555a21b1ac252bf4701ecfe56b8307cc3e47f90
+  name: torch-lap-cuda
+  version: 0.0.3
+  requires_dist:
+  - torch
   requires_python: '>=3.9'
 - pypi: https://files.pythonhosted.org/packages/b9/35/537f64f2d0b3cfebaae0f903b4e3a3b239abcc99d0f73cb15b9cee9b8212/torchdiffeq-0.2.5-py3-none-any.whl
   name: torchdiffeq

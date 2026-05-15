@@ -108,6 +108,11 @@ class LEGODataset(Dataset):
         if isinstance(data, tuple):
             self.data = DataStruct(*data)
 
+        if kwargs.get("frac", False):
+            self.length = int(len(self.data) * kwargs.get("frac"))
+            idxs = torch.randperm(len(self.data), device=self.device)[:self.length]
+            self.data = self.data[idxs]
+
     def __len__(self) -> int:
         return len(self.data)
 
