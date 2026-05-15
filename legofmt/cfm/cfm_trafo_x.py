@@ -18,6 +18,7 @@ class CFMTrafo_x(nn.Module):
         nlayers: int = 4,
         xavier_gain: float = 1.0,
         npdgids: int = 1,
+        dim_in_out: int | None = None,
         **kwargs: dict,
     ) -> None:
         super().__init__()
@@ -29,8 +30,8 @@ class CFMTrafo_x(nn.Module):
         self.npdgids = npdgids
 
         self.vf = ContinuousTransformerWrapper(
-            # dim_in=h_dim,
-            # dim_out=h_dim,
+            dim_in=dim_in_out,
+            dim_out=dim_in_out,
             max_seq_len=max_seq_l,
             emb_dropout=dropout,
             use_abs_pos_emb=False,
