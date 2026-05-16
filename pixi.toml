@@ -23,6 +23,9 @@ legofmt = { path = ".", editable = true }
 [feature.cuda.pypi-options]
 no-build-isolation = ["torch-lap-cuda"]
 
+[feature.cuda.system-requirements]
+cuda = "13.0"
+
 [feature.cuda.dependencies]
 uv = "*"
 
