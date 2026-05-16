@@ -1,11 +1,9 @@
 import torch
 from torch import Tensor
 
-from flow_matching.utils.manifolds import Euclidean, Sphere
-
 from ..geometry.energy_proj import EnergyProjections
 from ..geometry.raytracing_proj import CubeTrace
-from ..geometry.path_sample_mult import ProductPathSampler, ProductManifold
+from ..main.config import build_manifold
 from .struct import _F
 
 class DataPrep:
@@ -13,7 +11,7 @@ class DataPrep:
         config = config.get("config", config)
         model_conf = config.get("model_conf").copy()
         self.in_dim = model_conf.get("model_args").get("in_dim")
-        self.manifold = eval(model_conf.get("manifold"))
+        self.manifold = build_manifold(model_conf.get("manifold"))
         self.proj_ray = model_conf.get("proj_ray", True)
         self.proj_en = model_conf.get("proj_en", False)
         self.proj_en_out = model_conf.get("proj_en_out", False)

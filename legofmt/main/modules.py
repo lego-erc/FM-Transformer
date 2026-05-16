@@ -1,9 +1,7 @@
 import lightning as ltng
 import torch
-import json
 from flow_matching.solver import ODESolver
 from flow_matching.utils import ModelWrapper
-from flow_matching.utils.manifolds import Euclidean, Sphere
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.data.struct import DataStruct, _F
 from torch import Tensor, nn
@@ -19,6 +17,7 @@ from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt.geometry.gen_base import GenerateBase
 from legofmt.geometry.path_sample_mult import ProductPathSampler, ProductManifold
 from legofmt.geometry.raytracing_proj import CubeTrace
+from legofmt.main.config import resolve_legoltng_config
 from legofmt.main.optimizers import build_optimizer
 
 
@@ -68,110 +67,41 @@ class ProjectModel(ModelWrapper, nn.Module):
 
 
 class LEGOLtng(ltng.LightningModule):
-    def __init__(self, config: dict) -> None:
-        """As example input.
-
-            config = {
-            "dl_conf": {
-                "data": DATA_PATH/data_prepped,
-                "cutoff_mev": 20,
-                "min_particles": 1,
-                "max_e": False,
-                "is_filtered": True
-            },
-            "base_conf": {
-                "base_range": 1.,
-                "kappa": torch.tensor(40.),
-                "bs_frac": 0.,
-                "base_dist": "poles",
-            },
-            "model_conf": {
-                    "h_dim": 2**7,
-                    "max_seq_l": 9,
-                    "in_dim": 6,
-                    "nlayers": 4,
-                    "nhead": 8,
-                    "dropout": 0.1,
-                    "ff_mult": 4,
-                    "manifold": man_euc_sph,
-                    "proj_ray": True,
-                    "proj_en": "log",
-            },
-            "opt_conf": {
-                "opt": schedulefree.AdamWScheduleFree,
-                "lr": 1e-3
-            },
-        }
-        """
+    def __init__(self, full_config: dict) -> None:
         super().__init__()
-        state_dict = config.get("state_dict")
-        config = config.get("config", config)
-        model_conf = config.get("model_conf")
-        dpath = config.get("dl_conf").get("lds_args").get("data")
-        if dpath[-3:] != ".pt" and state_dict is None:
-            config["dl_conf"]["data_path"] = dpath + "/data_prepped.pt"
-            with open(dpath + "/meta.json") as f:
-                meta_dict = json.load(f)
-                self.max_seq_l = meta_dict["ntokens"]
-                ptensor = (
-                    torch.tensor(meta_dict["particles"], dtype=torch.int64)
-                    .sort()
-                    .values
-                )
-                self.register_buffer("pdgids_template", ptensor.contiguous())
-                model_conf["model_args"]["npdgids"] = self.pdgids_template.shape[0] + 1
-            if "max_seq_l" not in model_conf["model_args"]:
-                model_conf["model_args"]["max_seq_l"] = self.max_seq_l
-            if "pdgids" not in model_conf["model_args"]:
-                model_conf["pdgids"] = ptensor
-        elif state_dict is not None:
-            if model_conf["model_args"].get("ntokens", False):
-                model_conf["model_args"]["max_seq_l"] = model_conf["model_args"].pop(
-                    "ntokens"
-                )
-            self.max_seq_l = model_conf["model_args"]["max_seq_l"]
-            self.register_buffer("pdgids_template", model_conf["pdgids"])
-            if any(k.startswith("vf.project_in.") for k in state_dict):
-                model_conf["model_args"]["dim_in_out"] = model_conf["model_args"]["h_dim"]
-        self.t_dist = model_conf.get("t_dist", "uniform")
-        self.t_dist_scale = model_conf.get("t_dist_scale", 1.4)
-        _MANIFOLD_NS = {
-            "ProductManifold": ProductManifold,
-            "Euclidean": Euclidean,
-            "Sphere": Sphere,
-        }
-        self.manifold = eval(
-            model_conf.get("manifold"), {"__builtins__": {}}, _MANIFOLD_NS
-        )
-        self.ot_coupling = model_conf.get("ot_coupling", False)
-        self.proj_en_out = model_conf.get("proj_en_out", False)
-        self.pdgid_is_idx = model_conf.get("pdgid_is_idx", False)
-        self.loss_sc_fac = model_conf.get("loss_sc", 0.0)
-        cond_cube = model_conf.get("cond_cube", False)
-        if state_dict is None:
-            model_conf["model_args"].setdefault("ntypes", 4)
-        self.model = ProjectModel(
-            CFMTrafo_x(**model_conf.get("model_args")),
-            self.manifold,
-            cond_cube=cond_cube,
-        )
+        rc = resolve_legoltng_config(full_config)
 
-        self.gen_base = GenerateBase(config.copy())
-        self.ppa = CubeTrace()
+        if rc.ot_coupling and slap is None:
+            raise RuntimeError(
+                "ot_coupling=True requires `torch_lap_cuda_lib`. "
+                "Install it or set model_conf.ot_coupling=False."
+            )
 
-        self.opt, self._lr_sched = build_optimizer(self.model.parameters(), config["opt_conf"])
-        self._opt_is_sf = hasattr(self.opt, "train") and callable(getattr(self.opt, "train", None))
+        self.rc = rc
 
-        self.dl_conf = config.get("dl_conf")
+        self.register_buffer("pdgids_template", rc.pdgids_template)
         self.register_buffer(
             "types_embd",
-            torch.arange(self.max_seq_l, dtype=torch.int64).clamp_max(3).view(1, -1),
+            torch.arange(rc.max_seq_l, dtype=torch.int64).clamp_max(3).view(1, -1),
         )
 
-        self.odeint_conf = config.get("odeint_conf", {})
+        self.model = ProjectModel(
+            CFMTrafo_x(**rc.model_args),
+            rc.manifold,
+            cond_cube=rc.cond_cube,
+        )
+        self.gen_base = GenerateBase(rc.config)
+        self.ppa = CubeTrace()
 
-        if state_dict is not None:
-            self.model.vf.load_state_dict(state_dict, strict=False)
+        self.opt, self._lr_sched = build_optimizer(
+            self.model.parameters(), rc.opt_conf,
+        )
+        self._opt_is_sf = hasattr(self.opt, "train") and callable(
+            getattr(self.opt, "train", None),
+        )
+
+        if rc.state_dict is not None:
+            self.model.vf.load_state_dict(rc.state_dict, strict=False)
 
     def _opt_train(self) -> None:
         """No-op unless the optimizer has a schedule-free .train() method."""
@@ -186,7 +116,7 @@ class LEGOLtng(ltng.LightningModule):
     @torch.no_grad()
     def on_fit_start(self) -> None:
         self.loss_fn = nn.MSELoss()
-        self.ps = ProductPathSampler(self.manifold)
+        self.ps = ProductPathSampler(self.rc.manifold)
         self.model.train()
         self._opt_train()
 
@@ -201,7 +131,7 @@ class LEGOLtng(ltng.LightningModule):
         if not isinstance(ds_t, DataStruct):
             ds_t = DataStruct(*ds_t)
         base = torch.cat((ds_t.f.non_cc, self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc)), dim=1)
-        if self.ot_coupling and self.model.training:
+        if self.rc.ot_coupling and self.model.training:
             base = base.where(ds_t.am.full.unsqueeze(-1), ds_t.f.model_in)
             inf_cond = ds_t.am.out_p.unsqueeze(-1).logical_xor(ds_t.am.out_p.unsqueeze(-2))
             out = _F(base).out_p
@@ -214,12 +144,12 @@ class LEGOLtng(ltng.LightningModule):
         with torch.no_grad():
             base = self.gen_base_wrapper(ds_t)
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
-            if self.t_dist == "sm_norm":
-                t = torch.sigmoid(self.t_dist_scale * torch.randn_like(ds_t.f.d))
-            elif self.t_dist == "sd3":
+            if self.rc.t_dist == "sm_norm":
+                t = torch.sigmoid(self.rc.t_dist_scale * torch.randn_like(ds_t.f.d))
+            elif self.rc.t_dist == "sd3":
                 u = torch.rand_like(ds_t.f.d)
-                t = 1 - u + self.t_dist_scale / 3 * ((torch.pi / 2 * u).sin()**2 - u)
-            elif self.t_dist == "uniform":
+                t = 1 - u + self.rc.t_dist_scale / 3 * ((torch.pi / 2 * u).sin()**2 - u)
+            elif self.rc.t_dist == "uniform":
                 t = torch.rand_like(ds_t.f.d)
             ps_ = self.ps.sample(base, ds_t.f.model_in, t)
         v_out = self.model(
@@ -228,14 +158,14 @@ class LEGOLtng(ltng.LightningModule):
             types=self.types_embd, pdgids=pdgid_idx,
         )
         am = ds_t.am.full.unsqueeze(-1)
-        if self.loss_sc_fac > 0:
+        if self.rc.loss_sc_fac > 0:
             pred_sc = ((1 - ps_.t).unsqueeze(-1) * v_out + ps_.x_t) * am
             loss_sc = self.loss_fn(pred_sc[..., :3], ds_t.f.mom * am)
         else:
             loss_sc = 0.0
         sq = (v_out - ps_.dx_t)**2
         loss_v = sq[:, 1].mean() + (sq[:, 3:] * (ds_t.m.out_p == 1).unsqueeze(-1)).mean()
-        return loss_v + self.loss_sc_fac * loss_sc
+        return loss_v + self.rc.loss_sc_fac * loss_sc
 
     def training_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
         loss = self._step(batch, _batch_idx)
@@ -263,11 +193,11 @@ class LEGOLtng(ltng.LightningModule):
 
     @torch.no_grad()
     def train_dataloader(self) -> DataLoader:
-        num_workers = self.dl_conf.get("num_workers", 4)
-        dataset_train = LEGODataset(**self.dl_conf.get("lds_args"))
+        num_workers = self.rc.dl_conf.get("num_workers", 4)
+        dataset_train = LEGODataset(**self.rc.dl_conf.get("lds_args"))
         return DataLoader(
             dataset_train,
-            batch_size=self.dl_conf.get("bs", 2**12),
+            batch_size=self.rc.dl_conf.get("bs", 2**12),
             shuffle=True,
             num_workers=num_workers,
             pin_memory=True,
@@ -307,7 +237,7 @@ class LEGOLtng(ltng.LightningModule):
             self._opt_eval()
 
         pdgids = ds_t.f.pdgids
-        pdgids_idx = pdgids.int() if self.pdgid_is_idx else self.convert_pdgids(pdgids)
+        pdgids_idx = pdgids.int() if self.rc.pdgid_is_idx else self.convert_pdgids(pdgids)
         am = ds_t.am.full.unsqueeze(-1)
         cc = ds_t.f.model_in.where(am, ds_t.f.in_cc)
         if x_init is not None and x_init.shape == cc.shape:
@@ -374,7 +304,7 @@ class LEGOLtng(ltng.LightningModule):
             self.model.eval()
             self._opt_eval()
 
-        cfg = self.odeint_conf
+        cfg = self.rc.odeint_conf
         if (cfg.get("fwd_compile", False)
         and not (hasattr(self.model, "_orig_mod")
         or hasattr(self.model.vf, "_orig_mod"))):
@@ -408,7 +338,7 @@ class LEGOLtng(ltng.LightningModule):
             sols = sols.masked_fill_(~am, torch.nan)
             filter_pdgid = cfg.get("filter_pdgid")
             if filter_pdgid is not None:
-                pdgids_idx = pdgids.int() if self.pdgid_is_idx else self.convert_pdgids(pdgids)
+                pdgids_idx = pdgids.int() if self.rc.pdgid_is_idx else self.convert_pdgids(pdgids)
                 keep = torch.isin(pdgids_idx, self.convert_pdgids(filter_pdgid)) | (pdgids_idx == 0)
                 sols.masked_fill_(~keep, torch.nan)
                 pdgids = pdgids.masked_fill(~keep, 0)
