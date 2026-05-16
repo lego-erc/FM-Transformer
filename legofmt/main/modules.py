@@ -1,17 +1,19 @@
-import lightning as ltng
 import torch
-from flow_matching.solver import ODESolver
-from flow_matching.utils import ModelWrapper
-from legofmt.data.dataloaders import LEGODataset
-from legofmt.data.struct import DataStruct, _F
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
+
+import lightning as ltng
+
+from flow_matching.solver import ODESolver
+from flow_matching.utils import ModelWrapper
 
 try:
     from torch_lap_cuda_lib import solve_lap as slap
 except ImportError:
     slap = None
 
+from legofmt.data.dataloaders import LEGODataset
+from legofmt.data.struct import DataStruct, _F
 from legofmt.geometry.vmf_sampling import VMF
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt.geometry.gen_base import GenerateBase
@@ -70,13 +72,6 @@ class LEGOLtng(ltng.LightningModule):
     def __init__(self, full_config: dict) -> None:
         super().__init__()
         rc = resolve_legoltng_config(full_config)
-
-        if rc.ot_coupling and slap is None:
-            raise RuntimeError(
-                "ot_coupling=True requires `torch_lap_cuda_lib`. "
-                "Install it or set model_conf.ot_coupling=False."
-            )
-
         self.rc = rc
 
         self.register_buffer("pdgids_template", rc.pdgids_template)
@@ -115,6 +110,11 @@ class LEGOLtng(ltng.LightningModule):
 
     @torch.no_grad()
     def on_fit_start(self) -> None:
+        if self.rc.ot_coupling and slap is None:
+            raise RuntimeError(
+                "ot_coupling=True requires `torch_lap_cuda_lib`. "
+                "Install it or set model_conf.ot_coupling=False."
+            )
         self.loss_fn = nn.MSELoss()
         self.ps = ProductPathSampler(self.rc.manifold)
         self.model.train()
