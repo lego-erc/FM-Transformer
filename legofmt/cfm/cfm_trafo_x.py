@@ -43,9 +43,28 @@ Note:
     ``b_mask_``, ...). A load pre-hook remaps the keys and emits one
     ``DeprecationWarning``.
 """
+
+from __future__ import annotations
+
+import warnings
+
 import torch
 from torch import Tensor, nn
 from x_transformers import ContinuousTransformerWrapper, Encoder
+
+
+# Pre-refactor parameter names -> current names.
+_LEGACY_RENAME: dict[str, str] = {
+    "l_mask_":    "cond_w_mask",
+    "b_mask_":    "cond_bi_mask",
+    "bo_mask_":   "cond_bo_mask",
+    "l_types_":   "cond_w_types",
+    "b_types_":   "cond_bi_types",
+    "bo_types_":  "cond_bo_types",
+    "l_pdgids_":  "cond_w_pdgids",
+    "b_pdgids_":  "cond_bi_pdgids",
+    "bo_pdgids_": "cond_bo_pdgids",
+}
 
 
 class CFMTrafo_x(nn.Module):
@@ -85,7 +104,7 @@ class CFMTrafo_x(nn.Module):
 
     def __init__(
         self,
-        h_dim: int,
+        h_dim: int = 256,
         *,
         nhead: int = 8,
         max_seq_l: int = 9,
@@ -98,7 +117,7 @@ class CFMTrafo_x(nn.Module):
         xavier_gain: float = 1.0,
         npdgids: int = 1,
         dim_in_out: int | None = None,
-        **kwargs: dict,
+        **kwargs,
     ) -> None:
         super().__init__()
         self.h_dim = h_dim
@@ -126,31 +145,61 @@ class CFMTrafo_x(nn.Module):
             ),
         )
 
-        self.l_mask_ = nn.Parameter(torch.empty(self.nvtypes, 2, self.h_dim, self.in_dim))
-        self.b_mask_ = nn.Parameter(torch.empty(self.nvtypes, self.h_dim))
-        self.bo_mask_ = nn.Parameter(torch.empty(self.nvtypes, self.in_dim))
-        self.l_types_ = nn.Parameter(torch.empty(self.ntypes, 2, self.h_dim, self.in_dim))
-        self.b_types_ = nn.Parameter(torch.empty(self.ntypes, self.h_dim))
-        self.bo_types_ = nn.Parameter(torch.empty(self.ntypes, self.in_dim))
-        self.l_pdgids_ = nn.Parameter(torch.empty(self.npdgids, 2, self.h_dim, self.in_dim))
-        self.b_pdgids_ = nn.Parameter(torch.empty(self.npdgids, self.h_dim))
-        self.bo_pdgids_ = nn.Parameter(torch.empty(self.npdgids, self.in_dim))
+        # Factorized projection parameters: one (w, bi, bo) triple per
+        # conditioning source. See module docstring.
+        self.cond_w_mask    = nn.Parameter(torch.empty(self.nvtypes, 2, h_dim, in_dim))
+        self.cond_bi_mask   = nn.Parameter(torch.empty(self.nvtypes, h_dim))
+        self.cond_bo_mask   = nn.Parameter(torch.empty(self.nvtypes, in_dim))
+        self.cond_w_types   = nn.Parameter(torch.empty(self.ntypes,  2, h_dim, in_dim))
+        self.cond_bi_types  = nn.Parameter(torch.empty(self.ntypes,  h_dim))
+        self.cond_bo_types  = nn.Parameter(torch.empty(self.ntypes,  in_dim))
+        self.cond_w_pdgids  = nn.Parameter(torch.empty(self.npdgids, 2, h_dim, in_dim))
+        self.cond_bi_pdgids = nn.Parameter(torch.empty(self.npdgids, h_dim))
+        self.cond_bo_pdgids = nn.Parameter(torch.empty(self.npdgids, in_dim))
 
-        for p in (self.l_mask_, self.b_mask_, self.bo_mask_,
-            self.l_types_, self.b_types_, self.bo_types_,
-            self.l_pdgids_, self.b_pdgids_, self.bo_pdgids_):
+        for p in (
+            self.cond_w_mask, self.cond_bi_mask, self.cond_bo_mask,
+            self.cond_w_types, self.cond_bi_types, self.cond_bo_types,
+            self.cond_w_pdgids, self.cond_bi_pdgids, self.cond_bo_pdgids,
+        ):
             nn.init.xavier_normal_(p, gain=xavier_gain)
 
+        # Time-embedding frequencies (non-trainable; kept as a Parameter
+        # for state_dict compatibility).
         self.freqs = nn.Parameter(
             self.h_dim * 1e-4 ** (torch.arange(self.h_dim) / self.h_dim),
             requires_grad=False,
         )
         self.register_buffer("mask_freqs", torch.arange(self.h_dim) % 2)
 
+        self._register_load_state_dict_pre_hook(self._legacy_param_rename)
+
+    @staticmethod
+    def _legacy_param_rename(state_dict, prefix, *_):
+        """Rename pre-refactor keys in ``state_dict`` in place.
+
+        ``_load_state_dict`` pre-hook; emits one ``DeprecationWarning``
+        per load when any legacy key matches.
+        """
+        renames = {
+            k: prefix + _LEGACY_RENAME[suf]
+            for k in list(state_dict)
+            if k.startswith(prefix) and (suf := k[len(prefix):]) in _LEGACY_RENAME
+        }
+        if not renames:
+            return
+        warnings.warn(
+            "Remapping legacy CFMTrafo_x parameter keys "
+            "(e.g. 'l_mask_' -> 'cond_w_mask'); re-save to silence.",
+            DeprecationWarning, stacklevel=4,
+        )
+        for old, new in renames.items():
+            state_dict[new] = state_dict.pop(old)
+
     def forward(
         self,
         t: Tensor,
-        states_mask: Tensor,
+        x: Tensor,
         mask: Tensor,
         attn_mask: Tensor,
         types: Tensor,
@@ -173,6 +222,7 @@ class CFMTrafo_x(nn.Module):
             Velocity field, shape ``(B, n, in_dim)``, zeroed where
             ``mask != 1``.
         """
+        n = x.shape[1]
         mi, ti, pi = mask.view(-1), types.view(-1)[:n], pdgids.view(-1)
         s3 = (-1, n, self.h_dim)
         so = (-1, n, self.in_dim)
@@ -180,15 +230,43 @@ class CFMTrafo_x(nn.Module):
 
         tf = t.unsqueeze(-1) * self.freqs
         embd_t = torch.where(self.mask_freqs.bool(), tf.sin(), tf.cos())
-        embd = ((torch.einsum("ijl, ijkl -> ijk", states_mask,
-            self.l_mask_[mi, 0].view(s4) + self.l_types_[ti, 0] + self.l_pdgids_[pi, 0].view(s4))
-            + (self.b_mask_[mi].view(s3) + self.b_types_[ti].view(s3) + self.b_pdgids_[pi].view(s3))) / 3
-            + embd_t)
+
+        # Up-projection: the three source-indexed weights are summed
+        # before the einsum (single fused contraction); biases summed
+        # likewise; divide by 3 to average. Inlined to let intermediates
+        # be freed before the next op.
+        embd = (
+            (
+                torch.einsum(
+                    "ijl,ijkl->ijk", x,
+                    self.cond_w_mask  [mi, 0].view(s4)
+                  + self.cond_w_types [ti, 0]
+                  + self.cond_w_pdgids[pi, 0].view(s4),
+                )
+              + self.cond_bi_mask  [mi].view(s3)
+              + self.cond_bi_types [ti].view(s3)
+              + self.cond_bi_pdgids[pi].view(s3)
+            ) / 3 + embd_t
+        )
+
+        # Encoder. Inner project_in / project_out are identities unless
+        # dim_in_out was set.
         embd = self.vf.project_in(embd)
         if self.training:
             embd = self.vf.emb_dropout(embd)
-        x = self.vf.attn_layers(embd, mask=attn_mask, condition=embd_t)
-        x = self.vf.project_out(x)
-        return (mask == 1).unsqueeze(-1) * (torch.einsum("ijk, ijkl -> ijl", x,
-            self.l_mask_[mi, 1].view(s4) + self.l_types_[ti, 1] + self.l_pdgids_[pi, 1].view(s4))
-            + self.bo_mask_[mi].view(so) + self.bo_types_[ti].view(so) + self.bo_pdgids_[pi].view(so)) / 3
+        h = self.vf.project_out(self.vf.attn_layers(embd, mask=attn_mask, condition=embd_t))
+
+        # Down-projection: same construction as up-projection, gated to
+        # mask == 1 slots. Inlined to let intermediates be freed before
+        # the next op.
+        return (mask == 1).unsqueeze(-1) * (
+            torch.einsum(
+                "ijk,ijkl->ijl", h,
+                self.cond_w_mask  [mi, 1].view(s4)
+              + self.cond_w_types [ti, 1]
+              + self.cond_w_pdgids[pi, 1].view(s4),
+            )
+          + self.cond_bo_mask  [mi].view(so)
+          + self.cond_bo_types [ti].view(so)
+          + self.cond_bo_pdgids[pi].view(so)
+        ) / 3
