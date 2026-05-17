@@ -1,3 +1,48 @@
+"""Time-conditioned transformer with a factorized conditional projection.
+
+Data flow per forward pass::
+
+    x  ->  factorized up-projection    ->  project_in  ->  Encoder
+                                                             |
+    y  <-  factorized down-projection  <-  project_out  <----+
+
+``project_in`` / ``project_out`` and the encoder come from
+``x_transformers.ContinuousTransformerWrapper``; the factorized up- and
+down-projections are this module.
+
+Three discrete conditioning indices select the projection per token,
+each of shape ``(B, n)``:
+
+- ``mask``   (``nvtypes`` values) - ``0`` for conditioning slots, ``1``
+  for slots the flow generates. Output is zeroed where ``mask != 1``.
+- ``types``  (``ntypes`` values) - positional slot-type id; replaces
+  absolute positional embeddings.
+- ``pdgids`` (``npdgids`` values) - particle-species index.
+
+Each source ``c`` owns:
+
+- ``cond_w_{c}``  ``(card_c, 2, h_dim, in_dim)`` - ``[:, 0]`` is the
+  up-projection, ``[:, 1]`` the down-projection.
+- ``cond_bi_{c}`` ``(card_c, h_dim)``  - up-projection bias.
+- ``cond_bo_{c}`` ``(card_c, in_dim)`` - down-projection bias.
+
+Per-token up-projection (mean of three index-selected affine maps plus a
+sinusoidal time embedding)::
+
+    h_i = ( cond_w_mask  [mask  [i], 0] @ x_i + cond_bi_mask  [mask  [i]]
+          + cond_w_types [types [i], 0] @ x_i + cond_bi_types [types [i]]
+          + cond_w_pdgids[pdgids[i], 0] @ x_i + cond_bi_pdgids[pdgids[i]]
+          ) / 3 + sincos_embed(t)[i]
+
+Weights are summed before the einsum to fuse the contraction. The
+down-projection mirrors this with ``cond_w_*[:, 1]`` and ``cond_bo_*``,
+gated to ``mask == 1``.
+
+Note:
+    Legacy checkpoints use trailing-underscore names (``l_mask_``,
+    ``b_mask_``, ...). A load pre-hook remaps the keys and emits one
+    ``DeprecationWarning``.
+"""
 import torch
 from torch import Tensor, nn
 from x_transformers import ContinuousTransformerWrapper, Encoder
