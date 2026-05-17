@@ -49,6 +49,40 @@ from x_transformers import ContinuousTransformerWrapper, Encoder
 
 
 class CFMTrafo_x(nn.Module):
+    """Conditional flow-matching transformer with factorized projections.
+
+    See the module docstring for the projection construction and the
+    meaning of ``mask`` / ``types`` / ``pdgids``.
+
+    Args:
+        h_dim: Encoder hidden dimension. Default: ``256``.
+        nhead: Attention heads per encoder layer. Default: ``8``.
+        max_seq_l: Maximum padded sequence length. Default: ``9``.
+        nvtypes: Cardinality of ``mask`` (typically ``2``: conditioning
+            vs. generated). Default: ``3``.
+        ntypes: Cardinality of ``types``. Defaults to ``max_seq_l``.
+        in_dim: Per-token feature dimension (same on the way in and out).
+            Default: ``6``.
+        ff_mult: Encoder feed-forward expansion ratio. Default: ``1``.
+        dropout: Dropout on embeddings, attention, and feed-forward.
+            Default: ``0.1``.
+        nlayers: Number of encoder layers. Default: ``4``.
+        xavier_gain: Gain for ``nn.init.xavier_normal_``. Default: ``1.0``.
+        npdgids: Cardinality of ``pdgids`` (particle-species lookup).
+            Default: ``1``.
+        dim_in_out: When not ``None``, the wrapped
+            ``ContinuousTransformerWrapper`` uses
+            ``Linear(dim_in_out, h_dim)`` / ``Linear(h_dim, dim_in_out)``
+            at its boundary instead of identities. Back-compat for
+            checkpoints whose state dict contains ``vf.project_in.*`` /
+            ``vf.project_out.*`` weights;
+            ``legofmt.main.config._apply_legacy_projection_in_out`` sets
+            this to ``h_dim`` when those keys are detected. Default:
+            ``None``.
+        **kwargs: Forwarded to ``x_transformers.Encoder`` (e.g.
+            ``use_adaptive_rmsnorm``, ``attn_qk_norm``).
+    """
+
     def __init__(
         self,
         h_dim: int,
