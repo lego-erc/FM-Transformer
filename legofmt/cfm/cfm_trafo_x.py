@@ -120,11 +120,12 @@ class CFMTrafo_x(nn.Module):
         **kwargs,
     ) -> None:
         super().__init__()
+        ntypes = ntypes if ntypes is not None else max_seq_l
         self.h_dim = h_dim
         self.in_dim = in_dim
         self.max_seq_l = max_seq_l
         self.nvtypes = nvtypes
-        self.ntypes = ntypes if ntypes is not None else max_seq_l
+        self.ntypes = ntypes
         self.npdgids = npdgids
 
         self.vf = ContinuousTransformerWrapper(
