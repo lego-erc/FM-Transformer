@@ -9,7 +9,7 @@ from matplotlib.lines import Line2D
 
 from ..main.modules import LEGOLtng
 from ..geometry.path_sample_mult import ProductManifold
-from ..geometry.vmf_sampling import VMF
+from ..geometry.geom_trafos import GeomTrafos
 from ..data.struct import _F
 from .plot_geom import PlotGeom
 
@@ -56,7 +56,7 @@ class CornerHist:
         else:
             self.cutoff_en = cutoff_en
         self.anim_intermediates = anim_intermediates
-        self.vmf_utils = VMF()
+        self.geom_trafos = GeomTrafos()
         self.disp_man = ProductManifold([Sphere(), Sphere()], (3, 3))
         self.figsize = figsize
         self.plot_vars = plot_vars
@@ -228,7 +228,7 @@ class CornerHist:
         v = _F(data_cc)
         data_out = v.out_p.reshape(-1, 6)
         en_in = data_cc[:, 2, :3].norm(dim=-1)
-        data = self.vmf_utils.to_sph(self.disp_man.projx(data_out)).cpu().numpy()
+        data = self.geom_trafos.to_sph(self.disp_man.projx(data_out)).cpu().numpy()
         labels = [
             r"$\theta_\mathrm{mom}$",
             r"$\phi_\mathrm{mom}$",
@@ -267,9 +267,9 @@ class CornerHist:
     @torch.no_grad()
     def make_cube(self, data, cube, incoming, color="#FF9D00"):
         if incoming is not None:
-            incoming = self.vmf_utils.to_cube(self.disp_man.projx(incoming))
+            incoming = self.geom_trafos.to_cube(self.disp_man.projx(incoming))
         return cube.plot_cube_with_points(
-            self.vmf_utils.to_cube(data),
+            self.geom_trafos.to_cube(data),
             incoming=incoming,
             arr_c=color,
             arr_lr=0.0,

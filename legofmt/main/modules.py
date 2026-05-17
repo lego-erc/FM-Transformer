@@ -14,7 +14,7 @@ except ImportError:
 
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.data.struct import DataStruct, _F
-from legofmt.geometry.vmf_sampling import VMF
+from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt.geometry.gen_base import GenerateBase
 from legofmt.geometry.path_sample_mult import ProductPathSampler, ProductManifold
@@ -36,7 +36,7 @@ class ProjectModel(ModelWrapper, nn.Module):
         self.vf = vf
         self.manifold = manifold
         self.kwargs = kwargs
-        self.vmf = VMF()
+        self.geom_trafos = GeomTrafos()
         self.cond_cube = kwargs.get("cond_cube", False)
         self.no_detach = kwargs.get("no_detach", False)
 
@@ -59,7 +59,7 @@ class ProjectModel(ModelWrapper, nn.Module):
         if self.cond_cube:
             x_cube = x.clone()
             in_p = _F(x_cube).in_p
-            in_p.copy_(self.vmf.to_cube(in_p))
+            in_p.copy_(self.geom_trafos.to_cube(in_p))
             x_surr = x_cube
         else:
             x_surr = x

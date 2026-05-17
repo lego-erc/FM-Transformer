@@ -1,12 +1,12 @@
 import torch
 import torch.nn.functional as F
 
-from legofmt.geometry.vmf_sampling import VMF
+from legofmt.geometry.geom_trafos import GeomTrafos
 
 
 class GenerateBase:
     def __init__(self, config: dict):
-        self.vmf_utils = VMF()
+        self.geom_trafos = GeomTrafos()
         self.cutoff_mev = config["dl_conf"]["lds_args"].get("cutoff_mev", 10.0)
         base_conf = config.get("base_conf")
         base_dist = base_conf.get("base_dist", "iso")
@@ -50,8 +50,8 @@ class GenerateBase:
         p_cc = F.normalize(incoming_rt[..., :3], dim=-1)
         loc_cc = incoming_rt[..., -3:]
         rd_scale = self.rd_scale(shape, p_norm)
-        x = self.vmf_utils.sample(shape, loc_cc, self.kappa, self.bs_frac, self.tanh_theta)
-        p_ = self.vmf_utils.sample(shape, p_cc, self.kappa, 0.0, self.tanh_theta)
+        x = self.geom_trafos.sample(shape, loc_cc, self.kappa, self.bs_frac, self.tanh_theta)
+        p_ = self.geom_trafos.sample(shape, p_cc, self.kappa, 0.0, self.tanh_theta)
         p_sc = rd_scale * p_
         base = torch.cat((p_sc, x), dim=-1)
         base = torch.cat((incoming_rt, base), dim=1)

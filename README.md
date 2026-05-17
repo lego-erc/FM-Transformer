@@ -19,7 +19,7 @@
     - gen_base.py: flow base sample generation. 
     - path_sample_mult.py: enables projections and path computations on products of manifolds. 
     - raytracing_proj.py: projects to the other side of the cube, can add noise. 
-    - vmf_sampling.py: sampling uniformly on a sphere, transformations from cartesian to spherical.
+    - geom_trafos.py: cartesian↔spherical conversions, sphere→cube L∞ projection, and a wrapped-Gaussian sphere sampler.
     
 - ### multiplicity
 

@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import torch
 from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
 
-from ..geometry.vmf_sampling import VMF
+from ..geometry.geom_trafos import GeomTrafos
 
 plt.rcParams.update(
     {
@@ -22,7 +22,7 @@ class PlotGeom:
     def __init__(self, figure=None, ax=None):
         self.figure = figure
         self.ax = ax
-        self.vmf_utils = VMF()
+        self.geom_trafos = GeomTrafos()
 
     def do_ax(self):
         if self.figure is None:
@@ -126,7 +126,7 @@ class PlotGeom:
         grid_sph = torch.stack(
             torch.meshgrid(pi_range, 2 * pi_range, indexing="xy"), dim=-1
         )
-        cc = self.vmf_utils.to_cc(grid_sph)
+        cc = self.geom_trafos.to_cc(grid_sph)
 
         ax = self.do_ax()
         for i in range(0, 36, 2):
