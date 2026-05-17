@@ -99,7 +99,7 @@ class CornerHist:
                         axis.clear()
                     prepped = self.prep(batch[i])
                     self.fig_sup.suptitle(
-                        rf"$\mathrm{{Density:\;}}{str(self.sols_density.item())[:4]}\mathrm{{,\;Deposited\;Energy\;Mean:\;}}{str(self.sols_e_dep.item())[:4]}$",
+                        rf"$\mathrm{{Density:\;}}{self.sols_density.item():.2f}\mathrm{{,\;Deposited\;Energy\;Mean:\;}}{self.sols_e_dep.item():.3f}$",
                         fontsize=20,
                     )
                     return prepped
@@ -168,6 +168,9 @@ class CornerHist:
         is_8d = sols.shape[-1] == 8
         e_dep = _F(sols).edep if is_8d else sols[:, 1, 0]
         sols_cc = _F(sols).model_in if is_8d else sols
+
+        self.sols_density = (_F(sols).d if is_8d else sols[:, 0, 0]).mean()
+        self.sols_e_dep = e_dep.mean()
 
         truth = _F(batch[0])
         sols_true = batch[0] if batch[0].shape[-1] == 6 else truth.model_in
