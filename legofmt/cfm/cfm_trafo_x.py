@@ -156,7 +156,23 @@ class CFMTrafo_x(nn.Module):
         types: Tensor,
         pdgids: Tensor | None,
     ) -> Tensor:
-        n = states_mask.shape[1]
+        """Compute the velocity field at flow time ``t``.
+
+        Args:
+            t: Flow time, broadcastable to ``(B, 1)``.
+            x: Per-token features, shape ``(B, n, in_dim)``.
+            mask: Token-role ids, shape ``(B, n)``, values in
+                ``[0, nvtypes)``. The output is zeroed where ``mask != 1``.
+            attn_mask: Boolean attention mask, shape ``(B, n)``.
+            types: Slot-type ids, shape ``(B, n)``, values in
+                ``[0, ntypes)``.
+            pdgids: Particle-species indices, shape ``(B, n)``, values in
+                ``[0, npdgids)``.
+
+        Returns:
+            Velocity field, shape ``(B, n, in_dim)``, zeroed where
+            ``mask != 1``.
+        """
         mi, ti, pi = mask.view(-1), types.view(-1)[:n], pdgids.view(-1)
         s3 = (-1, n, self.h_dim)
         so = (-1, n, self.in_dim)
