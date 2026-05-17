@@ -147,15 +147,15 @@ class CFMTrafo_x(nn.Module):
 
         # Factorized projection parameters: one (w, bi, bo) triple per
         # conditioning source. See module docstring.
-        self.cond_w_mask    = nn.Parameter(torch.empty(self.nvtypes, 2, h_dim, in_dim))
-        self.cond_bi_mask   = nn.Parameter(torch.empty(self.nvtypes, h_dim))
-        self.cond_bo_mask   = nn.Parameter(torch.empty(self.nvtypes, in_dim))
-        self.cond_w_types   = nn.Parameter(torch.empty(self.ntypes,  2, h_dim, in_dim))
-        self.cond_bi_types  = nn.Parameter(torch.empty(self.ntypes,  h_dim))
-        self.cond_bo_types  = nn.Parameter(torch.empty(self.ntypes,  in_dim))
-        self.cond_w_pdgids  = nn.Parameter(torch.empty(self.npdgids, 2, h_dim, in_dim))
-        self.cond_bi_pdgids = nn.Parameter(torch.empty(self.npdgids, h_dim))
-        self.cond_bo_pdgids = nn.Parameter(torch.empty(self.npdgids, in_dim))
+        self.cond_w_mask    = nn.Parameter(torch.empty(nvtypes, 2, h_dim, in_dim))
+        self.cond_bi_mask   = nn.Parameter(torch.empty(nvtypes, h_dim))
+        self.cond_bo_mask   = nn.Parameter(torch.empty(nvtypes, in_dim))
+        self.cond_w_types   = nn.Parameter(torch.empty(ntypes,  2, h_dim, in_dim))
+        self.cond_bi_types  = nn.Parameter(torch.empty(ntypes,  h_dim))
+        self.cond_bo_types  = nn.Parameter(torch.empty(ntypes,  in_dim))
+        self.cond_w_pdgids  = nn.Parameter(torch.empty(npdgids, 2, h_dim, in_dim))
+        self.cond_bi_pdgids = nn.Parameter(torch.empty(npdgids, h_dim))
+        self.cond_bo_pdgids = nn.Parameter(torch.empty(npdgids, in_dim))
 
         for p in (
             self.cond_w_mask, self.cond_bi_mask, self.cond_bo_mask,
@@ -164,13 +164,9 @@ class CFMTrafo_x(nn.Module):
         ):
             nn.init.xavier_normal_(p, gain=xavier_gain)
 
-        # Time-embedding frequencies (non-trainable; kept as a Parameter
-        # for state_dict compatibility).
-        self.freqs = nn.Parameter(
-            self.h_dim * 1e-4 ** (torch.arange(self.h_dim) / self.h_dim),
-            requires_grad=False,
-        )
-        self.register_buffer("mask_freqs", torch.arange(self.h_dim) % 2)
+        # Vaswani-style sinusoidal time embedding, freqs scaled by h_dim.
+        self.register_buffer("freqs", h_dim * 1e-4 ** (torch.arange(h_dim) / h_dim))
+        self.register_buffer("mask_freqs", torch.arange(h_dim) % 2)
 
         self._register_load_state_dict_pre_hook(self._legacy_param_rename)
 
