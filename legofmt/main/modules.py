@@ -129,6 +129,8 @@ class LEGOLtng(ltng.LightningModule):
                 )
             self.max_seq_l = model_conf["model_args"]["max_seq_l"]
             self.register_buffer("pdgids_template", model_conf["pdgids"])
+            if any(k.startswith("vf.project_in.") for k in state_dict):
+                model_conf["model_args"]["dim_in_out"] = model_conf["model_args"]["h_dim"]
         self.t_dist = model_conf.get("t_dist", "uniform")
         self.t_dist_scale = model_conf.get("t_dist_scale", 1.4)
         _MANIFOLD_NS = {
@@ -143,6 +145,8 @@ class LEGOLtng(ltng.LightningModule):
         self.pdgid_is_idx = model_conf.get("pdgid_is_idx", False)
         self.loss_sc_fac = model_conf.get("loss_sc", 0.0)
         cond_cube = model_conf.get("cond_cube", False)
+        if state_dict is None:
+            model_conf["model_args"].setdefault("ntypes", 4)
         self.model = ProjectModel(
             CFMTrafo_x(**model_conf.get("model_args")),
             self.manifold,

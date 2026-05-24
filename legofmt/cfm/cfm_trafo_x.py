@@ -18,6 +18,7 @@ class CFMTrafo_x(nn.Module):
         nlayers: int = 4,
         xavier_gain: float = 1.0,
         npdgids: int = 1,
+        dim_in_out: int | None = None,
         **kwargs: dict,
     ) -> None:
         super().__init__()
@@ -25,12 +26,12 @@ class CFMTrafo_x(nn.Module):
         self.in_dim = in_dim
         self.max_seq_l = max_seq_l
         self.nvtypes = nvtypes
-        self.ntypes = ntypes
+        self.ntypes = ntypes if ntypes is not None else max_seq_l
         self.npdgids = npdgids
 
         self.vf = ContinuousTransformerWrapper(
-            # dim_in=h_dim,
-            # dim_out=h_dim,
+            dim_in=dim_in_out,
+            dim_out=dim_in_out,
             max_seq_len=max_seq_l,
             emb_dropout=dropout,
             use_abs_pos_emb=False,
@@ -84,13 +85,15 @@ class CFMTrafo_x(nn.Module):
 
         tf = t.unsqueeze(-1) * self.freqs
         embd_t = torch.where(self.mask_freqs.bool(), tf.sin(), tf.cos())
-        embd = ((torch.einsum("ijl, ijkl -> ijk", states_mask, 
-            self.l_mask_[mi, 0].view(s4) + self.l_types_[ti, 0] + self.l_pdgids_[pi, 0].view(s4)) 
-            + (self.b_mask_[mi].view(s3) + self.b_types_[ti].view(s3) + self.b_pdgids_[pi].view(s3))) / 3 
+        embd = ((torch.einsum("ijl, ijkl -> ijk", states_mask,
+            self.l_mask_[mi, 0].view(s4) + self.l_types_[ti, 0] + self.l_pdgids_[pi, 0].view(s4))
+            + (self.b_mask_[mi].view(s3) + self.b_types_[ti].view(s3) + self.b_pdgids_[pi].view(s3))) / 3
             + embd_t)
+        embd = self.vf.project_in(embd)
         if self.training:
             embd = self.vf.emb_dropout(embd)
         x = self.vf.attn_layers(embd, mask=attn_mask, condition=embd_t)
+        x = self.vf.project_out(x)
         return (mask == 1).unsqueeze(-1) * (torch.einsum("ijk, ijkl -> ijl", x,
-            self.l_mask_[mi, 1].view(s4) + self.l_types_[ti, 1] + self.l_pdgids_[pi, 1].view(s4)) 
+            self.l_mask_[mi, 1].view(s4) + self.l_types_[ti, 1] + self.l_pdgids_[pi, 1].view(s4))
             + self.bo_mask_[mi].view(so) + self.bo_types_[ti].view(so) + self.bo_pdgids_[pi].view(so)) / 3

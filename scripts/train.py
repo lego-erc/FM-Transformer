@@ -13,9 +13,29 @@ import schedulefree
 import torch
 from legofmt.main.modules import LEGOLtng
 
+# import torch._inductor.config as ic                      
+# ic.coordinate_descent_tuning = True
+# ic.coordinate_descent_check_all_directions = True                                                        
+# ic.max_autotune_gemm = True 
+
+from pytorch_optimizer import AdEMAMix 
+from pytorch_optimizer import Muon                                                                                                         
+import torch.optim.lr_scheduler as lrs         
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR                                                                                                                                                                                                                                 
+
 d_dtype = torch.float32
 torch.set_default_dtype(d_dtype)
-torch.set_float32_matmul_precision("medium")
+torch.set_float32_matmul_precision("medium")                                                                                              
+                                                                                                                                             
+def muon_factory(params, **kwargs):                                                                                                                           
+    params = list(params)                                                                                                                  
+    muon_p = [p for p in params if p.ndim >= 2]                                                                                            
+    rest_p = [p for p in params if p.ndim < 2]                                                                                             
+    return Muon(                                                                                                                           
+        [{"params": muon_p, "use_muon": True},
+        {"params": rest_p, "use_muon": False}],                                                                                           
+        **kwargs,                                                                                                                        
+    )            
 
 epochs = 10
 prec = 32
