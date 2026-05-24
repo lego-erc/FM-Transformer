@@ -5,6 +5,7 @@ from ..main.modules import LEGOLtng
 from ..multiplicity.model import MultModel
 from ..geometry.energy_proj import EnergyProjections
 from ..geometry.raytracing_proj import CubeTrace
+from ..data.struct import _F
 
 
 class GenerateOut(torch.nn.Module):
@@ -36,7 +37,8 @@ class GenerateOut(torch.nn.Module):
     def proj_ray_pass_to_model(self, cond: torch.Tensor, prepped: bool = False):
         cond_model = cond.clone()
         if not prepped:
-            cond_model[..., 1:7] = self.proj_ray(cond_model[..., 1:7])
+            mi = _F(cond_model).model_in
+            mi.copy_(self.proj_ray(mi))
         batch = self.gen_batch(cond_model)
         sols, mask, attn_mask = self.model(batch)
         sols[..., -1] = torch.cat([sols.new_zeros(1), self.pdgids.to(sols.dtype)])[sols[..., -1].long()]
@@ -84,19 +86,11 @@ class GenerateOut(torch.nn.Module):
         cond = torch.cat((d, cc, pdgids_b), dim=-1)
 
         sols, _, _ = self.proj_ray_pass_to_model(cond, prepped=False)
-
+        s = _F(sols)
         return {
-            "per_event": {
-                "E_dep": sols[:, 1, 1],
-                "Density": sols[:, 0, 1],
-            },
-            "per_particle": {
-                "Incoming": sols[:, 2:3],
-                "Outgoing": sols[:, 3:],
-            },
-            "per_voxel": {
-                "E_dep": sols.new_empty(sols.shape[0], 0, 4),
-            },
+            "per_event": {"E_dep": s.edep, "Density": s.d},
+            "per_particle": {"Incoming": s.in_p, "Outgoing": s.out_p},
+            "per_voxel": {"E_dep": sols.new_empty(sols.shape[0], 0, 4)},
         }
 
     def gen_batch(self, cond: torch.Tensor):
@@ -129,8 +123,8 @@ class GenerateOut(torch.nn.Module):
         )
 
         attn_mask = torch.cat((torch.ones_like(attn_mask[:, :3]), attn_mask), dim=1)
-        mask = attn_mask.clone().long().unsqueeze(2)
-        mask[:, [0, 2], 0] = 0 #Conditions
+        mask = attn_mask.clone().long()
+        mask[:, [0, 2]] = 0 #Conditions
         cond_fm[:, 0, 1] = cond[:, 0, 0] #Density
-        cond_fm[:, :2, 2:-1] = 1
+        _F(cond_fm).non_p[..., 2:-1] = 1
         return cond_fm, mask, attn_mask

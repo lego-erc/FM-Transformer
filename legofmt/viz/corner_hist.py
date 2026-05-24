@@ -10,6 +10,7 @@ from matplotlib.lines import Line2D
 from ..main.modules import LEGOLtng
 from ..geometry.path_sample_mult import ProductManifold
 from ..geometry.vmf_sampling import VMF
+from ..data.struct import _F
 from .plot_geom import PlotGeom
 
 plt.rcParams.update(
@@ -140,16 +141,16 @@ class CornerHist:
             is_8d_truth = False
 
         if truth is not None:
-            truth_e_dep = truth[:, 1, 1] if is_8d_truth else truth[:, 1, 0]
+            truth_e_dep = _F(truth).edep if is_8d_truth else truth[:, 1, 0]
             sols = sols[:, :truth.shape[1]]
         else:
             truth_e_dep = None
 
-        e_dep = sols[:, 1, 1] if is_8d else sols[:, 1, 0]
+        e_dep = _F(sols).edep if is_8d else sols[:, 1, 0]
 
-        sols_cc = sols[..., 1:7] if is_8d else sols
-        truth_cc = (truth[..., 1:7] if is_8d_truth else truth) if truth is not None else None
-        incoming = sols_cc[:, 2:3] if self.cube else None
+        sols_cc = _F(sols).model_in if is_8d else sols
+        truth_cc = (_F(truth).model_in if is_8d_truth else truth) if truth is not None else None
+        incoming = _F(sols_cc).in_p if self.cube else None
 
         return self.arrange_plots_(
             self.fig_sup,
@@ -165,14 +166,11 @@ class CornerHist:
             sols, mask, attn_mask = self.model(batch)
 
         is_8d = sols.shape[-1] == 8
-        e_dep = sols[:, 1, 1] if is_8d else sols[:, 1, 0]
+        e_dep = _F(sols).edep if is_8d else sols[:, 1, 0]
+        sols_cc = _F(sols).model_in if is_8d else sols
 
-        sols_cc = sols[..., 1:7] if is_8d else sols
-
-        sols_true = (
-            batch[0] if batch[0].shape[-1] == 6 else batch[0][..., -7:-1]
-        )
-
+        truth = _F(batch[0])
+        sols_true = batch[0] if batch[0].shape[-1] == 6 else truth.model_in
         sols_cc = sols_cc[:, : sols_true.shape[1]]
         sols_true = torch.where(torch.isnan(sols_cc), torch.nan, sols_true)
 
@@ -181,8 +179,8 @@ class CornerHist:
             self.fig,
             sols_cc,
             sols_true,
-            incoming=(batch[0][:, 2:3, -7:-1] if self.cube else None),
-            data_add=(e_dep, batch[0][:, 1, 1]),
+            incoming=(truth.in_cc if self.cube else None),
+            data_add=(e_dep, truth.edep),
         )
 
     def make_fig(self, title=None, cube=False, corner_=True):
@@ -227,7 +225,8 @@ class CornerHist:
 
     @torch.no_grad()
     def make_corner(self, data_cc, fig, color="#FF9D00", data_add=None):
-        data_out = data_cc[:, 3:].reshape(-1, 6)
+        v = _F(data_cc)
+        data_out = v.out_p.reshape(-1, 6)
         en_in = data_cc[:, 2, :3].norm(dim=-1)
         data = self.vmf_utils.to_sph(self.disp_man.projx(data_out)).cpu().numpy()
         labels = [
@@ -243,7 +242,7 @@ class CornerHist:
                 r"$-\log \frac{\| \vec{p} \|_2}{\| \vec{p}_\mathrm{incoming} \|_2}$"
             ]
             norm_fac = torch.log(en_in / self.cutoff_en).view(-1, 1)
-            data_en = (data_cc[:, 3: , :3].norm(dim=-1) - 1).clamp_min(0.) / norm_fac
+            data_en = (v.out_p[..., :3].norm(dim=-1) - 1).clamp_min(0.) / norm_fac
             range_ += [(-0.2, 1.2)]
             data = np.concatenate([data, data_en.reshape(-1, 1).cpu().numpy()], axis=-1)
         if self.plot_edep is not False:

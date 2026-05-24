@@ -37,17 +37,6 @@ def muon_factory(params, **kwargs):
         **kwargs,                                                                                                                        
     )            
 
-def warmup_cosine(opt, total_steps, warmup_frac=0.05, eta_min=1e-6):                                                                       
-    n_warm = max(1, int(warmup_frac * total_steps))                                                                                        
-    return SequentialLR(                                                                                                                   
-        opt,                                                                                                                             
-        schedulers=[                                                                                                                       
-            LinearLR(opt, start_factor=1e-3, end_factor=1.0, total_iters=n_warm),                                                          
-            CosineAnnealingLR(opt, T_max=total_steps - n_warm, eta_min=eta_min),
-        ],                                                                                                                                 
-        milestones=[n_warm],                                                                                                             
-    )  
-
 epochs = 10
 prec = 32
 
@@ -139,7 +128,7 @@ config = {
         },
     },
       "opt_conf": {                                                                                                                              
-      "opt": muon_factory,                                                                                                                        
+      "opt": "muon",                                                                                                                        
       "lr": 1e-2,                # Keller's recipe                                                                                           
       "momentum": 0.95,                                                                                                                      
       "nesterov": True,                                                                                                                      
@@ -151,7 +140,7 @@ config = {
       "adamw_wd": 1e-2,                                                                                                                      
       "adamw_eps": 1e-8,                                                                     
     "scheduler": {
-        "cls": warmup_cosine,                                                                                                                  
+        "cls": "warmup_cosine",                                                                                                                  
         "total_steps": total_steps,                                                                                                            
         "warmup_frac": 0.05,
         "eta_min": 1e-6,                                                                                                                       

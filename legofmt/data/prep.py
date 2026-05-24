@@ -6,6 +6,7 @@ from flow_matching.utils.manifolds import Euclidean, Sphere
 from ..geometry.energy_proj import EnergyProjections
 from ..geometry.raytracing_proj import CubeTrace
 from ..geometry.path_sample_mult import ProductPathSampler, ProductManifold
+from .struct import _F
 
 class DataPrep:
     def __init__(self, config):
@@ -48,7 +49,7 @@ class DataPrep:
         density = torch.ones_like(cc_ext[:, :1])
         density[..., self.slc] = data_add.get("Density").view_as(density[..., self.slc])
         target = torch.cat((density, e_dep, cc_ext), dim=1).nan_to_num()
-        target[..., :2, -1] = 0
+        _F(target).non_p[..., -1] = 0
         mask = torch.cat((torch.zeros_like(mask[:, :1]), 
                           torch.ones_like(mask[:, :1]), mask), dim=1)
         attn_mask = torch.cat((torch.ones_like(attn_mask[:, :2]), attn_mask), dim=1)
