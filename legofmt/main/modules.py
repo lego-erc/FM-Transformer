@@ -131,6 +131,10 @@ class LEGOLtng(ltng.LightningModule):
             self.register_buffer("pdgids_template", model_conf["pdgids"])
             if any(k.startswith("vf.project_in.") for k in state_dict):
                 model_conf["model_args"]["dim_in_out"] = model_conf["model_args"]["h_dim"]
+            if "l_mask_" in state_dict:
+                model_conf["model_args"].setdefault("nvtypes", state_dict["l_mask_"].shape[0])
+            if "l_types_" in state_dict:
+                model_conf["model_args"].setdefault("ntypes", state_dict["l_types_"].shape[0])
         self.t_dist = model_conf.get("t_dist", "uniform")
         self.t_dist_scale = model_conf.get("t_dist_scale", 1.4)
         _MANIFOLD_NS = {
