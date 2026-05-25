@@ -160,7 +160,7 @@ class LEGOLtng(ltng.LightningModule):
         self.gen_base = GenerateBase(config.copy())
         self.ppa = CubeTrace()
 
-        self.opt, self._lr_sched = build_optimizer(self.model.parameters(), config["opt_conf"])
+        self.opt, self._lr_sched = build_optimizer(self.model.parameters(), config.get("opt_conf"))
         self._opt_is_sf = hasattr(self.opt, "train") and callable(getattr(self.opt, "train", None))
 
         self.dl_conf = config.get("dl_conf")
