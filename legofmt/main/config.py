@@ -119,11 +119,15 @@ class ResolvedLEGOConfig:
         model_args (dict): keyword arguments to splat into
             :class:`~legofmt.cfm.cfm_trafo_x.CFMTrafo_x`.
         t_dist (str): name of the time-sampling distribution
-            (e.g. ``"uniform"``, ``"sd3"``).
+            (e.g. ``"uniform"``, ``"sd3"``, ``"sd3_grid"``).
         t_dist_scale (float): scale parameter for the time distribution.
         ot_coupling (bool): if ``True``, use optimal-transport coupling
             during training. Requires ``torch_lap_cuda_lib`` to be
             importable; :class:`LEGOLtng` validates this at construction.
+        ot_e_only (bool): if ``True``, the LAP cost uses pairwise ``|mom|``
+            magnitude differences rather than 6-D ``cdist``. Gives strict
+            energy-ordered pairing. Ignored when :attr:`ot_coupling` is
+            ``False``.
         proj_en_out (bool): if ``True``, apply energy projection to model
             outputs.
         pdgid_is_idx (bool): if ``True``, treat the PDG-id field of inputs
@@ -154,6 +158,7 @@ class ResolvedLEGOConfig:
     t_dist: str
     t_dist_scale: float
     ot_coupling: bool
+    ot_e_only: bool
     proj_en_out: bool
     pdgid_is_idx: bool
     loss_sc_fac: float
@@ -366,6 +371,7 @@ def _build_resolved(
         t_dist=model_conf.get("t_dist", "uniform"),
         t_dist_scale=model_conf.get("t_dist_scale", 1.4),
         ot_coupling=model_conf.get("ot_coupling", False),
+        ot_e_only=model_conf.get("ot_e_only", False),
         proj_en_out=model_conf.get("proj_en_out", False),
         pdgid_is_idx=model_conf.get("pdgid_is_idx", False),
         loss_sc_fac=model_conf.get("loss_sc", 0.0),

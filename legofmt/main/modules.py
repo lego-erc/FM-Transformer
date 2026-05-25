@@ -135,7 +135,12 @@ class LEGOLtng(ltng.LightningModule):
             base = base.where(ds_t.am.full.unsqueeze(-1), ds_t.f.model_in)
             inf_cond = ds_t.am.out_p.unsqueeze(-1).logical_xor(ds_t.am.out_p.unsqueeze(-2))
             out = _F(base).out_p
-            cost = torch.cdist(ds_t.f.out_cc, out) + inf_cond * 1e6
+            if self.rc.ot_e_only:
+                nt = ds_t.f.out_cc[..., :3].norm(dim=-1)[..., None]
+                nb = out[..., :3].norm(dim=-1)[..., None, :]
+                cost = (nt - nb).abs() + inf_cond * 1e6
+            else:
+                cost = torch.cdist(ds_t.f.out_cc, out) + inf_cond * 1e6
             assign = slap(cost, cost.device).long()
             out[:] = torch.take_along_dim(out, assign.unsqueeze(-1), dim=1)
         return self.gen_base.insert_add(base)  # E_dep
@@ -149,6 +154,12 @@ class LEGOLtng(ltng.LightningModule):
             elif self.rc.t_dist == "sd3":
                 u = torch.rand_like(ds_t.f.d)
                 t = 1 - u + self.rc.t_dist_scale / 3 * ((torch.pi / 2 * u).sin()**2 - u)
+            elif self.rc.t_dist == "sd3_grid":
+                u = torch.rand_like(ds_t.f.d)
+                t_sd3 = 1 - u + self.rc.t_dist_scale / 3 * ((torch.pi / 2 * u).sin()**2 - u)
+                idx = torch.multinomial(u.new_tensor([.1, .2, .3, .4]), u.numel(), replacement=True).view_as(u)
+                t_grid = (u.new_tensor([0., 0.4, 0.8, 0.9])[idx] + 0.02 * torch.randn_like(u)).clamp(0, 1)
+                t = torch.where(torch.rand_like(u) < 0.5, t_grid, t_sd3)
             elif self.rc.t_dist == "uniform":
                 t = torch.rand_like(ds_t.f.d)
             ps_ = self.ps.sample(base, ds_t.f.model_in, t)
@@ -159,12 +170,13 @@ class LEGOLtng(ltng.LightningModule):
         )
         am = ds_t.am.full.unsqueeze(-1)
         if self.rc.loss_sc_fac > 0:
-            pred_sc = ((1 - ps_.t).unsqueeze(-1) * v_out + ps_.x_t) * am
-            loss_sc = self.loss_fn(pred_sc[..., :3], ds_t.f.mom * am)
+            pred = ((1 - ps_.t)[..., None] * v_out[..., :3] + ps_.x_t[..., :3]).norm(dim=-1)
+            m = ds_t.am.full
+            loss_sc = self.loss_fn(pred * m, ds_t.f.mom.norm(dim=-1) * m)
         else:
             loss_sc = 0.0
         sq = (v_out - ps_.dx_t)**2
-        loss_v = sq[:, 1].mean() + (sq[:, 3:] * (ds_t.m.out_p == 1).unsqueeze(-1)).mean()
+        loss_v = sq[:, 1, 0].mean() + (sq[:, 3:] * (ds_t.m.out_p == 1).unsqueeze(-1)).mean()
         return loss_v + self.rc.loss_sc_fac * loss_sc
 
     def training_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
@@ -185,13 +197,11 @@ class LEGOLtng(ltng.LightningModule):
             )
         return loss
 
-    @torch.no_grad()
     def configure_optimizers(self):
         if self._lr_sched is None:
             return self.opt
         return {"optimizer": self.opt, "lr_scheduler": self._lr_sched}
 
-    @torch.no_grad()
     def train_dataloader(self) -> DataLoader:
         num_workers = self.rc.dl_conf.get("num_workers", 4)
         dataset_train = LEGODataset(**self.rc.dl_conf.get("lds_args"))
