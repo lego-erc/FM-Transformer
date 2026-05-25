@@ -80,7 +80,6 @@ class LEGOLtng(ltng.LightningModule):
                 "is_filtered": True
             },
             "base_conf": {
-                "base_range": 1.,
                 "kappa": torch.tensor(40.),
                 "bs_frac": 0.,
                 "base_dist": "poles",
@@ -109,7 +108,6 @@ class LEGOLtng(ltng.LightningModule):
         model_conf = config.get("model_conf")
         dpath = config.get("dl_conf").get("lds_args").get("data")
         if dpath[-3:] != ".pt" and state_dict is None:
-            config["dl_conf"]["data_path"] = dpath + "/data_prepped.pt"
             with open(dpath + "/meta.json") as f:
                 meta_dict = json.load(f)
                 self.max_seq_l = meta_dict["ntokens"]
@@ -133,6 +131,10 @@ class LEGOLtng(ltng.LightningModule):
             self.register_buffer("pdgids_template", model_conf["pdgids"])
             if any(k.startswith("vf.project_in.") for k in state_dict):
                 model_conf["model_args"]["dim_in_out"] = model_conf["model_args"]["h_dim"]
+            if "l_mask_" in state_dict:
+                model_conf["model_args"].setdefault("nvtypes", state_dict["l_mask_"].shape[0])
+            if "l_types_" in state_dict:
+                model_conf["model_args"].setdefault("ntypes", state_dict["l_types_"].shape[0])
         self.t_dist = model_conf.get("t_dist", "uniform")
         self.t_dist_scale = model_conf.get("t_dist_scale", 1.4)
         _MANIFOLD_NS = {
@@ -144,7 +146,6 @@ class LEGOLtng(ltng.LightningModule):
             model_conf.get("manifold"), {"__builtins__": {}}, _MANIFOLD_NS
         )
         self.ot_coupling = model_conf.get("ot_coupling", False)
-        self.proj_en_out = model_conf.get("proj_en_out", False)
         self.pdgid_is_idx = model_conf.get("pdgid_is_idx", False)
         self.loss_sc_fac = model_conf.get("loss_sc", 0.0)
         cond_cube = model_conf.get("cond_cube", False)
@@ -159,7 +160,7 @@ class LEGOLtng(ltng.LightningModule):
         self.gen_base = GenerateBase(config.copy())
         self.ppa = CubeTrace()
 
-        self.opt, self._lr_sched = build_optimizer(self.model.parameters(), config["opt_conf"])
+        self.opt, self._lr_sched = build_optimizer(self.model.parameters(), config.get("opt_conf"))
         self._opt_is_sf = hasattr(self.opt, "train") and callable(getattr(self.opt, "train", None))
 
         self.dl_conf = config.get("dl_conf")

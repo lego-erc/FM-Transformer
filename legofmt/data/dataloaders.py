@@ -8,7 +8,7 @@ from .struct import DataStruct, _F
 class GetLEGOData:
     def __init__(
         self,
-        cutoff_mev=0.0,
+        cutoff_mev=10.0,
         min_particles=0,
         device="cpu",
         is_filtered=False,

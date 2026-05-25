@@ -16,7 +16,6 @@ class DataPrep:
         self.manifold = eval(model_conf.get("manifold"))
         self.proj_ray = model_conf.get("proj_ray", True)
         self.proj_en = model_conf.get("proj_en", False)
-        self.proj_en_out = model_conf.get("proj_en_out", False)
         self.pen = EnergyProjections(self.proj_en)
         self.ppa = CubeTrace()
 
