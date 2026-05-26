@@ -278,14 +278,11 @@ class LEGOLtng(ltng.LightningModule):
         if time_grid is None:
             time_grid = x_init.new_tensor([1.0, 0.0] if reverse else [0.0, 1.0])
 
-        use_2step = (
-            method == "midpoint" and step_size == 0.5 and not return_intermediates
-        )
-        if use_2step and not explicit_grid:
+        if method == "midpoint" and not explicit_grid:
             time_grid = x_init.new_tensor([1., 0.5, 0.] if reverse else [0., 0.5, 1.])
 
         def _sample(x_init, mask, attn_mask, pdgids_idx):
-            if use_2step:
+            if method == "midpoint":
                 return self._midpoint_steps(
                     x_init, time_grid,
                     mask=mask, attn_mask=attn_mask,
@@ -332,13 +329,10 @@ class LEGOLtng(ltng.LightningModule):
             sols = base.masked_fill(~am, torch.nan)
         else:
             step_size = cfg.get("step_size", 0.04)
-            time_grid = (
+            time_grid = cfg.get("time_grid", 
                 torch.arange(
                     0, 1 + step_size, step=step_size, device=self.device
-                ).clamp_max(1)
-                if cfg.get("return_timesteps", False)
-                else None
-            )
+                ).clamp_max(1))
             sols = self.solve(
                 ds_t, x_init=base,
                 split_size=cfg.get("split_size"),
