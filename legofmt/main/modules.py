@@ -168,11 +168,10 @@ class LEGOLtng(ltng.LightningModule):
             mask=ds_t.m.full, attn_mask=ds_t.am.full,
             types=self.types_embd, pdgids=pdgid_idx,
         )
-        am = ds_t.am.full.unsqueeze(-1)
         if self.rc.loss_sc_fac > 0:
+            am = ds_t.am.full
             pred = ((1 - ps_.t)[..., None] * v_out[..., :3] + ps_.x_t[..., :3]).norm(dim=-1)
-            m = ds_t.am.full
-            loss_sc = self.loss_fn(pred * m, ds_t.f.mom.norm(dim=-1) * m)
+            loss_sc = self.loss_fn(pred * am, ds_t.f.mom.norm(dim=-1) * am)
         else:
             loss_sc = 0.0
         sq = (v_out - ps_.dx_t)**2
@@ -275,17 +274,20 @@ class LEGOLtng(ltng.LightningModule):
 
         if x_init is None:
             x_init = self.gen_base_wrapper(ds_t)
+        explicit_grid = time_grid is not None
         if time_grid is None:
             time_grid = x_init.new_tensor([1.0, 0.0] if reverse else [0.0, 1.0])
 
         use_2step = (
             method == "midpoint" and step_size == 0.5 and not return_intermediates
         )
+        if use_2step and not explicit_grid:
+            time_grid = x_init.new_tensor([1., 0.5, 0.] if reverse else [0., 0.5, 1.])
 
         def _sample(x_init, mask, attn_mask, pdgids_idx):
             if use_2step:
-                return self._midpoint_2step(
-                    x_init,
+                return self._midpoint_steps(
+                    x_init, time_grid,
                     mask=mask, attn_mask=attn_mask,
                     types=self.types_embd, pdgids=pdgids_idx,
                 )
@@ -300,12 +302,12 @@ class LEGOLtng(ltng.LightningModule):
             split_size=split_size, cat_dim=-3,
         )
 
-    def _midpoint_2step(self, x: Tensor, **extras) -> Tensor:
-        for t0 in (0.0, 0.5):
-            t = x.new_tensor(t0)
-            v1 = self.model(x, t, **extras)
-            v2 = self.model(x + 0.25 * v1, t + 0.25, **extras)
-            x = x + 0.5 * v2
+    def _midpoint_steps(self, x: Tensor, time_grid: Tensor, **extras) -> Tensor:
+        for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
+            dt = t_b - t_a
+            v1 = self.model(x, t_a, **extras)
+            v2 = self.model(x + dt / 2 * v1, t_a + dt / 2, **extras)
+            x = x + dt * v2
         return x
 
     @torch.no_grad()
