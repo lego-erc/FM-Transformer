@@ -9,7 +9,7 @@ class GenerateBase:
         self.geom_trafos = GeomTrafos()
         self.cutoff_mev = config["dl_conf"]["lds_args"].get("cutoff_mev", 10.0)
         base_conf = config.get("base_conf")
-        base_dist = base_conf.get("base_dist", "iso")
+        base_dist = base_conf.get("base_dist", "poles")
         self.tanh_theta = base_conf.get("tanh_theta", False)
         self.kappa = base_conf.get("kappa", torch.tensor(10.0))
         self.e_dep_max = base_conf.get("e_dep_max", 1.)

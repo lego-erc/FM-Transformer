@@ -133,8 +133,11 @@ class ResolvedLEGOConfig:
             onto the cube before each forward pass.
         dl_conf (dict): dataloader sub-config, passed through to the
             dataset constructor.
-        opt_conf (dict): optimizer sub-config, consumed by
-            :func:`~legofmt.main.optimizers.build_optimizer`.
+        opt_conf (dict or None): optimizer sub-config, consumed by
+            :func:`~legofmt.main.optimizers.build_optimizer`. ``None`` for
+            legacy checkpoints that did not serialise an ``"opt_conf"`` key;
+            :func:`build_optimizer` handles the ``None`` case by returning
+            ``(None, None)`` (no optimizer constructed, fine for inference).
         odeint_conf (dict): ODE-solver sub-config used during sampling.
         config (dict): snapshot of the post-resolution inner config
             (including any field migrations applied during resolution).
@@ -160,7 +163,7 @@ class ResolvedLEGOConfig:
     cond_cube: bool
 
     dl_conf: dict
-    opt_conf: dict
+    opt_conf: dict | None
     odeint_conf: dict
     config: dict
 
@@ -273,7 +276,7 @@ def _resolve_from_checkpoint(config: dict, state_dict: dict) -> ResolvedLEGOConf
 
     Reads ``max_seq_l`` and ``pdgids`` from the serialized config and
     applies any field migrations required by older checkpoint formats
-    (see :func:`_apply_legacy_projection_in_out` and the
+    (see :func:`_apply_legacy_state_dict_compat` and the
     ``ntokens`` -> ``max_seq_l`` rename below).
 
     Args:
@@ -295,7 +298,7 @@ def _resolve_from_checkpoint(config: dict, state_dict: dict) -> ResolvedLEGOConf
     if "ntokens" in model_args:
         model_args["max_seq_l"] = model_args.pop("ntokens")
 
-    _apply_legacy_projection_in_out(model_args, state_dict)
+    _apply_legacy_state_dict_compat(model_args, state_dict)
 
     max_seq_l = model_args["max_seq_l"]
     pdgids = model_conf["pdgids"]
@@ -309,17 +312,29 @@ def _resolve_from_checkpoint(config: dict, state_dict: dict) -> ResolvedLEGOConf
     )
 
 
-def _apply_legacy_projection_in_out(model_args: dict, state_dict: dict) -> None:
-    r"""Re-enables ``project_in`` / ``project_out`` layers for legacy checkpoints.
+def _apply_legacy_state_dict_compat(model_args: dict, state_dict: dict) -> None:
+    r"""Patches ``model_args`` to match shape conventions used by legacy checkpoints.
 
-    Older checkpoints were saved with ``vf.project_in.*`` and
-    ``vf.project_out.*`` linear layers in the state dict. The current
-    :class:`~legofmt.cfm.cfm_trafo_x.CFMTrafo_x` only constructs those
-    layers when its :attr:`dim_in_out` argument is non-``None``. When such
-    keys are detected in the incoming :attr:`state_dict`, this function
-    forces ``model_args["dim_in_out"] = model_args["h_dim"]`` so that
-    :class:`CFMTrafo_x` rebuilds matching layers and the subsequent
-    :meth:`~torch.nn.Module.load_state_dict` succeeds.
+    Applied before :class:`~legofmt.cfm.cfm_trafo_x.CFMTrafo_x` is instantiated
+    so that the freshly-built module matches the parameter shapes carried by
+    :attr:`state_dict` and the subsequent
+    :meth:`~torch.nn.Module.load_state_dict` succeeds. Each compat clause uses
+    :meth:`dict.setdefault`, so explicit values in the incoming
+    :attr:`model_args` always win.
+
+    Currently handled:
+
+    - **project_in / project_out layers.** Older checkpoints were saved with
+      ``vf.project_in.*`` and ``vf.project_out.*`` linear layers in the state
+      dict. The current :class:`CFMTrafo_x` only constructs those layers when
+      its :attr:`dim_in_out` argument is non-``None``; when such keys are
+      detected, this function forces
+      ``model_args["dim_in_out"] = model_args["h_dim"]``.
+    - **nvtypes / ntypes embedding-table sizes.** Older checkpoints were
+      trained with different ``nvtypes`` / ``ntypes`` than the current
+      :class:`CFMTrafo_x` defaults. The sizes are read directly from the
+      leading dimension of ``l_mask_`` and ``l_types_`` in the state dict
+      and applied via :meth:`dict.setdefault`.
 
     Args:
         model_args (dict): the ``model_args`` sub-dict on the local config
@@ -328,6 +343,10 @@ def _apply_legacy_projection_in_out(model_args: dict, state_dict: dict) -> None:
     """
     if any(k.startswith("vf.project_in.") for k in state_dict):
         model_args["dim_in_out"] = model_args["h_dim"]
+    if "l_mask_" in state_dict:
+        model_args.setdefault("nvtypes", state_dict["l_mask_"].shape[0])
+    if "l_types_" in state_dict:
+        model_args.setdefault("ntypes", state_dict["l_types_"].shape[0])
 
 
 def _build_resolved(
@@ -371,7 +390,7 @@ def _build_resolved(
         loss_sc_fac=model_conf.get("loss_sc", 0.0),
         cond_cube=model_conf.get("cond_cube", False),
         dl_conf=config["dl_conf"],
-        opt_conf=config["opt_conf"],
+        opt_conf=config.get("opt_conf"),
         odeint_conf=config.get("odeint_conf", {}),
         config=config,
         state_dict=state_dict,

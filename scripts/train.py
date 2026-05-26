@@ -67,7 +67,6 @@ config = {
         "dtype": d_dtype,
     },
     "base_conf": {
-        "base_range": 3.4,
         "kappa": torch.tensor(8.),
         "bs_frac": 0.,
         "base_dist": "poles",
@@ -116,7 +115,7 @@ config = {
         "warmup_steps": 0,
         "ce_focal_gamma": 0.,
         "post_emb_norm": False,
-        "abs_pos_emb": False,
+        "use_abs_pos_emb": False,
         "model_args": {
             "ff_swish": True,
             "ff_glu": True,
