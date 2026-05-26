@@ -1,11 +1,9 @@
 import torch
 from torch import Tensor
 
-from flow_matching.utils.manifolds import Euclidean, Sphere
-
 from ..geometry.energy_proj import EnergyProjections
 from ..geometry.raytracing_proj import CubeTrace
-from ..geometry.path_sample_mult import ProductPathSampler, ProductManifold
+from ..main.config import build_manifold
 from .struct import _F
 
 class DataPrep:
@@ -13,7 +11,8 @@ class DataPrep:
         config = config.get("config", config)
         model_conf = config.get("model_conf").copy()
         self.in_dim = model_conf.get("model_args").get("in_dim")
-        self.manifold = eval(model_conf.get("manifold"))
+        self.slc = (8 - self.in_dim) // 2
+        self.manifold = build_manifold(model_conf.get("manifold"))
         self.proj_ray = model_conf.get("proj_ray", True)
         self.proj_en = model_conf.get("proj_en", False)
         self.pen = EnergyProjections(self.proj_en)
@@ -25,7 +24,6 @@ class DataPrep:
     @torch.no_grad()
     def prep(self, batch: tuple) -> Tensor:
         cc_ext, mask, attn_mask, data_add = batch
-        self.slc = (cc_ext.shape[-1] - self.in_dim) // 2
         cc_ext[..., self.slc:-self.slc] = self.cc_trafo(cc_ext[..., self.slc:-self.slc])
         return self.format_add((cc_ext, mask, attn_mask, data_add))
 

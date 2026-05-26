@@ -3,7 +3,6 @@ import torch.nn.functional as F
 
 from ..main.modules import LEGOLtng
 from ..multiplicity.model import MultModel
-from ..geometry.energy_proj import EnergyProjections
 from ..geometry.raytracing_proj import CubeTrace
 from ..data.struct import _F
 
@@ -13,7 +12,7 @@ class GenerateOut(torch.nn.Module):
         super().__init__()
         flow_conf = torch.load(flow_conf_path, map_location=device, weights_only=False)
         self.model = LEGOLtng(flow_conf).to(device)
-        self.model.pdgid_is_idx = True
+        object.__setattr__(self.model.rc, "pdgid_is_idx", True)
 
         mult_conf = torch.load(mult_conf_path, map_location=device, weights_only=False)
         self.gen_mult = MultModel(mult_conf).to(device)
@@ -22,7 +21,7 @@ class GenerateOut(torch.nn.Module):
         self.ptypes = mult_conf["config"]["mm_conf"]["ptypes"].to(device)
 
         if couple_in_out_pdgids:
-            self.model.odeint_conf["filter_pdgid"] = self.pdgid_in
+            self.model.rc.odeint_conf["filter_pdgid"] = self.pdgid_in
 
         self.max_seq_l = flow_conf["config"]["model_conf"]["model_args"]["max_seq_l"]
         self.pdgids = flow_conf["config"]["model_conf"]["pdgids"].to(device)

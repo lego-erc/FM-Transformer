@@ -183,7 +183,7 @@ trainer.fit(
 torch.save(
     {
         "state_dict": model.model._orig_mod.vf.state_dict(),
-        "config": config,
+        "config": model.rc.config,
     },
     f"{os.environ.get('LEGO_CKPT_DIR', './checkpoints/flow/')}{name}.pt",
 )

@@ -1,13 +1,8 @@
 import torch
 
-from legofmt.geometry.vmf_sampling import VMF
-
 
 class CubeTrace:
     """Utility functions for raytracing and projection onto the cube surface."""
-
-    def __init__(self):
-        self.vmf_utils = VMF()
 
     def __call__(self, *args, **kwargs):
         return self.project_particles_cc(*args, **kwargs)

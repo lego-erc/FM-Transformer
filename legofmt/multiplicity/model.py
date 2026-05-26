@@ -9,7 +9,7 @@ from lightning import LightningModule
 from x_transformers import ContinuousTransformerWrapper, Decoder
 
 from legofmt.data.dataloaders import LEGODataset
-from legofmt.geometry.vmf_sampling import VMF
+from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.main.optimizers import build_optimizer
 
 
@@ -78,7 +78,7 @@ class MultModel(LightningModule):
         self.max_seq_len = self.mm_conf["ptypes"].shape[0]
         in_dim = self.mm_conf.get("in_dim", 6)
         self.n_ptypes_in = self.mm_conf.get("ptypes_in").shape[0]
-        self.vmf = VMF()
+        self.geom_trafos = GeomTrafos()
 
         self.model = ContinuousTransformerWrapper(
             max_seq_len=self.max_seq_len,
@@ -125,7 +125,7 @@ class MultModel(LightningModule):
 
     def proj_in(self, x):
         x = x.clone()
-        x[..., -6:] = self.vmf.to_cube(x[..., -6:])
+        x[..., -6:] = self.geom_trafos.to_cube(x[..., -6:])
         x[..., -3:] = self.pos_scale * x[..., -3:]
         return self.proj_in_(x)
 
