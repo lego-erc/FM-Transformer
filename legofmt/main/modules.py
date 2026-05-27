@@ -177,8 +177,23 @@ class LEGOLtng(ltng.LightningModule):
         else:
             loss_sc = 0.0
         sq = (v_out - ps_.dx_t)**2
-        loss_v = sq[:, 1, 0].mean() + (sq[:, 3:] * (ds_t.m.out_p == 1).unsqueeze(-1)).mean()
-        return loss_v + self.rc.loss_sc_fac * loss_sc
+
+        out = sq[:, 3:] * (ds_t.m.out_p.unsqueeze(-1) == 1)                                                                                             
+        loss_edep = 2 * sq[:, 1].mean()  
+        loss_p = out[..., :3].mean()
+        loss_x = 8 * out[..., 3:].mean() 
+                                                                                                    
+        if self.training:
+            self.log_dict(                                                                                                                 
+                {                                                                                                                        
+                    "loss/edep": loss_edep.detach(),
+                    "loss/out_eucl": loss_p.detach(),
+                    "loss/out_sph": loss_x.mean().detach(),                                                                          
+                    "loss/sc": loss_sc.detach() if self.rc.loss_sc_fac > 0 else 0.0,
+                },                                                                                                                         
+                on_step=True, on_epoch=False, logger=True, sync_dist=False,                                                              
+            )                                                                                                                              
+        return loss_edep + loss_p + loss_x + self.rc.loss_sc_fac * loss_sc 
 
     def training_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
         loss = self._step(batch, _batch_idx)

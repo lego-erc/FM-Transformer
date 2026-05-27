@@ -41,6 +41,9 @@ libcublas-dev   = "*"
 libcusparse-dev = "*"
 libcusolver-dev = "*"
 
+[feature.base.tasks]
+install-notebook = "uv pip install notebook"
+
 [feature.cuda.target.linux-64.tasks]
 install-lap = "uv pip install --no-build-isolation git+https://github.com/rdebrand/torch-lap-cuda"
 
