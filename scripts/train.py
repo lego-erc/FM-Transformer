@@ -66,6 +66,7 @@ config = {
         "num_workers": 16,
         "dtype": d_dtype,
     },
+    "val_conf": {"val_frac": 0.01, "seed": 0},
     "base_conf": {
         "base_range": 3.4,
         "kappa": torch.tensor(8.),
@@ -170,6 +171,7 @@ trainer = ltng.Trainer(
     strategy="ddp",
     logger=comet_logger,
     check_val_every_n_epoch=1,
+    limit_val_batches=4,
 )
 
 model = LEGOLtng(config)

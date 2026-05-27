@@ -138,8 +138,10 @@ class ResolvedLEGOConfig:
         dl_conf (dict): dataloader sub-config, passed through to the
             dataset constructor.
         opt_conf (dict): optimizer sub-config, consumed by
-            :func:`~legofmt.main.optimizers.build_optimizer`.
+            :func:`~legofmt.mod_comps.optimizers.build_optimizer`.
         odeint_conf (dict): ODE-solver sub-config used during sampling.
+        val_conf (dict): validation sub-config consumed by
+            :meth:`LEGOLtng.setup` (held-out split ``val_frac`` and ``seed``).
         config (dict): snapshot of the post-resolution inner config
             (including any field migrations applied during resolution).
             Handed to :class:`~legofmt.geometry.gen_base.GenerateBase`
@@ -167,6 +169,7 @@ class ResolvedLEGOConfig:
     dl_conf: dict
     opt_conf: dict
     odeint_conf: dict
+    val_conf: dict
     config: dict
 
     state_dict: dict | None
@@ -379,6 +382,7 @@ def _build_resolved(
         dl_conf=config["dl_conf"],
         opt_conf=config["opt_conf"],
         odeint_conf=config.get("odeint_conf", {}),
+        val_conf=config.get("val_conf", {}),
         config=config,
         state_dict=state_dict,
     )

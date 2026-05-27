@@ -1,6 +1,6 @@
 import torch
 from torch import Tensor, nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 
 import lightning as ltng
 
@@ -19,8 +19,9 @@ from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt.geometry.gen_base import GenerateBase
 from legofmt.geometry.path_sample_mult import ProductPathSampler, ProductManifold
 from legofmt.geometry.raytracing_proj import CubeTrace
-from legofmt.main.config import resolve_legoltng_config
-from legofmt.main.optimizers import build_optimizer
+from legofmt.mod_comps.config import resolve_legoltng_config
+from legofmt.mod_comps.optimizers import build_optimizer
+from legofmt.mod_comps.val_metrics import ShowerValMetrics
 
 
 class ProjectModel(ModelWrapper, nn.Module):
@@ -87,6 +88,7 @@ class LEGOLtng(ltng.LightningModule):
         )
         self.gen_base = GenerateBase(rc.config)
         self.ppa = CubeTrace()
+        self.val_metrics = ShowerValMetrics()
 
         self.opt, self._lr_sched = build_optimizer(
             self.model.parameters(), rc.opt_conf,
@@ -183,17 +185,12 @@ class LEGOLtng(ltng.LightningModule):
         return loss
 
     @torch.no_grad()
-    def validation_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
+    def validation_step(self, batch: DataStruct, _batch_idx: int | Tensor) -> Tensor:
+        bs = len(batch)  # Lightning can't infer batch_size from a DataStruct
         loss = self._step(batch, _batch_idx)
-        with torch.no_grad():
-            self.log(
-                "Validation Loss",
-                loss,
-                on_step=True,
-                on_epoch=True,
-                logger=True,
-                sync_dist=True,
-            )
+        self.log("Validation Loss", loss, on_step=True, on_epoch=True, sync_dist=True, batch_size=bs)
+        for name, val in self.val_metrics(self, batch).items():
+            self.log(name, val, on_epoch=True, sync_dist=True, batch_size=bs)
         return loss
 
     def configure_optimizers(self):
@@ -201,18 +198,34 @@ class LEGOLtng(ltng.LightningModule):
             return self.opt
         return {"optimizer": self.opt, "lr_scheduler": self._lr_sched}
 
-    def train_dataloader(self) -> DataLoader:
+    def setup(self, stage: str | None = None) -> None:
+        """Load the dataset once and carve off a held-out validation split."""
+        if getattr(self, "_val_ds", None) is not None:
+            return
+        full = LEGODataset(**self.rc.dl_conf["lds_args"])
+        n_val = max(1, int(len(full) * self.rc.val_conf.get("val_frac", 0.01)))
+        gen = torch.Generator().manual_seed(self.rc.val_conf.get("seed", 0))
+        self._train_ds, self._val_ds = random_split(
+            full, [len(full) - n_val, n_val], generator=gen,
+        )
+
+    def _make_loader(self, dataset, *, shuffle: bool) -> DataLoader:
         num_workers = self.rc.dl_conf.get("num_workers", 4)
-        dataset_train = LEGODataset(**self.rc.dl_conf.get("lds_args"))
         return DataLoader(
-            dataset_train,
+            dataset,
             batch_size=self.rc.dl_conf.get("bs", 2**12),
-            shuffle=True,
+            shuffle=shuffle,
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=num_workers > 0,
             multiprocessing_context="fork" if num_workers > 0 else None,
         )
+
+    def train_dataloader(self) -> DataLoader:
+        return self._make_loader(self._train_ds, shuffle=True)
+
+    def val_dataloader(self) -> DataLoader:
+        return self._make_loader(self._val_ds, shuffle=False)
 
     def chunked(self, fn, *tensors, split_size=None, dim=0, cat_dim=None):
 

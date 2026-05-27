@@ -95,7 +95,7 @@ class CFMTrafo_x(nn.Module):
             at its boundary instead of identities. Back-compat for
             checkpoints whose state dict contains ``vf.project_in.*`` /
             ``vf.project_out.*`` weights;
-            ``legofmt.main.config._apply_legacy_projection_in_out`` sets
+            ``legofmt.mod_comps.config._apply_legacy_projection_in_out`` sets
             this to ``h_dim`` when those keys are detected. Default:
             ``None``.
         **kwargs: Forwarded to ``x_transformers.Encoder`` (e.g.
