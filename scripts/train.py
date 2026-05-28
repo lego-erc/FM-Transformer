@@ -39,6 +39,9 @@ def muon_factory(params, **kwargs):
 
 epochs = 10
 prec = 32
+bs = 2**12
+devices = [4, 5, 6, 7]
+dataset_size = 2e7
 
 name = "rp_fm_v16_110526"
 
@@ -51,7 +54,7 @@ comet_logger = CometLogger(
 )
 
 dpath_prefix = os.environ.get("LEGO_DATA_DIR", "./data/particles/")
-total_steps = epochs * int(2e7 / (2**12 * 4))   # ≈ 1627; per-rank step count for DDP   
+total_steps = epochs * int(dataset_size / (bs * len(devices)))   
 
 config = {
     "dl_conf": {
@@ -62,7 +65,7 @@ config = {
             "min_particles": 0,
         },
         "is_filtered": False,
-        "bs": 2**12,
+        "bs": bs,
         "num_workers": 16,
         "dtype": d_dtype,
     },
@@ -79,9 +82,11 @@ config = {
         "manifold": "ProductManifold([Euclidean(), Sphere()], (3, 3))",
         "proj_ray": False, # True,
         "ot_coupling": True,
+        "ot_e_only": True,
         "proj_en": "in_frac_log",
-        "t_dist": "sd3",
-        "loss_sc": 1e-3,
+        "t_dist": "sd3_grid",
+        "t_dist_scale": 0.,
+        "loss_sc": 0.,
         "cond_cube": False,
         "model_args": {
             "h_dim": 2**8,
@@ -130,11 +135,11 @@ config = {
     },
       "opt_conf": {                                                                                                                              
       "opt": "muon",                                                                                                                        
-      "lr": 1e-2,                # Keller's recipe                                                                                           
+      "lr": 7e-3,                                                                                           
       "momentum": 0.95,                                                                                                                      
       "nesterov": True,                                                                                                                      
       "ns_steps": 5,                                                                                                                         
-      "weight_decay": 1e-2,       # paper: 0 for Muon group; orthogonalization bounds the update                                              
+      "weight_decay": 1e-2,                                              
       "weight_decouple": True,                                                                                                                
       "adamw_lr": 3e-3,                                                                                                                      
       "adamw_betas": (0.9, 0.999),                                                                                                            
@@ -143,7 +148,7 @@ config = {
     "scheduler": {
         "cls": "warmup_cosine",                                                                                                                  
         "total_steps": total_steps,                                                                                                            
-        "warmup_frac": 0.05,
+        "warmup_frac": 0.1,
         "eta_min": 1e-6,                                                                                                                       
         "interval": "step",                                                                                                                    
     },                                                                                                                                   
@@ -157,7 +162,7 @@ config = {
     "additional": {
         "epochs": epochs,
         "precision": str(prec) + ", " + torch.get_float32_matmul_precision(),
-        "notes": "near iso model",
+        "notes": "",
         "comet_exp_key": comet_logger._experiment_key,
     },
 }
@@ -166,12 +171,14 @@ comet_logger.log_hyperparams(config)
 trainer = ltng.Trainer(
     max_epochs=epochs,
     accelerator="gpu",
-    devices=[0, 1, 2, 3],
+    devices=devices,
     precision=prec,
     strategy="ddp",
     logger=comet_logger,
-    check_val_every_n_epoch=1,
+    val_check_interval=0.25,
+    # check_val_every_n_epoch=1,
     limit_val_batches=4,
+    gradient_clip_val=1.,
 )
 
 model = LEGOLtng(config)
