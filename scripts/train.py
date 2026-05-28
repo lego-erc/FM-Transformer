@@ -170,7 +170,7 @@ trainer = ltng.Trainer(
     precision=prec,
     strategy="ddp",
     logger=comet_logger,
-    check_val_every_n_epoch=1,
+    val_check_interval=0.25,   # validate 4x/epoch (spread through it) for a smoother curve
     limit_val_batches=4,
 )
 
