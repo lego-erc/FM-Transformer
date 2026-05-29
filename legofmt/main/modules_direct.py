@@ -3,9 +3,19 @@
 The transformer predicts the residual ``target - base`` at the generated
 slots; the wrapper applies one Euler step ``final = base + residual``
 (plus a manifold snap on the sphere half) and returns the predicted
-target. The loss is MSE between that predicted target and the data
-target.
+target. The loss is MSE between that predicted target and the per-batch
+training target.
+
+When ``model_conf.reflow_path`` is set to a velocity-model checkpoint,
+this module loads it as a frozen teacher and uses ``teacher.solve(base)``
+as the training target. That replaces the data target with the velocity
+model's deterministic ODE map, giving the direct student a fixed
+``base -> target`` coupling per batch (the prerequisite for one-step
+Euler to reach the target). When the path is unset or missing, training
+falls back to ``MSE(pred, data target)`` as before.
 """
+
+from pathlib import Path
 
 import torch
 from torch import Tensor, nn
@@ -121,6 +131,34 @@ class LEGOLtng(ltng.LightningModule):
         if rc.state_dict is not None:
             self.model.vf.load_state_dict(rc.state_dict, strict=False)
 
+        self.reflow_teacher = self._maybe_build_reflow_teacher(rc.reflow_path)
+
+    @staticmethod
+    def _maybe_build_reflow_teacher(reflow_path: str | None) -> nn.Module | None:
+        """Load the velocity-model checkpoint at ``reflow_path`` as a frozen
+        teacher. Returns ``None`` if the path is unset or the file is missing
+        (the latter case keeps saved-then-relocated direct checkpoints loadable
+        without the teacher file)."""
+        if reflow_path is None:
+            return None
+        if not Path(reflow_path).is_file():
+            import warnings
+            warnings.warn(
+                f"reflow_path={reflow_path!r} not found; reflow disabled. "
+                "Training will use the data target. Set to ``None`` in the "
+                "saved config to silence.",
+                stacklevel=2,
+            )
+            return None
+        # Local import avoids circular import at module load time.
+        from legofmt.main.modules import LEGOLtng as LEGOLtngVelocity
+        teacher_ckpt = torch.load(reflow_path, map_location="cpu", weights_only=False)
+        teacher = LEGOLtngVelocity(teacher_ckpt)
+        teacher.eval()
+        for p in teacher.parameters():
+            p.requires_grad_(False)
+        return teacher
+
     def _opt_train(self) -> None:
         if self._opt_is_sf:
             self.opt.train()
@@ -154,7 +192,12 @@ class LEGOLtng(ltng.LightningModule):
         # OT coupling: tighten base<->target pairing within each batch so the
         # direct map is well-defined per-event instead of averaging across
         # randomly paired targets (which collapses to the conditional mean).
-        if self.rc.ot_coupling and self.model.training:
+        # Skipped under reflow: the teacher's ODE is itself the coupling.
+        if (
+            self.rc.ot_coupling
+            and self.model.training
+            and self.reflow_teacher is None
+        ):
             base = base.where(ds_t.am.full.unsqueeze(-1), ds_t.f.model_in)
             inf_cond = ds_t.am.out_p.unsqueeze(-1).logical_xor(ds_t.am.out_p.unsqueeze(-2))
             out = _F(base).out_p
@@ -172,6 +215,15 @@ class LEGOLtng(ltng.LightningModule):
         with torch.no_grad():
             base = self.gen_base_wrapper(ds_t)
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
+            # Reflow: replace the data target with the velocity teacher's ODE
+            # endpoint from the same base. This is a fixed ``base -> target``
+            # coupling per batch, which is what one-step Euler needs.
+            if self.reflow_teacher is not None:
+                target = self.reflow_teacher.solve(
+                    ds_t, x_init=base, **self.rc.reflow_kwargs,
+                )
+            else:
+                target = ds_t.f.model_in
         # Wrapper returns the predicted target = projx(base + residual).
         pred = self.model(
             base,
@@ -179,7 +231,7 @@ class LEGOLtng(ltng.LightningModule):
             types=self.types_embd, pdgids=pdgid_idx,
         )
 
-        sq = (pred - ds_t.f.model_in) ** 2
+        sq = (pred - target) ** 2
         gen = (ds_t.m.out_p.unsqueeze(-1) == 1)
         out_sq = sq[:, 3:] * gen
         loss_edep = sq[:, 1].mean()
@@ -192,7 +244,7 @@ class LEGOLtng(ltng.LightningModule):
         if self.rc.loss_sc_fac > 0:
             m_gen = (ds_t.m.full == 1).to(pred.dtype)
             pred_mag = pred[..., :3].norm(dim=-1) * m_gen
-            tgt_mag = ds_t.f.mom.norm(dim=-1) * m_gen
+            tgt_mag = target[..., :3].norm(dim=-1) * m_gen
             loss_sc = self.loss_fn(pred_mag, tgt_mag)
         else:
             loss_sc = pred.new_zeros(())
