@@ -1,9 +1,9 @@
-"""Direct (endpoint-prediction) mirror of :class:`legofmt.main.modules.LEGOLtng`.
+"""Direct (residual-prediction) mirror of :class:`legofmt.main.modules.LEGOLtng`.
 
-The transformer outputs the target directly rather than a velocity field;
-base and target samples still come from the same geometric construction
-(sphere base, sphere/euclidean product manifold), and the loss is MSE
-between the manifold-projected output and the data target.
+The transformer predicts the residual ``target - base`` at the generated
+slots; the Euler step ``final = base + residual`` and the manifold snap
+are applied in :meth:`LEGOLtng.solve` (a single step from t=0 to t=1).
+The loss is MSE between the predicted residual and ``target - base``.
 """
 
 import torch
@@ -11,6 +11,11 @@ from torch import Tensor, nn
 from torch.utils.data import DataLoader, random_split
 
 import lightning as ltng
+
+try:
+    from torch_lap_cuda_lib import solve_lap as slap
+except ImportError:
+    slap = None
 
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.data.struct import DataStruct, _F
@@ -25,10 +30,13 @@ from legofmt.mod_comps.val_metrics import ShowerValMetrics
 
 
 class ProjectModel(nn.Module):
-    """Project-on-output wrapper for the no-time endpoint model.
+    """Residual-prediction wrapper for the no-time direct model.
 
-    Mirror of :class:`legofmt.main.modules.ProjectModel`; the velocity
-    version uses ``proju`` on the output, this one uses ``projx``.
+    Returns the predicted residual ``target - base`` (gated to gen slots by
+    the transformer's own mask). The Euler step ``final = base + residual``
+    and the manifold snap live in :meth:`LEGOLtng.solve`. Mirror of
+    :class:`legofmt.main.modules.ProjectModel`; the velocity version returns
+    a tangent velocity via ``proju``, this one returns the residual raw.
     """
 
     def __init__(
@@ -65,16 +73,10 @@ class ProjectModel(nn.Module):
             x_surr = x_cube
         else:
             x_surr = x
-        out = self.vf(x_surr, mask, attn_mask, types, pdgids)
-        # The transformer zeros ``out`` where mask != 1. ``Sphere.projx`` of a
-        # zero position produces NaN, so substitute a unit-norm reference on the
-        # non-generated slots before projecting, then mask back.
-        gen = (mask == 1).unsqueeze(-1)
-        ref = torch.zeros_like(out)
-        ref[..., 3] = 1.0  # unit-norm position; momentum half is Euclidean (no projx)
-        safe = torch.where(gen, out, ref)
-        out_proj = self.manifold.projx(safe)
-        return torch.where(gen, out_proj, out)
+        # Residual ``target - base`` at gen slots (zeroed elsewhere by the
+        # transformer's mask gate). No projx on the output: it is added to the
+        # base downstream and snapped to the manifold there.
+        return self.vf(x_surr, mask, attn_mask, types, pdgids)
 
 
 class LEGOLtng(ltng.LightningModule):
@@ -118,6 +120,11 @@ class LEGOLtng(ltng.LightningModule):
 
     @torch.no_grad()
     def on_fit_start(self) -> None:
+        if self.rc.ot_coupling and slap is None:
+            raise RuntimeError(
+                "ot_coupling=True requires `torch_lap_cuda_lib`. "
+                "Install it or set model_conf.ot_coupling=False."
+            )
         self.loss_fn = nn.MSELoss()
         self.model.train()
         self._opt_train()
@@ -133,26 +140,55 @@ class LEGOLtng(ltng.LightningModule):
         if not isinstance(ds_t, DataStruct):
             ds_t = DataStruct(*ds_t)
         base = torch.cat((ds_t.f.non_cc, self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc)), dim=1)
-        # OT coupling is deliberately omitted: there is no flow to couple.
+        # OT coupling: tighten base<->target pairing within each batch so the
+        # direct map is well-defined per-event instead of averaging across
+        # randomly paired targets (which collapses to the conditional mean).
+        if self.rc.ot_coupling and self.model.training:
+            base = base.where(ds_t.am.full.unsqueeze(-1), ds_t.f.model_in)
+            inf_cond = ds_t.am.out_p.unsqueeze(-1).logical_xor(ds_t.am.out_p.unsqueeze(-2))
+            out = _F(base).out_p
+            if self.rc.ot_e_only:
+                nt = ds_t.f.out_cc[..., :3].norm(dim=-1)[..., None]
+                nb = out[..., :3].norm(dim=-1)[..., None, :]
+                cost = (nt - nb).abs() + inf_cond * 1e6
+            else:
+                cost = torch.cdist(ds_t.f.out_cc, out) + inf_cond * 1e6
+            assign = slap(cost, cost.device).long()
+            out[:] = torch.take_along_dim(out, assign.unsqueeze(-1), dim=1)
         return self.gen_base.insert_add(base)
 
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
         with torch.no_grad():
             base = self.gen_base_wrapper(ds_t)
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
-            target = ds_t.f.model_in
-        out = self.model(
+            # Residual target: the model predicts ``target - base``; one Euler
+            # step adds it back at inference (see :meth:`solve`).
+            target = ds_t.f.model_in - base
+        residual = self.model(
             base,
             mask=ds_t.m.full, attn_mask=ds_t.am.full,
             types=self.types_embd, pdgids=pdgid_idx,
         )
 
-        sq = (out - target) ** 2
+        sq = (residual - target) ** 2
         gen = (ds_t.m.out_p.unsqueeze(-1) == 1)
         out_sq = sq[:, 3:] * gen
         loss_edep = sq[:, 1].mean()
         loss_p = out_sq[..., :3].mean()
         loss_x = out_sq[..., 3:].mean()
+        # Magnitude loss on the FINAL outgoing momentum ``base + residual``.
+        # Per-component MSE averages to ~0 over isotropic targets; this term
+        # gives a direction-independent magnitude signal. Set ``loss_sc`` ~1
+        # for the direct model (the velocity-model default of 1e-3 is too
+        # small here).
+        if self.rc.loss_sc_fac > 0:
+            m_gen = (ds_t.m.full == 1).to(residual.dtype)
+            pred_mom = base[..., :3] + residual[..., :3]
+            pred_mag = pred_mom.norm(dim=-1) * m_gen
+            tgt_mag = ds_t.f.mom.norm(dim=-1) * m_gen
+            loss_sc = self.loss_fn(pred_mag, tgt_mag)
+        else:
+            loss_sc = residual.new_zeros(())
 
         if self.training:
             self.log_dict(
@@ -160,10 +196,11 @@ class LEGOLtng(ltng.LightningModule):
                     "loss/edep": loss_edep.detach(),
                     "loss/out_eucl": loss_p.detach(),
                     "loss/out_sph": loss_x.detach(),
+                    "loss/sc": loss_sc.detach(),
                 },
                 on_step=True, on_epoch=False, logger=True, sync_dist=False,
             )
-        return loss_edep + loss_p + loss_x
+        return loss_edep + loss_p + loss_x + self.rc.loss_sc_fac * loss_sc
 
     def training_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
         return self._step(batch, _batch_idx)
@@ -217,7 +254,9 @@ class LEGOLtng(ltng.LightningModule):
         x_init: Tensor | None = None,
         **_kw,
     ) -> Tensor:
-        """Single forward pass; ``ShowerValMetrics`` and inference call this."""
+        """Single Euler step from t=0 to t=1: ``final = base + residual`` with
+        a manifold snap on the generated slots. Called by ``ShowerValMetrics``
+        and :meth:`forward`."""
         if not isinstance(ds_t, DataStruct):
             ds_t = DataStruct(*ds_t)
         if self.model.training:
@@ -230,11 +269,18 @@ class LEGOLtng(ltng.LightningModule):
         if x_init is None:
             x_init = self.gen_base_wrapper(ds_t)
 
-        return self.model(
+        residual = self.model(
             x_init,
             mask=ds_t.m.full, attn_mask=ds_t.am.full,
             types=self.types_embd, pdgids=pdgids_idx,
         )
+        out_raw = x_init + residual
+        gen = (ds_t.m.full == 1).unsqueeze(-1)
+        ref = torch.zeros_like(out_raw)
+        ref[..., 3] = 1.0  # unit-norm position; mom half is Euclidean (no projx)
+        safe = torch.where(gen, out_raw, ref)
+        out_proj = self.model.manifold.projx(safe)
+        return torch.where(gen, out_proj, out_raw)
 
     @torch.no_grad()
     def forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None) -> tuple:

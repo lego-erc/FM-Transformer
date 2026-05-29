@@ -1,8 +1,10 @@
-"""Direct (endpoint-prediction) mirror of :mod:`legofmt.main.generate`.
+"""Direct (residual-prediction) mirror of :mod:`legofmt.main.generate`.
 
 Identical to the velocity-flow generate module except the flow component
-is :class:`legofmt.main.modules_direct.LEGOLtng` (single forward pass)
-instead of the ODE-integrated variant.
+is :class:`legofmt.main.modules_direct.LEGOLtng`, which predicts the
+residual ``target - base`` and applies the single Euler step
+``final = base + residual`` (plus manifold snap) inside its ``solve``;
+no external ODE integration is needed.
 """
 
 import torch
