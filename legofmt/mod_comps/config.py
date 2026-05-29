@@ -174,6 +174,13 @@ class ResolvedLEGOConfig:
 
     state_dict: dict | None
 
+    # Reflow: when ``reflow_path`` points at a velocity-model checkpoint, the
+    # direct (residual) trainer in :mod:`legofmt.main.modules_direct` loads it
+    # as a frozen teacher and uses ``teacher.solve(base)`` as the per-batch
+    # training target. ``reflow_kwargs`` is forwarded to ``teacher.solve``.
+    reflow_path: str | None
+    reflow_kwargs: dict
+
 
 def resolve_legoltng_config(full_config: dict) -> ResolvedLEGOConfig:
     r"""Resolves a raw :class:`LEGOLtng` config into a typed form.
@@ -385,4 +392,6 @@ def _build_resolved(
         val_conf=config.get("val_conf", {}),
         config=config,
         state_dict=state_dict,
+        reflow_path=model_conf.get("reflow_path"),
+        reflow_kwargs=model_conf.get("reflow_kwargs", {}),
     )
