@@ -59,7 +59,6 @@ class ProjectModel(nn.Module):
         super().__init__()
         self.vf = vf
         self.manifold = manifold
-        self.kwargs = kwargs
         self.geom_trafos = GeomTrafos()
         self.cond_cube = kwargs.get("cond_cube", False)
         self.no_detach = kwargs.get("no_detach", False)
@@ -85,14 +84,8 @@ class ProjectModel(nn.Module):
         else:
             x_surr = x
         residual = self.vf(x_surr, mask, attn_mask, types, pdgids)
-        # Single Euler step: predicted target = base + residual. Residual is
-        # gated to 0 by the transformer at non-gen slots, so out_raw = base
-        # there (conditioning passthrough).
         out_raw = x + residual
         gen = (mask == 1).unsqueeze(-1)
-        # ``Sphere.projx`` of a zero position is NaN. Substitute a unit-norm
-        # reference at non-gen slots before snapping, then mask back so the
-        # conditioning passthrough is preserved.
         ref = torch.zeros_like(out_raw)
         ref[..., 3] = 1.0
         safe = torch.where(gen, out_raw, ref)
@@ -131,14 +124,24 @@ class LEGOLtng(ltng.LightningModule):
         if rc.state_dict is not None:
             self.model.vf.load_state_dict(rc.state_dict, strict=False)
 
-        self.reflow_teacher = self._maybe_build_reflow_teacher(rc.reflow_path)
+        teacher = self._maybe_build_reflow_teacher(rc.reflow_path)
+        self._reflow_teacher_box = [teacher] if teacher is not None else []
+
+    @property
+    def reflow_teacher(self) -> nn.Module | None:
+        return self._reflow_teacher_box[0] if self._reflow_teacher_box else None
 
     @staticmethod
     def _maybe_build_reflow_teacher(reflow_path: str | None) -> nn.Module | None:
         """Load the velocity-model checkpoint at ``reflow_path`` as a frozen
         teacher. Returns ``None`` if the path is unset or the file is missing
         (the latter case keeps saved-then-relocated direct checkpoints loadable
-        without the teacher file)."""
+        without the teacher file).
+
+        The teacher's wrapper is ``torch.compile``'d so its 4 forwards per
+        midpoint step run at compiled throughput (matching the student's
+        compiled forward). Without this the teacher dominates each step.
+        """
         if reflow_path is None:
             return None
         if not Path(reflow_path).is_file():
@@ -150,13 +153,22 @@ class LEGOLtng(ltng.LightningModule):
                 stacklevel=2,
             )
             return None
-        # Local import avoids circular import at module load time.
         from legofmt.main.modules import LEGOLtng as LEGOLtngVelocity
         teacher_ckpt = torch.load(reflow_path, map_location="cpu", weights_only=False)
         teacher = LEGOLtngVelocity(teacher_ckpt)
         teacher.eval()
         for p in teacher.parameters():
             p.requires_grad_(False)
+        try:
+            teacher.model = torch.compile(teacher.model, dynamic=False)
+        except Exception as exc:
+            import warnings
+            warnings.warn(
+                f"torch.compile of reflow teacher failed ({exc!r}); "
+                "falling back to eager. Each training step will run 4 eager "
+                "teacher forwards, which is the dominant cost.",
+                stacklevel=2,
+            )
         return teacher
 
     def _opt_train(self) -> None:
@@ -175,6 +187,8 @@ class LEGOLtng(ltng.LightningModule):
                 "Install it or set model_conf.ot_coupling=False."
             )
         self.loss_fn = nn.MSELoss()
+        if self.reflow_teacher is not None:
+            self.reflow_teacher.to(self.device)
         self.model.train()
         self._opt_train()
 
@@ -189,10 +203,6 @@ class LEGOLtng(ltng.LightningModule):
         if not isinstance(ds_t, DataStruct):
             ds_t = DataStruct(*ds_t)
         base = torch.cat((ds_t.f.non_cc, self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc)), dim=1)
-        # OT coupling: tighten base<->target pairing within each batch so the
-        # direct map is well-defined per-event instead of averaging across
-        # randomly paired targets (which collapses to the conditional mean).
-        # Skipped under reflow: the teacher's ODE is itself the coupling.
         if (
             self.rc.ot_coupling
             and self.model.training
@@ -215,16 +225,18 @@ class LEGOLtng(ltng.LightningModule):
         with torch.no_grad():
             base = self.gen_base_wrapper(ds_t)
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
-            # Reflow: replace the data target with the velocity teacher's ODE
-            # endpoint from the same base. This is a fixed ``base -> target``
-            # coupling per batch, which is what one-step Euler needs.
             if self.reflow_teacher is not None:
+                solve_kwargs = dict(self.rc.reflow_kwargs)
+                if (
+                    "time_grid" not in solve_kwargs
+                    and solve_kwargs.get("method", "midpoint") == "midpoint"
+                ):
+                    solve_kwargs["time_grid"] = base.new_tensor([0.0, 1.0])
                 target = self.reflow_teacher.solve(
-                    ds_t, x_init=base, **self.rc.reflow_kwargs,
+                    ds_t, x_init=base, **solve_kwargs,
                 )
             else:
                 target = ds_t.f.model_in
-        # Wrapper returns the predicted target = projx(base + residual).
         pred = self.model(
             base,
             mask=ds_t.m.full, attn_mask=ds_t.am.full,
@@ -237,10 +249,6 @@ class LEGOLtng(ltng.LightningModule):
         loss_edep = sq[:, 1].mean()
         loss_p = out_sq[..., :3].mean()
         loss_x = out_sq[..., 3:].mean()
-        # Magnitude loss on the predicted outgoing momentum. Per-component MSE
-        # averages to ~0 over isotropic targets; this term gives a direction-
-        # independent magnitude signal. ``loss_sc`` ~1 for the direct model
-        # (velocity-model default of 1e-3 is too small here).
         if self.rc.loss_sc_fac > 0:
             m_gen = (ds_t.m.full == 1).to(pred.dtype)
             pred_mag = pred[..., :3].norm(dim=-1) * m_gen
@@ -311,10 +319,16 @@ class LEGOLtng(ltng.LightningModule):
         self,
         ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]",
         x_init: Tensor | None = None,
+        split_size: int | None = None,
         **_kw,
     ) -> Tensor:
         """Single forward pass; the wrapper performs the Euler step
-        ``final = base + residual`` and the manifold snap internally."""
+        ``final = base + residual`` and the manifold snap internally.
+
+        ``split_size`` chunks the batch dimension when running into memory
+        pressure with very large inference batches. Pick a value that
+        divides the batch size to avoid recompile on the partial last chunk
+        when the wrapper is ``torch.compile``'d with ``dynamic=False``."""
         if not isinstance(ds_t, DataStruct):
             ds_t = DataStruct(*ds_t)
         if self.model.training:
@@ -327,11 +341,22 @@ class LEGOLtng(ltng.LightningModule):
         if x_init is None:
             x_init = self.gen_base_wrapper(ds_t)
 
-        return self.model(
-            x_init,
-            mask=ds_t.m.full, attn_mask=ds_t.am.full,
-            types=self.types_embd, pdgids=pdgids_idx,
-        )
+        mask, attn_mask = ds_t.m.full, ds_t.am.full
+        if split_size is None or split_size >= x_init.shape[0]:
+            return self.model(
+                x_init,
+                mask=mask, attn_mask=attn_mask,
+                types=self.types_embd, pdgids=pdgids_idx,
+            )
+        parts = []
+        for i in range(0, x_init.shape[0], split_size):
+            sl = slice(i, i + split_size)
+            parts.append(self.model(
+                x_init[sl],
+                mask=mask[sl], attn_mask=attn_mask[sl],
+                types=self.types_embd, pdgids=pdgids_idx[sl],
+            ))
+        return torch.cat(parts, dim=0)
 
     @torch.no_grad()
     def forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None) -> tuple:
@@ -339,12 +364,35 @@ class LEGOLtng(ltng.LightningModule):
             self.model.eval()
             self._opt_eval()
 
+        cfg = self.rc.odeint_conf
+        if (
+            cfg.get("fwd_compile", False)
+            and not (
+                hasattr(self.model, "_orig_mod")
+                or hasattr(self.model.vf, "_orig_mod")
+            )
+        ):
+            self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=False)
+
         ds_t = DataStruct(*batch) if isinstance(batch, tuple) else batch
         pdgids = ds_t.f.pdgids
         am = ds_t.am.full.unsqueeze(-1)
         base = self.gen_base_wrapper(ds_t)
         densities = ds_t.f.d[:, None, None].expand_as(base[..., :1])
 
-        sols = self.solve(ds_t, x_init=base)
-        sols = sols.masked_fill(~am, torch.nan)
+        if cfg.get("return_base", False):
+            sols = base.masked_fill(~am, torch.nan)
+        else:
+            sols = self.solve(ds_t, x_init=base, split_size=cfg.get("split_size"))
+            sols = sols.masked_fill_(~am, torch.nan)
+            filter_pdgid = cfg.get("filter_pdgid")
+            if filter_pdgid is not None:
+                pdgids_idx = pdgids.int() if self.rc.pdgid_is_idx else self.convert_pdgids(pdgids)
+                keep = (
+                    torch.isin(pdgids_idx, self.convert_pdgids(filter_pdgid))
+                    | (pdgids_idx == 0)
+                )
+                sols.masked_fill_(~keep, torch.nan)
+                pdgids = pdgids.masked_fill(~keep, 0)
+
         return torch.cat((densities, sols, pdgids), dim=-1), ds_t.m.full, ds_t.am.full
