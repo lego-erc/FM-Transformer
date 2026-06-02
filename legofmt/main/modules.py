@@ -88,24 +88,17 @@ class LEGOLtng(ltng.LightningModule):
         self.gen_base = GenerateBase(rc.config)
         self.ppa = CubeTrace()
 
-        self.opt, self._lr_sched = build_optimizer(
-            self.model.parameters(), rc.opt_conf,
-        )
-        self._opt_is_sf = hasattr(self.opt, "train") and callable(
-            getattr(self.opt, "train", None),
-        )
-
         if rc.state_dict is not None:
             self.model.vf.load_state_dict(rc.state_dict, strict=False)
 
     def _opt_train(self) -> None:
         """No-op unless the optimizer has a schedule-free .train() method."""
-        if self._opt_is_sf:
+        if getattr(self, "_opt_is_sf", False):
             self.opt.train()
 
     def _opt_eval(self) -> None:
         """No-op unless the optimizer has a schedule-free .eval() method."""
-        if self._opt_is_sf:
+        if getattr(self, "_opt_is_sf", False):
             self.opt.eval()
 
     @torch.no_grad()
@@ -187,6 +180,12 @@ class LEGOLtng(ltng.LightningModule):
 
     @torch.no_grad()
     def configure_optimizers(self):
+        self.opt, self._lr_sched = build_optimizer(
+            self.model.parameters(), self.rc.opt_conf,
+        )
+        self._opt_is_sf = hasattr(self.opt, "train") and callable(
+            getattr(self.opt, "train", None),
+        )
         if self._lr_sched is None:
             return self.opt
         return {"optimizer": self.opt, "lr_scheduler": self._lr_sched}
