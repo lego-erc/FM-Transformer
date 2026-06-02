@@ -8,10 +8,12 @@ from ..data.struct import _F
 
 
 class GenerateOut(torch.nn.Module):
+    flow_cls = LEGOLtng
+
     def __init__(self, flow_conf_path: str, mult_conf_path: str, device="cpu", couple_in_out_pdgids=False):
         super().__init__()
         flow_conf = torch.load(flow_conf_path, map_location=device, weights_only=False)
-        self.model = LEGOLtng(flow_conf).to(device)
+        self.model = self.flow_cls(flow_conf).to(device)
         object.__setattr__(self.model.rc, "pdgid_is_idx", True)
 
         mult_conf = torch.load(mult_conf_path, map_location=device, weights_only=False)

@@ -6,8 +6,8 @@ of a velocity field. The flow-time argument and its sinusoidal embedding
 are removed; a single learnable ``global_cond`` vector replaces the
 time-derived condition fed to adaptive-RMSNorm so the Encoder
 architecture stays identical to the velocity variant. The Euler step
-``final = base + residual`` and the manifold snap are applied in
-:meth:`legofmt.main.modules_direct.LEGOLtng.solve`.
+``final = base + residual`` and the manifold snap are applied in the
+:class:`legofmt.main.modules_direct.ProjectModel` wrapper.
 """
 
 from __future__ import annotations

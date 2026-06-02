@@ -82,7 +82,7 @@ config = {
         "manifold": "ProductManifold([Euclidean(), Sphere()], (3, 3))",
         "proj_ray": False, # True,
         "ot_coupling": True,
-        "ot_e_only": True,
+        "ot_e_only": False,
         "proj_en": "in_frac_log",
         "t_dist": "sd3_grid",
         "t_dist_scale": 0.,
