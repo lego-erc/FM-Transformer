@@ -19,7 +19,6 @@ from legofmt.data.dataloaders import LEGODataset
 from legofmt.data.struct import DataStruct, _F
 from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
-from legofmt.cfm.cfm_trafo_direct import CFMTrafo_x as CFMTrafoDirect
 from legofmt.geometry.gen_base import GenerateBase
 from legofmt.geometry.path_sample_mult import ProductPathSampler, ProductManifold
 from legofmt.geometry.raytracing_proj import CubeTrace
@@ -73,7 +72,7 @@ class ProjectModel(ModelWrapper, nn.Module):
         pm = attn_mask.unsqueeze(-1)
         t = torch.atleast_2d(t).expand_as(attn_mask)
         t = torch.where(mask == 1, t, 1.)
-        v = self.vf(t, x_surr, mask, attn_mask, types, pdgids)
+        v = self.vf(x_surr, mask, attn_mask, types, pdgids, t=t)
         v_proj_dense = self.manifold.proju(x_proj_dense, v)
         return torch.where(pm, v_proj_dense, v)
 
@@ -412,26 +411,15 @@ class LEGOLtng(ltng.LightningModule):
 
 
 def _build_reflow_teacher(reflow_path: str | None) -> nn.Module | None:
-    """Load a velocity-model checkpoint as a frozen, ``torch.compile``'d
-    teacher whose ``solve`` provides the reflow target for
-    :class:`LEGOLtngDirect`. ``None`` when the path is unset or missing,
-    so a saved direct checkpoint can be reloaded even after the teacher
-    file is gone."""
+    """Frozen, ``torch.compile``'d velocity teacher for reflow; ``None`` if path unset/missing."""
     if reflow_path is None:
         return None
     if not Path(reflow_path).is_file():
         warnings.warn(f"reflow_path={reflow_path!r} not found; reflow disabled.", stacklevel=2)
         return None
     teacher = LEGOLtng(torch.load(reflow_path, map_location="cpu", weights_only=False))
-    teacher.eval()
-    teacher.requires_grad_(False)
-    try:
-        teacher.model = torch.compile(teacher.model, dynamic=False)
-    except Exception as exc:
-        warnings.warn(
-            f"torch.compile of reflow teacher failed ({exc!r}); eager fallback.",
-            stacklevel=2,
-        )
+    teacher.eval().requires_grad_(False)
+    teacher.model = torch.compile(teacher.model, dynamic=False)
     return teacher
 
 
@@ -484,7 +472,7 @@ class LEGOLtngDirect(LEGOLtng):
 
     def _build_model(self, rc) -> nn.Module:
         return ProjectModelDirect(
-            CFMTrafoDirect(**rc.model_args),
+            CFMTrafo_x(**rc.model_args, time_cond=False),
             rc.manifold,
             cond_cube=rc.cond_cube,
         )
