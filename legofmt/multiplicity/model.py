@@ -103,7 +103,7 @@ class MultModel(LightningModule):
         self.embd_in_ = torch.nn.ModuleList(
             [
                 torch.nn.Embedding(self.max_particles, h_dim)
-                for _ in range(self.max_seq_len)
+                for _ in range(self.max_seq_len - 1)
             ]
         )
 
@@ -224,7 +224,8 @@ class MultModel(LightningModule):
             )
             logits = self.proj_out_[i](out[:, -1])
             sampled = torch.multinomial(logits.softmax(-1), 1).squeeze(-1)
-            x = self.embd_in_[i](sampled).unsqueeze(1)
             counts[:, i] = sampled
+            if i < self.max_seq_len - 1:
+                x = self.embd_in_[i](sampled).unsqueeze(1)
 
         return counts
