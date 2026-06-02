@@ -7,7 +7,7 @@ are removed; a single learnable ``global_cond`` vector replaces the
 time-derived condition fed to adaptive-RMSNorm so the Encoder
 architecture stays identical to the velocity variant. The Euler step
 ``final = base + residual`` and the manifold snap are applied in the
-:class:`legofmt.main.modules_direct.ProjectModel` wrapper.
+:class:`legofmt.main.modules.ProjectModelDirect` wrapper.
 """
 
 from __future__ import annotations

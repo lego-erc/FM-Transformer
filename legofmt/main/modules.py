@@ -1,3 +1,6 @@
+import warnings
+from pathlib import Path
+
 import torch
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, random_split
@@ -16,6 +19,7 @@ from legofmt.data.dataloaders import LEGODataset
 from legofmt.data.struct import DataStruct, _F
 from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
+from legofmt.cfm.cfm_trafo_direct import CFMTrafo_x as CFMTrafoDirect
 from legofmt.geometry.gen_base import GenerateBase
 from legofmt.geometry.path_sample_mult import ProductPathSampler, ProductManifold
 from legofmt.geometry.raytracing_proj import CubeTrace
@@ -405,3 +409,142 @@ class LEGOLtng(ltng.LightningModule):
             densities = densities.unsqueeze(0).expand(T, -1, -1, -1)
             pdgids = pdgids.unsqueeze(0).expand(T, -1, -1, -1)
         return torch.cat((densities, sols, pdgids), dim=-1), ds_t.m.full, ds_t.am.full
+
+
+def _build_reflow_teacher(reflow_path: str | None) -> nn.Module | None:
+    """Load a velocity-model checkpoint as a frozen, ``torch.compile``'d
+    teacher whose ``solve`` provides the reflow target for
+    :class:`LEGOLtngDirect`. ``None`` when the path is unset or missing,
+    so a saved direct checkpoint can be reloaded even after the teacher
+    file is gone."""
+    if reflow_path is None:
+        return None
+    if not Path(reflow_path).is_file():
+        warnings.warn(f"reflow_path={reflow_path!r} not found; reflow disabled.", stacklevel=2)
+        return None
+    teacher = LEGOLtng(torch.load(reflow_path, map_location="cpu", weights_only=False))
+    teacher.eval()
+    teacher.requires_grad_(False)
+    try:
+        teacher.model = torch.compile(teacher.model, dynamic=False)
+    except Exception as exc:
+        warnings.warn(
+            f"torch.compile of reflow teacher failed ({exc!r}); eager fallback.",
+            stacklevel=2,
+        )
+    return teacher
+
+
+class ProjectModelDirect(ProjectModel):
+    """Residual-prediction wrapper for the no-time direct model. Mirror
+    of :class:`ProjectModel`; only the forward differs (no time argument,
+    residual instead of velocity, single Euler step + safe sphere snap)."""
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: torch.Tensor,
+        attn_mask: torch.Tensor,
+        types: torch.Tensor,
+        pdgids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        _, x_attended, x_surr = self._prep_x(x, attn_mask)
+        residual = self.vf(x_surr, mask, attn_mask, types, pdgids)
+        out_raw = x_attended + residual
+        gen = (mask == 1).unsqueeze(-1)
+        ref = torch.zeros_like(out_raw)
+        ref[..., 3] = 1.0
+        safe = torch.where(gen, out_raw, ref)
+        out_proj = self.manifold.projx(safe)
+        return torch.where(gen, out_proj, out_raw)
+
+
+class LEGOLtngDirect(LEGOLtng):
+    """Direct (residual-prediction) variant of :class:`LEGOLtng`.
+
+    The transformer predicts the residual ``target - base`` at the
+    generated slots; the wrapper applies one Euler step
+    ``final = base + residual`` (plus a manifold snap on the sphere half)
+    and the loss is MSE between predicted and target.
+
+    When ``model_conf.reflow_path`` is set to a velocity-model checkpoint,
+    that model is loaded as a frozen teacher and ``teacher.solve(base)``
+    replaces the data target — giving the direct student a fixed
+    ``base -> target`` coupling per batch (the prerequisite for one-step
+    Euler to reach the target). When the path is unset or missing,
+    training falls back to MSE against the data target.
+    """
+
+    def __init__(self, full_config: dict) -> None:
+        super().__init__(full_config)
+        object.__setattr__(self.rc, "ot_coupling", False)
+        object.__setattr__(
+            self, "reflow_teacher", _build_reflow_teacher(self.rc.reflow_path),
+        )
+
+    def _build_model(self, rc) -> nn.Module:
+        return ProjectModelDirect(
+            CFMTrafoDirect(**rc.model_args),
+            rc.manifold,
+            cond_cube=rc.cond_cube,
+        )
+
+    @torch.no_grad()
+    def on_fit_start(self) -> None:
+        super().on_fit_start()
+        if self.reflow_teacher is not None:
+            self.reflow_teacher.to(self.device)
+
+    def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
+        with torch.no_grad():
+            base = self.gen_base_wrapper(ds_t)
+            pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
+            if self.reflow_teacher is not None:
+                solve_kwargs = dict(self.rc.reflow_kwargs)
+                if (
+                    "time_grid" not in solve_kwargs
+                    and solve_kwargs.get("method", "midpoint") == "midpoint"
+                ):
+                    solve_kwargs["time_grid"] = base.new_tensor([0.0, 1.0])
+                target = self.reflow_teacher.solve(
+                    ds_t, x_init=base, **solve_kwargs,
+                )
+            else:
+                target = ds_t.f.model_in
+        pred = self.model(
+            base,
+            mask=ds_t.m.full, attn_mask=ds_t.am.full,
+            types=self.types_embd, pdgids=pdgid_idx,
+        )
+        if self.rc.loss_sc_fac > 0:
+            m_gen = (ds_t.m.full == 1).to(pred.dtype)
+            loss_sc = self.loss_fn(
+                pred[..., :3].norm(dim=-1) * m_gen,
+                target[..., :3].norm(dim=-1) * m_gen,
+            )
+        else:
+            loss_sc = pred.new_zeros(())
+        sq = (pred - target) ** 2
+        return self._reduce_and_log(sq, ds_t, loss_sc)
+
+    @torch.no_grad()
+    def solve(
+        self,
+        ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]",
+        x_init: Tensor | None = None,
+        split_size: int | None = None,
+        **_kw,
+    ) -> Tensor:
+        ds_t, pdgids_idx = self._prep_solve(ds_t)
+        if x_init is None:
+            x_init = self.gen_base_wrapper(ds_t)
+
+        def _fwd(x, m, a, pi):
+            return self.model(
+                x, mask=m, attn_mask=a, types=self.types_embd, pdgids=pi,
+            )
+
+        return self.chunked(
+            _fwd, x_init, ds_t.m.full, ds_t.am.full, pdgids_idx,
+            split_size=split_size,
+        )

@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from ..main.modules import LEGOLtng
+from ..main.modules import LEGOLtng, LEGOLtngDirect
 from ..multiplicity.model import MultModel
 from ..geometry.raytracing_proj import CubeTrace
 from ..data.struct import _F
@@ -129,3 +129,9 @@ class GenerateOut(torch.nn.Module):
         cond_fm[:, 0, 1] = cond[:, 0, 0] #Density
         _F(cond_fm).non_p[..., 2:-1] = 1
         return cond_fm, mask, attn_mask
+
+
+class GenerateOutDirect(GenerateOut):
+    """Direct variant — uses :class:`legofmt.main.modules.LEGOLtngDirect`
+    as the flow component."""
+    flow_cls = LEGOLtngDirect
