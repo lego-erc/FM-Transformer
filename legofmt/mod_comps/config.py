@@ -549,12 +549,84 @@ def _resolve_from_checkpoint_mult(
 
     Reads ``max_count`` / ``ptypes`` / ``ptypes_in`` from the saved
     ``mm_conf``. Falls back to ``max_out_particles`` for ``max_count`` to
-    match the pre-refactor :meth:`MultModel.__init__` behavior.
+    match the pre-refactor :meth:`MultModel.__init__` behavior. Also
+    migrates pre-fusion head layouts via
+    :func:`_migrate_legacy_mult_heads`.
     """
     mm_conf = config.setdefault("mm_conf", {})
     dl_conf = config.setdefault("dl_conf", {})
     mm_conf.setdefault("max_count", mm_conf.get("max_out_particles"))
+
+    ptypes = mm_conf.get("ptypes")
+    max_count = mm_conf.get("max_count")
+    if ptypes is not None and max_count is not None and len(state_dict) > 0:
+        max_seq_len = (
+            ptypes.shape[0] if torch.is_tensor(ptypes) else len(ptypes)
+        )
+        state_dict = _migrate_legacy_mult_heads(
+            state_dict, max_seq_len=max_seq_len, max_particles=max_count,
+        )
+
     return _build_resolved_mult(config, mm_conf, dl_conf, state_dict=state_dict)
+
+
+def _migrate_legacy_mult_heads(
+    state_dict: dict, max_seq_len: int, max_particles: int
+) -> dict:
+    r"""Remaps a pre-fusion :class:`MultModel` state_dict to the fused layout.
+
+    Pre-fusion checkpoints stored ``embd_in_`` as a :class:`ModuleList` of
+    ``max_seq_len - 1`` separate :class:`~torch.nn.Embedding` tables, and
+    ``proj_out_`` as a :class:`ModuleList` of ``max_seq_len`` separate
+    :class:`~torch.nn.Linear` layers. The fused layout uses a single
+    embedding table of ``(max_seq_len - 1) * max_particles`` rows plus two
+    stacked parameters ``proj_out_w`` (shape ``(L, H, P)``) and
+    ``proj_out_b`` (shape ``(L, P)``).
+
+    Migration is detected by the presence of any ``proj_out_.{i}.weight``
+    or ``embd_in_.{i}.weight`` key. If detected, the legacy keys are
+    removed and replaced with the fused equivalents. The original dict is
+    not mutated -- a new dict is returned.
+
+    Args:
+        state_dict (dict): the raw state dict from disk.
+        max_seq_len (int): ``L`` (= ``ptypes.shape[0]``).
+        max_particles (int): ``P`` (= ``mm_conf["max_count"]``).
+
+    Returns:
+        dict: the migrated state dict (or the input unchanged if no legacy
+        keys were found).
+    """
+    # Legacy ModuleList keys have an index segment: "proj_out_.0.weight",
+    # "embd_in_.0.weight". The fused layout uses "proj_out_w" / "proj_out_b"
+    # / "embd_in_.weight" (no integer segment), which must NOT trigger
+    # migration.
+    has_legacy_proj = "proj_out_.0.weight" in state_dict
+    has_legacy_embd = "embd_in_.0.weight" in state_dict
+    if not (has_legacy_proj or has_legacy_embd):
+        return state_dict
+
+    out = {
+        k: v for k, v in state_dict.items()
+        if not (k.startswith("proj_out_.") or k.startswith("embd_in_."))
+    }
+
+    if has_legacy_proj:
+        weights = [state_dict[f"proj_out_.{i}.weight"] for i in range(max_seq_len)]
+        biases = [state_dict[f"proj_out_.{i}.bias"] for i in range(max_seq_len)]
+        # Linear stores (out=P, in=H); fused stores (L, H, P) -- transpose
+        # each slice.
+        out["proj_out_w"] = torch.stack([w.t().contiguous() for w in weights], dim=0)
+        out["proj_out_b"] = torch.stack(biases, dim=0)
+
+    if has_legacy_embd:
+        # max_seq_len - 1 tables of shape (P, H), stacked row-wise.
+        embd_weights = [
+            state_dict[f"embd_in_.{i}.weight"] for i in range(max_seq_len - 1)
+        ]
+        out["embd_in_.weight"] = torch.cat(embd_weights, dim=0)
+
+    return out
 
 
 def _build_resolved_mult(

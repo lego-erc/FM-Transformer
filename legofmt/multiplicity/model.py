@@ -75,21 +75,34 @@ class MultModel(LightningModule):
 
         self.proj_in_ = torch.nn.Linear(rc.in_dim, rc.h_dim)
 
-        self.embd_in_ = torch.nn.ModuleList(
-            [
-                torch.nn.Embedding(rc.max_particles, rc.h_dim)
-                for _ in range(rc.max_seq_len - 1)
-            ]
+        # Fused teacher-forcing embedding table: one Embedding of shape
+        # ((max_seq_len - 1) * max_particles, h_dim). Per-position lookups
+        # become a single op via the cached offset buffer.
+        self.embd_in_ = torch.nn.Embedding(
+            (rc.max_seq_len - 1) * rc.max_particles, rc.h_dim,
+        )
+        self.register_buffer(
+            "_in_offsets",
+            torch.arange(rc.max_seq_len - 1, dtype=torch.long) * rc.max_particles,
+            persistent=False,
         )
 
         self.embd_pp_ = torch.nn.Embedding(rc.n_ptypes_in, rc.h_dim)
 
-        self.proj_out_ = torch.nn.ModuleList(
-            [
-                torch.nn.Linear(rc.h_dim, rc.max_particles)
-                for _ in range(rc.max_seq_len)
-            ]
+        # Fused per-position output projection: weight (L, H, P), bias (L, P).
+        # Replaces ModuleList[Linear] + torch.stack with one einsum.
+        self.proj_out_w = torch.nn.Parameter(
+            torch.empty(rc.max_seq_len, rc.h_dim, rc.max_particles)
         )
+        self.proj_out_b = torch.nn.Parameter(
+            torch.empty(rc.max_seq_len, rc.max_particles)
+        )
+        # Mirror nn.Linear defaults per position (kaiming_uniform with
+        # a=sqrt(5) on weight, uniform[-1/sqrt(fan_in), 1/sqrt(fan_in)] on bias).
+        _bound = 1.0 / (rc.h_dim ** 0.5)
+        for _i in range(rc.max_seq_len):
+            torch.nn.init.kaiming_uniform_(self.proj_out_w[_i], a=5 ** 0.5)
+            torch.nn.init.uniform_(self.proj_out_b[_i], -_bound, _bound)
 
         if rc.state_dict is not None:
             self.load_state_dict(rc.state_dict, strict=False)
@@ -132,14 +145,12 @@ class MultModel(LightningModule):
         in_cc, counts, pdgid_in_idx = batch
         in_embd = self.proj_in(in_cc)
         pdgid_embd = in_embd + self.embd_pp_(pdgid_in_idx)
-        gt_embds = torch.stack(
-            [self.embd_in_[i](counts[:, i]) for i in range(self.rc.max_seq_len - 1)], dim=1
-        )
+        # Fused: shift per-position by max_particles, look up once.
+        gt_embds = self.embd_in_(counts[:, : self.rc.max_seq_len - 1] + self._in_offsets)
         in_seq = torch.cat((pdgid_embd.unsqueeze(1), gt_embds), dim=1)
         out = self.model(in_seq, mask=None, condition=pdgid_embd)
-        logits = torch.stack(
-            [self.proj_out_[i](out[:, i]) for i in range(self.rc.max_seq_len)], dim=1
-        )
+        # Fused batched matmul replaces L separate Linear calls + stack.
+        logits = torch.einsum("bsh,shp->bsp", out, self.proj_out_w) + self.proj_out_b
 
         loss_model = F.cross_entropy(
             logits.reshape(-1, self.rc.max_particles), counts.reshape(-1)
@@ -187,10 +198,10 @@ class MultModel(LightningModule):
                 cache=cache,
                 input_not_include_cache=(i > 0),
             )
-            logits = self.proj_out_[i](out[:, -1])
+            logits = out[:, -1] @ self.proj_out_w[i] + self.proj_out_b[i]
             sampled = torch.multinomial(logits.softmax(-1), 1).squeeze(-1)
             counts[:, i] = sampled
             if i < self.rc.max_seq_len - 1:
-                x = self.embd_in_[i](sampled).unsqueeze(1)
+                x = self.embd_in_(sampled + i * self.rc.max_particles).unsqueeze(1)
 
         return counts
