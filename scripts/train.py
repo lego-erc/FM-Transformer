@@ -11,12 +11,8 @@ import lightning as ltng
 from lightning.pytorch.loggers import CometLogger
 import schedulefree
 import torch
-from legofmt.main.modules import LEGOLtng
-
-# import torch._inductor.config as ic                      
-# ic.coordinate_descent_tuning = True
-# ic.coordinate_descent_check_all_directions = True                                                        
-# ic.max_autotune_gemm = True 
+# from legofmt.main.modules_direct import LEGOLtng
+from legofmt.multiplicity.model import MultModel
 
 from pytorch_optimizer import AdEMAMix 
 from pytorch_optimizer import Muon                                                                                                         
@@ -25,25 +21,17 @@ from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 
 d_dtype = torch.float32
 torch.set_default_dtype(d_dtype)
-torch.set_float32_matmul_precision("medium")                                                                                              
-                                                                                                                                             
-def muon_factory(params, **kwargs):                                                                                                                           
-    params = list(params)                                                                                                                  
-    muon_p = [p for p in params if p.ndim >= 2]                                                                                            
-    rest_p = [p for p in params if p.ndim < 2]                                                                                             
-    return Muon(                                                                                                                           
-        [{"params": muon_p, "use_muon": True},
-        {"params": rest_p, "use_muon": False}],                                                                                           
-        **kwargs,                                                                                                                        
-    )            
+torch.set_float32_matmul_precision("medium")                                                                                                    
 
-epochs = 10
+ds_scale = 1
+epochs = 10 * ds_scale
 prec = 32
 bs = 2**12
-devices = [4, 5, 6, 7]
-dataset_size = 2e7
+devices = [0, 1, 2, 3]
+dataset_size = int(2e7 / ds_scale)
 
-name = "rp_fm_v16_110526"
+# name = "rp_fm_v5_rf_020626"
+name = "rp_mult_v1_020626"
 
 comet_logger = CometLogger(
     api_key=os.environ["COMET_API_KEY"],
@@ -60,7 +48,7 @@ config = {
     "dl_conf": {
         "lds_args": {
             "data": f"{dpath_prefix}rp_lqar_20M_080526",
-            "frac": False,
+            "frac": 1. / ds_scale,
             "cutoff_mev": 10,
             "min_particles": 0,
         },
@@ -189,6 +177,10 @@ trainer.fit(
 )
 
 # model.opt.eval()
+
+model.rc.config["dl_conf"]["lds_args"]["data"] = "<dataset_path>"
+model.rc.config["dl_conf"]["data_path"] = None
+model.rc.config["additional"]["comet_exp_key"] = None
 
 torch.save(
     {
