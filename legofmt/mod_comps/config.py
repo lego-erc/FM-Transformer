@@ -395,3 +395,206 @@ def _build_resolved(
         reflow_path=model_conf.get("reflow_path"),
         reflow_kwargs=model_conf.get("reflow_kwargs", {}),
     )
+
+
+# ---------------------------------------------------------------------------
+# MultModel
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ResolvedMultConfig:
+    r"""Fully-resolved configuration consumed by
+    :class:`~legofmt.multiplicity.model.MultModel`.
+
+    Mirrors :class:`ResolvedLEGOConfig` for the multiplicity transformer.
+    Built via :func:`resolve_mult_config`.
+
+    Attributes:
+        max_seq_len (int): number of output-particle prediction positions
+            (``= ptypes.shape[0]``).
+        max_particles (int): per-position vocabulary size (max count + 1).
+        n_ptypes_in (int): number of distinct incoming-particle PDG ids.
+        ptypes (Tensor): int64 sorted tensor of outgoing PDG ids; registered
+            as a buffer on :class:`MultModel`.
+        ptypes_in (Tensor): int64 sorted tensor of incoming PDG ids;
+            registered as a buffer on :class:`MultModel`.
+        h_dim (int): transformer hidden dim.
+        in_dim (int): input feature dim (depends on ``use_density``).
+        n_layers (int): transformer depth.
+        n_heads (int): attention heads.
+        dropout (float): attn / ff / emb dropout. ``layer_dropout`` is
+            intentionally NOT plumbed through (stochastic depth breaks
+            DDP's reducer when ``find_unused_parameters=False``).
+        use_abs_pos_emb (bool): forwarded to
+            :class:`x_transformers.ContinuousTransformerWrapper`.
+        post_emb_norm (bool): forwarded to
+            :class:`x_transformers.ContinuousTransformerWrapper`.
+        pos_scale (float): scale applied to the position triplet inside
+            :meth:`MultModel.proj_in`.
+        model_args (dict): keyword arguments splatted into
+            :class:`x_transformers.Decoder`.
+        dl_conf (dict): dataloader sub-config; consumed by
+            :class:`MultLoader` and read for ``num_workers``.
+        mm_conf (dict): multiplicity sub-config snapshot; still consumed
+            by :class:`MultLoader` (``use_density``, ``ptypes``,
+            ``ptypes_in``, ``max_out_particles``) and read for ``bs``.
+        opt_conf (dict or None): optimizer sub-config. Looked up at
+            top-level ``config["opt_conf"]`` first (matches
+            :class:`ResolvedLEGOConfig`'s convention), then
+            ``mm_conf["opt_conf"]`` for back-compat with existing
+            multiplicity checkpoints.
+        config (dict): snapshot of the post-resolution outer config;
+            handed to :class:`MultLoader` and safe to :func:`torch.save`
+            for round-trip via :func:`resolve_mult_config`.
+        state_dict (dict or None): ``None`` for fresh training; otherwise
+            the module state dict to load into :class:`MultModel`.
+    """
+
+    max_seq_len: int
+    max_particles: int
+    n_ptypes_in: int
+    ptypes: torch.Tensor
+    ptypes_in: torch.Tensor
+
+    h_dim: int
+    in_dim: int
+    n_layers: int
+    n_heads: int
+    dropout: float
+    use_abs_pos_emb: bool
+    post_emb_norm: bool
+    pos_scale: float
+    model_args: dict[str, Any]
+
+    dl_conf: dict
+    mm_conf: dict
+    opt_conf: dict | None
+    config: dict
+
+    state_dict: dict | None
+
+
+def resolve_mult_config(full_config: dict) -> ResolvedMultConfig:
+    r"""Resolves a raw :class:`MultModel` config into a typed form.
+
+    Same dispatch shape as :func:`resolve_legoltng_config`: presence of a
+    top-level ``"state_dict"`` key selects the checkpoint-restore path.
+
+    Args:
+        full_config (dict): either a flat dict (fresh-training form) or a
+            checkpoint dict ``{"state_dict": ..., "config": {...}}``.
+
+    Returns:
+        ResolvedMultConfig: the fully-resolved configuration.
+
+    .. note::
+        Deep-copies :attr:`full_config`; the input is not mutated. The
+        fresh-training path reads ``meta.json`` from the dataset directory
+        AND scans the dataset once to discover ``max_count`` -- the same
+        heavy work the pre-refactor :meth:`MultModel.__init__` did, just
+        localized here.
+    """
+    full = copy.deepcopy(full_config)
+    state_dict = full.get("state_dict")
+    config = full.get("config", full)
+    if state_dict is None:
+        return _resolve_fresh_mult(config)
+    return _resolve_from_checkpoint_mult(config, state_dict)
+
+
+def _resolve_fresh_mult(config: dict) -> ResolvedMultConfig:
+    r"""Resolves a fresh-training mult config by reading dataset metadata.
+
+    Reads ``meta.json`` for ``ptypes`` / ``ptypes_in`` / ``max_out_particles``
+    and (only if ``max_count`` is absent) instantiates a one-shot
+    :class:`MultLoader` to discover the empirical max count. All discovered
+    values are written back onto the local ``mm_conf`` copy so the saved
+    config round-trips cleanly through :func:`_resolve_from_checkpoint_mult`.
+    """
+    # Local import: MultLoader lives in legofmt.multiplicity.model, which
+    # does not import this module. Keeping the import local avoids
+    # forcing module-load order at the package level.
+    from legofmt.multiplicity.model import MultLoader
+
+    mm_conf = config.setdefault("mm_conf", {})
+    dl_conf = config.setdefault("dl_conf", {})
+    lds_conf = dl_conf.get("lds_args", {})
+
+    dpath = lds_conf.get("data")
+    if dpath is None:
+        raise KeyError("Fresh-training mult config requires dl_conf.lds_args.data")
+
+    meta = json.loads(Path(dpath, "meta.json").read_text())
+    mm_conf.setdefault("max_out_particles", meta["ntokens"] - 3)
+    mm_conf.setdefault(
+        "ptypes", torch.tensor(meta["particles"]).sort().values
+    )
+    mm_conf.setdefault(
+        "ptypes_in", torch.tensor(meta["particles_in"]).sort().values
+    )
+
+    if "max_count" not in mm_conf:
+        _tmp_loader = MultLoader(config)
+        mm_conf["max_count"] = int(_tmp_loader.counts.max().item()) + 1
+        del _tmp_loader
+
+    return _build_resolved_mult(config, mm_conf, dl_conf, state_dict=None)
+
+
+def _resolve_from_checkpoint_mult(
+    config: dict, state_dict: dict
+) -> ResolvedMultConfig:
+    r"""Resolves a mult config loaded from a saved checkpoint.
+
+    Reads ``max_count`` / ``ptypes`` / ``ptypes_in`` from the saved
+    ``mm_conf``. Falls back to ``max_out_particles`` for ``max_count`` to
+    match the pre-refactor :meth:`MultModel.__init__` behavior.
+    """
+    mm_conf = config.setdefault("mm_conf", {})
+    dl_conf = config.setdefault("dl_conf", {})
+    mm_conf.setdefault("max_count", mm_conf.get("max_out_particles"))
+    return _build_resolved_mult(config, mm_conf, dl_conf, state_dict=state_dict)
+
+
+def _build_resolved_mult(
+    config: dict,
+    mm_conf: dict,
+    dl_conf: dict,
+    state_dict: dict | None,
+) -> ResolvedMultConfig:
+    r"""Assembles a :class:`ResolvedMultConfig` from the resolved inputs.
+
+    All defaulting policy for optional ``mm_conf`` keys lives here, so the
+    two construction paths agree on defaults. ``opt_conf`` is read from
+    top-level ``config["opt_conf"]`` first (matching the LEGOLtng
+    convention), then ``mm_conf["opt_conf"]`` for back-compat.
+    """
+    ptypes = mm_conf["ptypes"]
+    ptypes_in = mm_conf["ptypes_in"]
+    if not torch.is_tensor(ptypes):
+        ptypes = torch.tensor(ptypes)
+    if not torch.is_tensor(ptypes_in):
+        ptypes_in = torch.tensor(ptypes_in)
+
+    return ResolvedMultConfig(
+        max_seq_len=ptypes.shape[0],
+        max_particles=mm_conf["max_count"],
+        n_ptypes_in=ptypes_in.shape[0],
+        ptypes=ptypes.contiguous(),
+        ptypes_in=ptypes_in.contiguous(),
+        h_dim=mm_conf.get("h_dim", 512),
+        in_dim=mm_conf.get("in_dim", 6),
+        n_layers=mm_conf.get("n_layers", 6),
+        n_heads=mm_conf.get("n_heads", 8),
+        dropout=mm_conf.get("dropout", 0.1),
+        use_abs_pos_emb=mm_conf.get("use_abs_pos_emb", True),
+        post_emb_norm=mm_conf.get("post_emb_norm", True),
+        pos_scale=mm_conf.get("pos_scale", 50.0),
+        model_args=mm_conf.get("model_args", {}),
+        dl_conf=dl_conf,
+        mm_conf=mm_conf,
+        opt_conf=config.get("opt_conf", mm_conf.get("opt_conf")),
+        config=config,
+        state_dict=state_dict,
+    )
