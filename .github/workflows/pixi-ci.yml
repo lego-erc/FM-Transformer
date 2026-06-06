@@ -49,6 +49,6 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_REPO: ${{ inputs.hf_repo || 'lego-erc/legofmt' }}
           HF_REVISION: ${{ inputs.hf_revision || 'main' }}
-          HF_FLOW_CKPT: ${{ inputs.flow_ckpt || 'checkpoints/fm/rp_fm_v4_100426.pt' }}
+          HF_FLOW_CKPT: ${{ inputs.flow_ckpt || 'checkpoints/fm/rp_fm_v7_110526.pt' }}
           HF_MULT_CKPT: ${{ inputs.mult_ckpt || 'checkpoints/mult/rp_mult_v1_080426.pt' }}
         run: pixi run -e ci pytest tests/test_generate.py -v
