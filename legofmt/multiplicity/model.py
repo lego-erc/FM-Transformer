@@ -73,9 +73,6 @@ class MultModel(LightningModule):
 
         self.proj_in_ = torch.nn.Linear(rc.in_dim, rc.h_dim)
 
-        # Fused teacher-forcing embedding table: one Embedding of shape
-        # ((max_seq_len - 1) * max_particles, h_dim). Per-position lookups
-        # become a single op via the cached offset buffer.
         self.embd_in_ = torch.nn.Embedding(
             (rc.max_seq_len - 1) * rc.max_particles, rc.h_dim,
         )
@@ -87,16 +84,12 @@ class MultModel(LightningModule):
 
         self.embd_pp_ = torch.nn.Embedding(rc.n_ptypes_in, rc.h_dim)
 
-        # Fused per-position output projection: weight (L, H, P), bias (L, P).
-        # Replaces ModuleList[Linear] + torch.stack with one einsum.
         self.proj_out_w = torch.nn.Parameter(
             torch.empty(rc.max_seq_len, rc.h_dim, rc.max_particles)
         )
         self.proj_out_b = torch.nn.Parameter(
             torch.empty(rc.max_seq_len, rc.max_particles)
         )
-        # Mirror nn.Linear defaults per position (kaiming_uniform with
-        # a=sqrt(5) on weight, uniform[-1/sqrt(fan_in), 1/sqrt(fan_in)] on bias).
         _bound = 1.0 / (rc.h_dim ** 0.5)
         for _i in range(rc.max_seq_len):
             torch.nn.init.kaiming_uniform_(self.proj_out_w[_i], a=5 ** 0.5)
@@ -106,7 +99,6 @@ class MultModel(LightningModule):
             self.load_state_dict(rc.state_dict, strict=False)
 
         if rc.opt_conf is None:
-            # Back-compat fallback for configs that don't set opt_conf.
             import schedulefree
             self.opt = schedulefree.AdamWScheduleFree(
                 self.parameters(),
@@ -144,11 +136,9 @@ class MultModel(LightningModule):
         in_cc, counts, pdgid_in_idx = batch
         in_embd = self.proj_in(in_cc)
         pdgid_embd = in_embd + self.embd_pp_(pdgid_in_idx)
-        # Fused: shift per-position by max_particles, look up once.
         gt_embds = self.embd_in_(counts[:, : self.rc.max_seq_len - 1] + self._in_offsets)
         in_seq = torch.cat((pdgid_embd.unsqueeze(1), gt_embds), dim=1)
         out = self.model(in_seq, mask=None, condition=pdgid_embd)
-        # Fused batched matmul replaces L separate Linear calls + stack.
         logits = torch.einsum("bsh,shp->bsp", out, self.proj_out_w) + self.proj_out_b
 
         loss_model = F.cross_entropy(

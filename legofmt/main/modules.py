@@ -24,7 +24,7 @@ from legofmt.geometry.path_sample_mult import ProductPathSampler, ProductManifol
 from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.mod_comps.config import resolve_legoltng_config
 from legofmt.mod_comps.optimizers import build_optimizer
-from legofmt.mod_comps.val_metrics import ShowerValMetrics
+from legofmt.log_metrics.val_metrics import ShowerValMetrics
 
 
 class ProjectModel(ModelWrapper, nn.Module):
@@ -227,7 +227,7 @@ class LEGOLtng(ltng.LightningModule):
 
     @torch.no_grad()
     def validation_step(self, batch: DataStruct, _batch_idx: int | Tensor) -> Tensor:
-        bs = len(batch)  # Lightning can't infer batch_size from a DataStruct
+        bs = len(batch)
         loss = self._step(batch, _batch_idx)
         self.log("Validation Loss", loss, on_step=True, on_epoch=True, sync_dist=True, batch_size=bs)
         for name, val in self.val_metrics(self, batch).items():

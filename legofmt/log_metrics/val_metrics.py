@@ -18,11 +18,9 @@ from legofmt.geometry.geom_trafos import GeomTrafos
 
 _GEOM = GeomTrafos()
 
-# Per-particle kinematic features (momentum + position, spherical).
 KIN_NAMES = ["mom_theta", "mom_phi", "mom_|p|", "pos_theta", "pos_phi"]
-_TYPES = (11, -11, 22)  # e-, e+, gamma
+_TYPES = (11, -11, 22)
 _TYPE_TAGS = ("em", "ep", "g")
-# Per-event summary: for each type, 5 means then 5 stds, then E_dep.
 SUMMARY_FEATURE_NAMES = [
     f"{tag}_{k}_{stat}"
     for tag in _TYPE_TAGS
@@ -49,15 +47,15 @@ def particle_kinematics(mom, pos, active):
 
 def event_summary(mom, pos, pdgid, active, e_dep):
     """Per-event ``(B, 31)``: per-type {e-, e+, g} kinematic mean+std, then E_dep."""
-    kin = _spherical(mom, pos)  # (B, K, 5)
+    kin = _spherical(mom, pos)
     feats = []
     for pid in _TYPES:
-        m = ((pdgid == pid) & active).unsqueeze(-1).to(kin.dtype)  # (B, K, 1)
-        n = m.sum(1).clamp(min=1)  # (B, 1)
-        mean = (kin * m).sum(1) / n  # (B, 5)
+        m = ((pdgid == pid) & active).unsqueeze(-1).to(kin.dtype)
+        n = m.sum(1).clamp(min=1)
+        mean = (kin * m).sum(1) / n
         var = (((kin - mean.unsqueeze(1)) ** 2) * m).sum(1) / n
         feats += [mean, var.sqrt()]
-    return torch.cat([*feats, e_dep.unsqueeze(-1)], dim=-1)  # (B, 31)
+    return torch.cat([*feats, e_dep.unsqueeze(-1)], dim=-1)
 
 
 def standardize(a, b):
@@ -107,7 +105,7 @@ class ShowerValMetrics:
     """
 
     def __call__(self, lego, ds_t) -> dict:
-        gen = self._generate(lego, ds_t)  # (B, L, 6), model space
+        gen = self._generate(lego, ds_t)
         active, pdg, rcc = ds_t.am.out_p, ds_t.f.out_p[..., -1], ds_t.f.out_cc
         reps = {
             "particle": (

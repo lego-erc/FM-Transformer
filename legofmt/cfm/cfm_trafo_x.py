@@ -173,9 +173,6 @@ class CFMTrafo_x(nn.Module):
             self.register_buffer("mask_freqs", torch.arange(h_dim) % 2)
             self._register_load_state_dict_pre_hook(self._legacy_param_rename)
         else:
-            # Direct (no-time): learnable replacement for the sinusoidal time
-            # embedding so the Encoder's adaptive-RMSNorm / layerscale paths
-            # still receive a condition signal.
             self.global_cond = nn.Parameter(torch.zeros(1, h_dim))
 
     @staticmethod
@@ -242,8 +239,7 @@ class CFMTrafo_x(nn.Module):
         # Up-projection: the three source-indexed weights are summed
         # before the einsum (single fused contraction); biases summed
         # likewise; divide by 3 to average. Inlined to let intermediates
-        # be freed before the next op. When ``time_cond``, the time
-        # embedding is added on top of the averaged up-projection.
+        # be freed before the next op.
         embd = (
             torch.einsum(
                 "ijl,ijkl->ijk", x,

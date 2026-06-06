@@ -1,7 +1,7 @@
 import torch
 
 from legofmt.data.struct import DataStruct
-from legofmt.mod_comps.val_metrics import (
+from legofmt.log_metrics.val_metrics import (
     KIN_NAMES,
     SUMMARY_FEATURE_NAMES,
     ShowerValMetrics,

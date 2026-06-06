@@ -122,6 +122,6 @@ def test_instantiation(generator: GenerateOut) -> None:
 def test_forward_shapes(generator: GenerateOut) -> None:
     sols, mask, attn_mask = generator(_dummy_cond(generator, batch=2))
     L = generator.max_seq_l
-    assert sols.shape == (2, L, 8)  # density + 6D model space + pdgid
+    assert sols.shape == (2, L, 8)
     assert mask.shape == attn_mask.shape == (2, L)
     assert torch.isfinite(sols[attn_mask]).all(), "non-finite values at attended slots"

@@ -174,10 +174,6 @@ class ResolvedLEGOConfig:
 
     state_dict: dict | None
 
-    # Reflow: when ``reflow_path`` points at a velocity-model checkpoint,
-    # :class:`legofmt.main.modules.LEGOLtngDirect` loads it as a frozen
-    # teacher and uses ``teacher.solve(base)`` as the per-batch training
-    # target. ``reflow_kwargs`` is forwarded to ``teacher.solve``.
     reflow_path: str | None
     reflow_kwargs: dict
 
@@ -397,11 +393,6 @@ def _build_resolved(
     )
 
 
-# ---------------------------------------------------------------------------
-# MultModel
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class ResolvedMultConfig:
     r"""Fully-resolved configuration consumed by
@@ -512,9 +503,6 @@ def _resolve_fresh_mult(config: dict) -> ResolvedMultConfig:
     values are written back onto the local ``mm_conf`` copy so the saved
     config round-trips cleanly through :func:`_resolve_from_checkpoint_mult`.
     """
-    # Local import: MultLoader lives in legofmt.multiplicity.model, which
-    # does not import this module. Keeping the import local avoids
-    # forcing module-load order at the package level.
     from legofmt.multiplicity.model import MultLoader
 
     mm_conf = config.setdefault("mm_conf", {})
@@ -597,10 +585,6 @@ def _migrate_legacy_mult_heads(
         dict: the migrated state dict (or the input unchanged if no legacy
         keys were found).
     """
-    # Legacy ModuleList keys have an index segment: "proj_out_.0.weight",
-    # "embd_in_.0.weight". The fused layout uses "proj_out_w" / "proj_out_b"
-    # / "embd_in_.weight" (no integer segment), which must NOT trigger
-    # migration.
     has_legacy_proj = "proj_out_.0.weight" in state_dict
     has_legacy_embd = "embd_in_.0.weight" in state_dict
     if not (has_legacy_proj or has_legacy_embd):
@@ -614,13 +598,10 @@ def _migrate_legacy_mult_heads(
     if has_legacy_proj:
         weights = [state_dict[f"proj_out_.{i}.weight"] for i in range(max_seq_len)]
         biases = [state_dict[f"proj_out_.{i}.bias"] for i in range(max_seq_len)]
-        # Linear stores (out=P, in=H); fused stores (L, H, P) -- transpose
-        # each slice.
         out["proj_out_w"] = torch.stack([w.t().contiguous() for w in weights], dim=0)
         out["proj_out_b"] = torch.stack(biases, dim=0)
 
     if has_legacy_embd:
-        # max_seq_len - 1 tables of shape (P, H), stacked row-wise.
         embd_weights = [
             state_dict[f"embd_in_.{i}.weight"] for i in range(max_seq_len - 1)
         ]

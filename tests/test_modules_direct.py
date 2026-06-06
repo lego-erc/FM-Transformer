@@ -22,7 +22,7 @@ def _has_nonzero_grad(params) -> bool:
 def _tiny_config() -> dict:
     pdgids = torch.tensor([22, 211, 2212], dtype=torch.int64).sort().values
     return {
-        "state_dict": {},  # take the checkpoint-restore branch (skips meta.json lookup)
+        "state_dict": {},
         "config": {
             "dl_conf": {
                 "lds_args": {"cutoff_mev": 10.0},
@@ -70,12 +70,12 @@ def _fake_batch(B: int = 2, L: int = 5) -> DataStruct:
     """Synthetic batch matching the padded sequence layout: 2 conditioning
     slots, 1 incoming-particle slot, then ``L - 3`` outgoing slots."""
     f = torch.zeros(B, L, 8)
-    f[:, 0, 1] = 1.0                                # density
-    f[:, 1, 1] = 0.1                                # edep
-    _F(f).non_p[..., 2:-1] = 1.0                    # sphere-projx-safe placeholder
-    f[:, 2, 1:4] = torch.tensor([0.0, 0.0, 150.0])  # incoming mom (E-scaled)
-    f[:, 2, 4:7] = torch.tensor([0.0, 0.0, -1.0])   # incoming pos on sphere
-    f[:, 2, 7] = 22.0                               # incoming pdgid
+    f[:, 0, 1] = 1.0
+    f[:, 1, 1] = 0.1
+    _F(f).non_p[..., 2:-1] = 1.0
+    f[:, 2, 1:4] = torch.tensor([0.0, 0.0, 150.0])
+    f[:, 2, 4:7] = torch.tensor([0.0, 0.0, -1.0])
+    f[:, 2, 7] = 22.0
     g = torch.Generator().manual_seed(0)
     f[:, 3:, 1:4] = torch.randn(B, L - 3, 3, generator=g) * 30.0
     f[:, 3:, 4:7] = torch.nn.functional.normalize(
@@ -154,7 +154,7 @@ def test_solve_chunked_matches_full() -> None:
     ds = _fake_batch(B=12)
     base = model.gen_base_wrapper(ds)
     full = model.solve(ds, x_init=base)
-    for split in (12, 6, 5):  # 5 -> partial last chunk (12 % 5 = 2)
+    for split in (12, 6, 5):
         chunked = model.solve(ds, x_init=base, split_size=split)
         assert torch.allclose(full, chunked, equal_nan=True), f"split_size={split} diverges"
 
@@ -182,14 +182,11 @@ def test_reflow_teacher_isolated_from_submodule_registry(tmp_path) -> None:
     teacher = model.reflow_teacher
     assert teacher is not None
 
-    # Not in self.modules() -> Lightning's train/eval propagation skips it.
     assert not any(mod is teacher for mod in model.modules())
 
-    # Not in self.parameters() -> DDP doesn't sync, optimizer never updates it.
     teacher_first_param = next(teacher.parameters())
     assert id(teacher_first_param) not in {id(p) for p in model.parameters()}
 
-    # parent.train() must not flip teacher's training flag.
     assert teacher.model.training is False
     model.train()
     assert teacher.model.training is False

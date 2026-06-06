@@ -11,7 +11,7 @@ import lightning as ltng
 from lightning.pytorch.loggers import CometLogger
 import schedulefree
 import torch
-# from legofmt.main.modules_direct import LEGOLtng
+from legofmt.main.modules_direct import LEGOLtng
 from legofmt.multiplicity.model import MultModel
 
 from pytorch_optimizer import AdEMAMix 
@@ -30,7 +30,6 @@ bs = 2**12
 devices = [0, 1, 2, 3]
 dataset_size = int(2e7 / ds_scale)
 
-# name = "rp_fm_v5_rf_020626"
 name = "rp_mult_v1_020626"
 
 comet_logger = CometLogger(
@@ -41,7 +40,7 @@ comet_logger = CometLogger(
     name=name,
 )
 
-dpath_prefix = "/ptmp/mpp/hildebra/lego/data/"
+dpath_prefix = os.environ.get("LEGO_DATA_DIR", "./data/")
 total_steps = epochs * int(dataset_size / (bs * len(devices)))   
 
 config = {
@@ -59,7 +58,6 @@ config = {
     },
     "val_conf": {"val_frac": 0.01, "seed": 0},
     "base_conf": {
-        "base_range": 3.4,
         "kappa": torch.tensor(8.),
         "bs_frac": 0.,
         "base_dist": "poles",
@@ -110,7 +108,7 @@ config = {
         "warmup_steps": 0,
         "ce_focal_gamma": 0.,
         "post_emb_norm": False,
-        "abs_pos_emb": False,
+        "use_abs_pos_emb": False,
         "model_args": {
             "ff_swish": True,
             "ff_glu": True,
@@ -164,7 +162,6 @@ trainer = ltng.Trainer(
     strategy="ddp",
     logger=comet_logger,
     val_check_interval=0.25,
-    # check_val_every_n_epoch=1,
     limit_val_batches=4,
     gradient_clip_val=1.,
 )
