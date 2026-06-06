@@ -26,9 +26,13 @@ Path A — ad-hoc (raw dict in memory):
     (per_event +       (mom cutoff,    (manifold projx,
      per_particle)      NaN/sort)       ray-trace, en. proj)
 
-Path B — prepped on disk (used by scripts/train.py):
-    {path}/data_prepped.pt
-    {path}/meta.json     ─────────────────────────► LEGODataset(path)
+    - energy_proj.py: normalization for the magnitute of the momentum. 
+    - gen_base.py: flow base sample generation. 
+    - path_sample_mult.py: enables projections and path computations on products of manifolds. 
+    - raytracing_proj.py: projects to the other side of the cube, can add noise. 
+    - geom_trafos.py: cartesian↔spherical conversions, sphere→cube L∞ projection, and a wrapped-Gaussian sphere sampler.
+    
+- ### multiplicity
 
 Both paths yield a DataStruct stream:
 

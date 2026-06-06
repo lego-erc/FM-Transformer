@@ -2,15 +2,14 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-import json
-
 from lightning import LightningModule
 
 from x_transformers import ContinuousTransformerWrapper, Decoder
 
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.geometry.geom_trafos import GeomTrafos
-from legofmt.main.optimizers import build_optimizer
+from legofmt.mod_comps.config import resolve_mult_config
+from legofmt.mod_comps.optimizers import build_optimizer
 
 
 class MultLoader(torch.utils.data.Dataset):
@@ -47,86 +46,76 @@ class MultLoader(torch.utils.data.Dataset):
 
 
 class MultModel(LightningModule):
-    def __init__(self, config: dict):
+    def __init__(self, full_config: dict):
         super().__init__()
-        state_dict = config.get("state_dict", None)
-        if "config" in config.keys():
-            config = config.get("config")
-        self.config = config
-        self.mm_conf = config.get("mm_conf", {})
-        self.pos_scale = self.mm_conf.get("pos_scale", 50.0)
-        h_dim = self.mm_conf.get("h_dim", 512)
-        dl_conf = config.get("dl_conf", {})
-        lds_conf = dl_conf.get("lds_args", {})
-        if state_dict is None:
-            with open(lds_conf.get("data") + "/meta.json") as f:
-                meta_dict = json.load(f)
-                self.mm_conf.setdefault("max_out_particles", meta_dict["ntokens"] - 3)
-                self.mm_conf.setdefault(
-                    "ptypes", torch.tensor(meta_dict["particles"]).sort().values
-                )
-                self.mm_conf.setdefault(
-                    "ptypes_in", torch.tensor(meta_dict["particles_in"]).sort().values
-                )
-            if "max_count" not in self.mm_conf:
-                _tmp_loader = MultLoader(self.config)
-                self.mm_conf["max_count"] = int(_tmp_loader.counts.max().item()) + 1
-                del _tmp_loader
-        self.mm_conf.setdefault("max_count", self.mm_conf.get("max_out_particles"))
-        self.max_particles = self.mm_conf["max_count"]
-        dropout = self.mm_conf.get("dropout", 0.1)
-        self.max_seq_len = self.mm_conf["ptypes"].shape[0]
-        in_dim = self.mm_conf.get("in_dim", 6)
-        self.n_ptypes_in = self.mm_conf.get("ptypes_in").shape[0]
+        rc = resolve_mult_config(full_config)
+        self.rc = rc
+
+        self.register_buffer("ptypes", rc.ptypes)
+        self.register_buffer("ptypes_in", rc.ptypes_in)
         self.geom_trafos = GeomTrafos()
 
         self.model = ContinuousTransformerWrapper(
-            max_seq_len=self.max_seq_len,
-            emb_dropout=dropout,
-            use_abs_pos_emb=self.mm_conf.get("use_abs_pos_emb", True),
-            post_emb_norm=self.mm_conf.get("post_emb_norm", True),
+            max_seq_len=rc.max_seq_len,
+            emb_dropout=rc.dropout,
+            use_abs_pos_emb=rc.use_abs_pos_emb,
+            post_emb_norm=rc.post_emb_norm,
             attn_layers=Decoder(
-                dim=h_dim,
-                depth=self.mm_conf.get("n_layers", 6),
-                heads=self.mm_conf.get("n_heads", 8),
-                layer_dropout=dropout,
-                attn_dropout=dropout,
-                ff_dropout=dropout,
-                dim_condition=h_dim,
-                **self.mm_conf.get("model_args", {}),
+                dim=rc.h_dim,
+                depth=rc.n_layers,
+                heads=rc.n_heads,
+                attn_dropout=rc.dropout,
+                ff_dropout=rc.dropout,
+                dim_condition=rc.h_dim,
+                **rc.model_args,
             ),
         )
 
-        self.proj_in_ = torch.nn.Linear(in_dim, h_dim)
+        self.proj_in_ = torch.nn.Linear(rc.in_dim, rc.h_dim)
 
-        self.embd_in_ = torch.nn.ModuleList(
-            [
-                torch.nn.Embedding(self.max_particles, h_dim)
-                for _ in range(self.max_seq_len)
-            ]
+        self.embd_in_ = torch.nn.Embedding(
+            (rc.max_seq_len - 1) * rc.max_particles, rc.h_dim,
+        )
+        self.register_buffer(
+            "_in_offsets",
+            torch.arange(rc.max_seq_len - 1, dtype=torch.long) * rc.max_particles,
+            persistent=False,
         )
 
-        self.embd_pp_ = torch.nn.Embedding(self.n_ptypes_in, h_dim)
+        self.embd_pp_ = torch.nn.Embedding(rc.n_ptypes_in, rc.h_dim)
 
-        self.proj_out_ = torch.nn.ModuleList(
-            [
-                torch.nn.Linear(h_dim, self.max_particles)
-                for _ in range(self.max_seq_len)
-            ]
+        self.proj_out_w = torch.nn.Parameter(
+            torch.empty(rc.max_seq_len, rc.h_dim, rc.max_particles)
         )
+        self.proj_out_b = torch.nn.Parameter(
+            torch.empty(rc.max_seq_len, rc.max_particles)
+        )
+        _bound = 1.0 / (rc.h_dim ** 0.5)
+        for _i in range(rc.max_seq_len):
+            torch.nn.init.kaiming_uniform_(self.proj_out_w[_i], a=5 ** 0.5)
+            torch.nn.init.uniform_(self.proj_out_b[_i], -_bound, _bound)
 
-        if state_dict is not None:
-            self.load_state_dict(state_dict, strict=False)
+        if rc.state_dict is not None:
+            self.load_state_dict(rc.state_dict, strict=False)
 
-        opt_conf = self.mm_conf.get("opt_conf")
-
-        self.opt, self._sched = build_optimizer(self.parameters(), opt_conf)
+        if rc.opt_conf is None:
+            import schedulefree
+            self.opt = schedulefree.AdamWScheduleFree(
+                self.parameters(),
+                lr=rc.mm_conf.get("lr", 1e-3),
+                betas=(0.95, 0.999),
+                weight_decay=rc.mm_conf.get("weight_decay", 0.0),
+                warmup_steps=rc.mm_conf.get("warmup_steps", 0),
+            )
+            self._sched = None
+        else:
+            self.opt, self._sched = build_optimizer(self.parameters(), rc.opt_conf)
         self._opt_is_sf = hasattr(self.opt, "train") and callable(getattr(self.opt, "train", None))
 
     def proj_in(self, x):
         x = x.clone()
         x[..., -6:] = self.geom_trafos.to_cube(x[..., -6:])
-        x[..., -3:] = self.pos_scale * x[..., -3:]
+        x[..., -3:] = self.rc.pos_scale * x[..., -3:]
         return self.proj_in_(x)
 
     def _opt_train(self):
@@ -147,17 +136,13 @@ class MultModel(LightningModule):
         in_cc, counts, pdgid_in_idx = batch
         in_embd = self.proj_in(in_cc)
         pdgid_embd = in_embd + self.embd_pp_(pdgid_in_idx)
-        gt_embds = torch.stack(
-            [self.embd_in_[i](counts[:, i]) for i in range(self.max_seq_len - 1)], dim=1
-        )
+        gt_embds = self.embd_in_(counts[:, : self.rc.max_seq_len - 1] + self._in_offsets)
         in_seq = torch.cat((pdgid_embd.unsqueeze(1), gt_embds), dim=1)
         out = self.model(in_seq, mask=None, condition=pdgid_embd)
-        logits = torch.stack(
-            [self.proj_out_[i](out[:, i]) for i in range(self.max_seq_len)], dim=1
-        )
+        logits = torch.einsum("bsh,shp->bsp", out, self.proj_out_w) + self.proj_out_b
 
         loss_model = F.cross_entropy(
-            logits.reshape(-1, self.max_particles), counts.reshape(-1)
+            logits.reshape(-1, self.rc.max_particles), counts.reshape(-1)
         )
 
         self.log("train_loss", loss_model, prog_bar=True, sync_dist=True)
@@ -170,11 +155,11 @@ class MultModel(LightningModule):
         return {"optimizer": self.opt, "lr_scheduler": self._sched}
 
     def train_dataloader(self):
-        dataset_train = MultLoader(self.config)
-        num_workers = self.config.get("dl_conf").get("num_workers", 4)
+        dataset_train = MultLoader(self.rc.config)
+        num_workers = self.rc.dl_conf.get("num_workers", 4)
         return DataLoader(
             dataset_train,
-            batch_size=self.mm_conf.get("bs", 2**12),
+            batch_size=self.rc.mm_conf.get("bs", 2**12),
             shuffle=True,
             num_workers=num_workers,
             pin_memory=True,
@@ -190,10 +175,10 @@ class MultModel(LightningModule):
         in_embd = self.proj_in(in_cc)
         x = (in_embd + self.embd_pp_(pdgid_in_idx)).unsqueeze(1)
         condition = x[:, 0]
-        counts = in_cc.new_empty(x.shape[0], self.max_seq_len, dtype=torch.long)
+        counts = in_cc.new_empty(x.shape[0], self.rc.max_seq_len, dtype=torch.long)
 
         cache = None
-        for i in range(self.max_seq_len):
+        for i in range(self.rc.max_seq_len):
             out, cache = self.model(
                 x,
                 mask=None,
@@ -202,9 +187,10 @@ class MultModel(LightningModule):
                 cache=cache,
                 input_not_include_cache=(i > 0),
             )
-            logits = self.proj_out_[i](out[:, -1])
+            logits = out[:, -1] @ self.proj_out_w[i] + self.proj_out_b[i]
             sampled = torch.multinomial(logits.softmax(-1), 1).squeeze(-1)
-            x = self.embd_in_[i](sampled).unsqueeze(1)
             counts[:, i] = sampled
+            if i < self.rc.max_seq_len - 1:
+                x = self.embd_in_(sampled + i * self.rc.max_particles).unsqueeze(1)
 
         return counts

@@ -3,7 +3,7 @@ from torch import Tensor
 
 from ..geometry.energy_proj import EnergyProjections
 from ..geometry.raytracing_proj import CubeTrace
-from ..main.config import build_manifold
+from ..mod_comps.config import build_manifold
 from .struct import _F
 
 class DataPrep:

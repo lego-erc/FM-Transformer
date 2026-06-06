@@ -33,8 +33,6 @@ def _get(reg, k):
 
 def build_optimizer(params, opt_conf):
     """Returns (optimizer, lr_scheduler_dict | None) ready for Lightning."""
-    if opt_conf is None:
-        return None, None
     cfg = {**opt_conf}
     sc = cfg.pop("scheduler", None)
     opt = _get(OPTIMIZERS, cfg.pop("opt"))(params, **cfg)

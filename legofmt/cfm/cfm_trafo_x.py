@@ -95,7 +95,7 @@ class CFMTrafo_x(nn.Module):
             at its boundary instead of identities. Back-compat for
             checkpoints whose state dict contains ``vf.project_in.*`` /
             ``vf.project_out.*`` weights;
-            ``legofmt.main.config._apply_legacy_state_dict_compat`` sets
+            ``legofmt.mod_comps.config._apply_legacy_projection_in_out`` sets
             this to ``h_dim`` when those keys are detected. Default:
             ``None``.
         **kwargs: Forwarded to ``x_transformers.Encoder`` (e.g.
@@ -117,6 +117,7 @@ class CFMTrafo_x(nn.Module):
         xavier_gain: float = 1.0,
         npdgids: int = 1,
         dim_in_out: int | None = None,
+        time_cond: bool = True,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -127,6 +128,7 @@ class CFMTrafo_x(nn.Module):
         self.nvtypes = nvtypes
         self.ntypes = ntypes
         self.npdgids = npdgids
+        self.time_cond = time_cond
 
         self.vf = ContinuousTransformerWrapper(
             dim_in=dim_in_out,
@@ -165,11 +167,13 @@ class CFMTrafo_x(nn.Module):
         ):
             nn.init.xavier_normal_(p, gain=xavier_gain)
 
-        # Vaswani-style sinusoidal time embedding, freqs scaled by h_dim.
-        self.register_buffer("freqs", h_dim * 1e-4 ** (torch.arange(h_dim) / h_dim))
-        self.register_buffer("mask_freqs", torch.arange(h_dim) % 2)
-
-        self._register_load_state_dict_pre_hook(self._legacy_param_rename)
+        if time_cond:
+            # Vaswani-style sinusoidal time embedding, freqs scaled by h_dim.
+            self.register_buffer("freqs", h_dim * 1e-4 ** (torch.arange(h_dim) / h_dim))
+            self.register_buffer("mask_freqs", torch.arange(h_dim) % 2)
+            self._register_load_state_dict_pre_hook(self._legacy_param_rename)
+        else:
+            self.global_cond = nn.Parameter(torch.zeros(1, h_dim))
 
     @staticmethod
     def _legacy_param_rename(state_dict, prefix, *_):
@@ -195,17 +199,17 @@ class CFMTrafo_x(nn.Module):
 
     def forward(
         self,
-        t: Tensor,
         x: Tensor,
         mask: Tensor,
         attn_mask: Tensor,
         types: Tensor,
         pdgids: Tensor | None,
+        t: Tensor | None = None,
     ) -> Tensor:
-        """Compute the velocity field at flow time ``t``.
+        """Compute the velocity field (``time_cond=True``) or residual
+        (``time_cond=False``) at the generated slots.
 
         Args:
-            t: Flow time, broadcastable to ``(B, 1)``.
             x: Per-token features, shape ``(B, n, in_dim)``.
             mask: Token-role ids, shape ``(B, n)``, values in
                 ``[0, nvtypes)``. The output is zeroed where ``mask != 1``.
@@ -214,10 +218,11 @@ class CFMTrafo_x(nn.Module):
                 ``[0, ntypes)``.
             pdgids: Particle-species indices, shape ``(B, n)``, values in
                 ``[0, npdgids)``.
+            t: Flow time, broadcastable to ``(B, 1)``. Required when
+                ``time_cond=True``; ignored when ``False``.
 
         Returns:
-            Velocity field, shape ``(B, n, in_dim)``, zeroed where
-            ``mask != 1``.
+            ``(B, n, in_dim)`` field, zeroed where ``mask != 1``.
         """
         n = x.shape[1]
         mi, ti, pi = mask.view(-1), types.view(-1)[:n], pdgids.view(-1)
@@ -225,33 +230,36 @@ class CFMTrafo_x(nn.Module):
         so = (-1, n, self.in_dim)
         s4 = (-1, n, self.h_dim, self.in_dim)
 
-        tf = t.unsqueeze(-1) * self.freqs
-        embd_t = torch.where(self.mask_freqs.bool(), tf.sin(), tf.cos())
+        if self.time_cond:
+            tf = t.unsqueeze(-1) * self.freqs
+            cond = torch.where(self.mask_freqs.bool(), tf.sin(), tf.cos())
+        else:
+            cond = self.global_cond.expand(x.shape[0], -1)
 
         # Up-projection: the three source-indexed weights are summed
         # before the einsum (single fused contraction); biases summed
         # likewise; divide by 3 to average. Inlined to let intermediates
         # be freed before the next op.
         embd = (
-            (
-                torch.einsum(
-                    "ijl,ijkl->ijk", x,
-                    self.cond_w_mask  [mi, 0].view(s4)
-                  + self.cond_w_types [ti, 0]
-                  + self.cond_w_pdgids[pi, 0].view(s4),
-                )
-              + self.cond_bi_mask  [mi].view(s3)
-              + self.cond_bi_types [ti].view(s3)
-              + self.cond_bi_pdgids[pi].view(s3)
-            ) / 3 + embd_t
-        )
+            torch.einsum(
+                "ijl,ijkl->ijk", x,
+                self.cond_w_mask  [mi, 0].view(s4)
+              + self.cond_w_types [ti, 0]
+              + self.cond_w_pdgids[pi, 0].view(s4),
+            )
+          + self.cond_bi_mask  [mi].view(s3)
+          + self.cond_bi_types [ti].view(s3)
+          + self.cond_bi_pdgids[pi].view(s3)
+        ) / 3
+        if self.time_cond:
+            embd = embd + cond
 
         # Encoder. Inner project_in / project_out are identities unless
         # dim_in_out was set.
         embd = self.vf.project_in(embd)
         if self.training:
             embd = self.vf.emb_dropout(embd)
-        h = self.vf.project_out(self.vf.attn_layers(embd, mask=attn_mask, condition=embd_t))
+        h = self.vf.project_out(self.vf.attn_layers(embd, mask=attn_mask, condition=cond))
 
         # Down-projection: same construction as up-projection, gated to
         # mask == 1 slots. Inlined to let intermediates be freed before
