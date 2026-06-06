@@ -113,16 +113,21 @@ class LEGOLtng(ltng.LightningModule):
 
     def _opt_train(self) -> None:
         """No-op unless the optimizer has a schedule-free .train() method."""
-        if self._opt_is_sf:
+        if getattr(self, "_opt_is_sf", False):
             self.opt.train()
 
     def _opt_eval(self) -> None:
         """No-op unless the optimizer has a schedule-free .eval() method."""
-        if self._opt_is_sf:
+        if getattr(self, "_opt_is_sf", False):
             self.opt.eval()
 
     @torch.no_grad()
     def on_fit_start(self) -> None:
+        if self.rc.ot_coupling and slap is None:
+            raise RuntimeError(
+                "ot_coupling=True requires `torch_lap_cuda_lib`. "
+                "Install it or set model_conf.ot_coupling=False."
+            )
         self.loss_fn = nn.MSELoss()
         self.ps = ProductPathSampler(self.rc.manifold)
         self.model.train()

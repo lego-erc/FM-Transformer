@@ -6,8 +6,6 @@ from lightning import LightningModule
 
 from x_transformers import ContinuousTransformerWrapper, Decoder
 
-import schedulefree
-
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.mod_comps.config import resolve_mult_config
@@ -109,6 +107,7 @@ class MultModel(LightningModule):
 
         if rc.opt_conf is None:
             # Back-compat fallback for configs that don't set opt_conf.
+            import schedulefree
             self.opt = schedulefree.AdamWScheduleFree(
                 self.parameters(),
                 lr=rc.mm_conf.get("lr", 1e-3),
