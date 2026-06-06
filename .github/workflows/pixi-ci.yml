@@ -13,7 +13,7 @@ on:
       hf_revision:
         default: "main"
       flow_ckpt:
-        default: "checkpoints/fm/rp_fm_v4_100426.pt"
+        default: "checkpoints/fm/rp_fm_v7_110526.pt"
       mult_ckpt:
         default: "checkpoints/mult/rp_mult_v1_080426.pt"
 
