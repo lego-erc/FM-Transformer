@@ -44,7 +44,7 @@ class GenerateBase:
         e_in = incoming_rt[..., 0:1]
         p_cc = F.normalize(incoming_rt[..., 1:4], dim=-1)
         loc_cc = incoming_rt[..., -3:]
-        e_sc = self.rd_scale(shape, e_in)
+        e_sc = self.rd_scale(shape, torch.ones_like(e_in))
         x = self.geom_trafos.sample(shape, loc_cc, self.kappa, self.bs_frac, self.tanh_theta)
         p_ = self.geom_trafos.sample(shape, p_cc, self.kappa, 0.0, self.tanh_theta)
         base = torch.cat((e_sc, p_, x), dim=-1)

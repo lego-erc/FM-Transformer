@@ -35,6 +35,7 @@ class DataPrep:
         cc = cc.nan_to_num(1)
         mom, pos = cc.split(3, -1)
         dir_, e = self.pen.to_scalar(mom)
+        e = torch.cat((e[:, :1], (e[:, 1:] / e[:, :1].clamp_min(1e-6)).clamp(0, 1)), dim=1)
         if self.proj_ray:
             ray = torch.cat((dir_[:, 0], pos[:, 0]), dim=-1)
             pos = pos.clone()

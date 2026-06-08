@@ -68,7 +68,7 @@ def _mult_config() -> dict:
             "n_layers": 2,
             "n_heads": 2,
             "dropout": 0.0,
-            "in_dim": 8,
+            "in_dim": 7,
             "ptypes": ptypes,
             "ptypes_in": ptypes_in,
             "max_out_particles": 2,
