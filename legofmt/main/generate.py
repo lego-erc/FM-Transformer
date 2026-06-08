@@ -105,7 +105,9 @@ class GenerateOut(torch.nn.Module):
     def gen_batch(self, cond: torch.Tensor):
         pdgid_in = cond[:, -1].long()
         pdgid_in_idx = torch.searchsorted(self.pdgid_in, pdgid_in)
-        mult = self.gen_mult((cond[:, :-1], None, pdgid_in_idx))
+        mom = self.pen.from_scalar(cond[:, 2:5], cond[:, 1:2])
+        mult_in = torch.cat((cond[:, 0:1], mom, cond[:, 5:8]), dim=-1)
+        mult = self.gen_mult((mult_in, None, pdgid_in_idx))
         mult = mult[:, self.ptype_idx] * self.ptype_in_mask
 
         max_particles = self.max_seq_l - 3

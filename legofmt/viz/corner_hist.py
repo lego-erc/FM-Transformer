@@ -244,7 +244,9 @@ class CornerHist:
 
         if self.plot_en is not False:
             labels += [r"$\hat{E}$"]
-            data_en = proj[:, 0:1].clamp(0.0, 1.0)
+            e_in = self.disp_man.projx(v.in_cc.reshape(-1, 7))[:, 0:1]
+            e_in = e_in.repeat_interleave(proj.shape[0] // e_in.shape[0], dim=0)
+            data_en = (proj[:, 0:1] / e_in.clamp_min(1e-8)).clamp(0.0, 1.0)
             range_ += [(-0.2, 1.2)]
             data = np.concatenate([data, data_en.cpu().numpy()], axis=-1)
         if self.plot_edep is not False:
