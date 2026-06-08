@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from ..main.modules import LEGOLtng, LEGOLtngDirect
 from ..multiplicity.model import MultModel
 from ..geometry.raytracing_proj import CubeTrace
+from ..geometry.energy_proj import EnergyProjections
 from ..data.struct import _F
 
 
@@ -30,6 +31,9 @@ class GenerateOut(torch.nn.Module):
         self.ptype_idx = torch.searchsorted(self.ptypes, self.pdgids).clamp(max=len(self.ptypes) - 1)
         self.ptype_in_mask = self.ptypes[self.ptype_idx] == self.pdgids
         self.proj_ray = CubeTrace()
+        self.pen = EnergyProjections(
+            cutoff_mev=self.model.rc.cutoff_mev, max_energy=self.model.rc.max_energy,
+        )
 
     def __call__(self, cond: torch.Tensor, prepped: bool = False):
         model_out = self.proj_ray_pass_to_model(cond, prepped=prepped)
@@ -38,8 +42,12 @@ class GenerateOut(torch.nn.Module):
     def proj_ray_pass_to_model(self, cond: torch.Tensor, prepped: bool = False):
         cond_model = cond.clone()
         if not prepped:
-            mi = _F(cond_model).model_in
-            mi.copy_(self.proj_ray(mi))
+            mom, pos = cond_model[:, 1:4], cond_model[:, 4:7]
+            pos = self.proj_ray(torch.cat((mom, pos), dim=-1))[..., 3:]
+            dir_, e = self.pen.to_scalar(mom)
+            cond_model = torch.cat(
+                (cond_model[:, :1], e, dir_, pos, cond_model[:, 7:]), dim=-1
+            )
         batch = self.gen_batch(cond_model)
         sols, mask, attn_mask = self.model(batch)
         sols[..., -1] = torch.cat([sols.new_zeros(1), self.pdgids.to(sols.dtype)])[sols[..., -1].long()]
@@ -115,19 +123,21 @@ class GenerateOut(torch.nn.Module):
         pdgid_pad = torch.zeros_like(attn_mask, dtype=torch.long)
         cumsum_idx = mult.cumsum(-1)[..., :-1].clamp(max=max_particles - 1)
         pdgid_pad.scatter_add_(-1, cumsum_idx, torch.ones_like(pdgid_pad)).cumsum_(-1)
-        cond[..., -1] = torch.searchsorted(self.pdgids, pdgid_in) + 1
-        cond = cond[:, None, :]
-        cond_pad_r = cond.repeat(1, self.max_seq_l - 3, 1)
+        density = cond[:, 0]
+        token = cond[:, 1:]
+        token[..., -1] = torch.searchsorted(self.pdgids, pdgid_in) + 1
+        token = token[:, None, :]
+        cond_pad_r = token.repeat(1, self.max_seq_l - 3, 1)
         cond_pad_r[..., -1] = attn_mask * (pdgid_pad + 1)
         cond_fm = torch.cat(
-            (torch.zeros_like(cond).expand(-1, 2, -1), cond, cond_pad_r), dim=1
+            (torch.zeros_like(token).expand(-1, 2, -1), token, cond_pad_r), dim=1
         )
 
         attn_mask = torch.cat((torch.ones_like(attn_mask[:, :3]), attn_mask), dim=1)
         mask = attn_mask.clone().long()
-        mask[:, [0, 2]] = 0 #Conditions
-        cond_fm[:, 0, 1] = cond[:, 0, 0] #Density
-        _F(cond_fm).non_p[..., 2:-1] = 1
+        mask[:, [0, 2]] = 0
+        cond_fm[:, 0, 0] = density
+        _F(cond_fm).non_p[..., 1:-1] = 1
         return cond_fm, mask, attn_mask
 
 

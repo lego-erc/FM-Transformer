@@ -3,14 +3,26 @@ import torch.nn.functional as F
 from torch import Tensor
 
 class EnergyProjections:
-    def __init__(self, norm_type: str | bool = "in_frac"):
+    def __init__(self, norm_type: str | bool = "in_frac", cutoff_mev: float = 10.0, max_energy: float | None = None):
         self.func = getattr(self, norm_type) if isinstance(norm_type, str) else self.identity
+        self.cutoff = cutoff_mev
+        self.max_energy = max_energy
+        self.log_range = torch.tensor(max_energy / cutoff_mev).log().item() if max_energy else None
 
     def __call__(self, *args, **kwargs):
         return self.func(*args, **kwargs)
 
     def identity(self, p_x: Tensor) -> Tensor:
         return p_x
+
+    def to_scalar(self, mom: Tensor, eps: float = 1e-8) -> tuple[Tensor, Tensor]:
+        norm = mom.norm(dim=-1, keepdim=True)
+        e = (torch.log(norm.clamp_min(eps) / self.cutoff) / self.log_range).clamp(0.0, 1.0)
+        return mom / norm.clamp_min(eps), e
+
+    def from_scalar(self, dir_: Tensor, e: Tensor) -> Tensor:
+        norm = self.cutoff * (self.max_energy / self.cutoff) ** e.clamp(0.0, 1.0)
+        return dir_ * norm
 
     def in_frac_log(self, p_x: Tensor) -> Tensor:
         p_x = self.in_frac(p_x)

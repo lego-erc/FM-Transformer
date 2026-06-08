@@ -17,6 +17,13 @@ FLOW_CKPT = os.environ.get("HF_FLOW_CKPT", "checkpoints/fm/rp_fm_v7_110526.pt")
 MULT_CKPT = os.environ.get("HF_MULT_CKPT", "checkpoints/mult/rp_mult_v1_080426.pt")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
+pytestmark = pytest.mark.skipif(
+    os.environ.get("HF_FLOW_CKPT_DECOUPLED") is None,
+    reason="Published HF checkpoint is the legacy 6-D coupled-energy model, "
+    "incompatible with the decoupled-energy layout; set HF_FLOW_CKPT_DECOUPLED=1 "
+    "with a compatible checkpoint to run.",
+)
+
 
 @pytest.fixture(scope="module")
 def ckpt_paths(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:

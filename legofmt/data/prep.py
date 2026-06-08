@@ -11,11 +11,12 @@ class DataPrep:
         config = config.get("config", config)
         model_conf = config.get("model_conf").copy()
         self.in_dim = model_conf.get("model_args").get("in_dim")
-        self.slc = (8 - self.in_dim) // 2
         self.manifold = build_manifold(model_conf.get("manifold"))
         self.proj_ray = model_conf.get("proj_ray", True)
-        self.proj_en = model_conf.get("proj_en", False)
-        self.pen = EnergyProjections(self.proj_en)
+        self.pen = EnergyProjections(
+            cutoff_mev=config["dl_conf"]["lds_args"]["cutoff_mev"],
+            max_energy=model_conf["max_energy"],
+        )
         self.ppa = CubeTrace()
 
     def __call__(self, batch: tuple) -> Tensor:
@@ -24,30 +25,32 @@ class DataPrep:
     @torch.no_grad()
     def prep(self, batch: tuple) -> Tensor:
         cc_ext, mask, attn_mask, data_add = batch
-        cc_ext[..., self.slc:-self.slc] = self.cc_trafo(cc_ext[..., self.slc:-self.slc])
-        return self.format_add((cc_ext, mask, attn_mask, data_add))
+        e_in = cc_ext[:, :1, 1:4].norm(dim=-1)
+        model_in = self.cc_trafo(cc_ext[..., 1:7])
+        cc_ext = torch.cat((model_in, cc_ext[..., 7:]), dim=-1)
+        return self.format_add((cc_ext, mask, attn_mask, data_add), e_in)
 
     @torch.no_grad()
     def cc_trafo(self, cc: Tensor) -> Tensor:
         cc = cc.nan_to_num(1)
-        if self.proj_en:
-            cc = self.pen(cc)
+        mom, pos = cc.split(3, -1)
+        dir_, e = self.pen.to_scalar(mom)
         if self.proj_ray:
-            cc[:, 0] = self.ppa(cc[:, 0])
-        cc = self.manifold.projx(cc)
-        return cc
-    
+            ray = torch.cat((dir_[:, 0], pos[:, 0]), dim=-1)
+            pos = pos.clone()
+            pos[:, 0] = self.ppa(ray)[..., 3:]
+        return self.manifold.projx(torch.cat((e, dir_, pos), dim=-1))
+
     @torch.no_grad()
-    def format_add(self, batch: tuple) -> Tensor:
+    def format_add(self, batch: tuple, e_in: Tensor) -> Tensor:
         cc_ext, mask, attn_mask, data_add = batch
         e_dep = torch.ones_like(cc_ext[:, :1])
-        e_in = cc_ext[:, :1, 1:4].norm(dim=-1)
-        e_dep[..., self.slc] = data_add.get("E_dep").view_as(e_dep[..., self.slc]) / e_in
+        e_dep[..., 0] = data_add.get("E_dep").view_as(e_dep[..., 0]) / e_in
         density = torch.ones_like(cc_ext[:, :1])
-        density[..., self.slc] = data_add.get("Density").view_as(density[..., self.slc])
+        density[..., 0] = data_add.get("Density").view_as(density[..., 0])
         target = torch.cat((density, e_dep, cc_ext), dim=1).nan_to_num()
         _F(target).non_p[..., -1] = 0
-        mask = torch.cat((torch.zeros_like(mask[:, :1]), 
+        mask = torch.cat((torch.zeros_like(mask[:, :1]),
                           torch.ones_like(mask[:, :1]), mask), dim=1)
         attn_mask = torch.cat((torch.ones_like(attn_mask[:, :2]), attn_mask), dim=1)
         return target, mask, attn_mask

@@ -26,34 +26,28 @@ class GenerateBase:
         return self.func(shape, incoming_rt=incoming_rt)
 
     @torch.no_grad()
-    def rd_scale(self, shape, p_norm):
-        base_range = torch.log(p_norm / self.cutoff_mev).view(-1, 1, 1)
+    def rd_scale(self, shape, e_in):
         if self.scale_dist == "trunc_norm":
-            return base_range * (
-                torch.nn.init.trunc_normal_(
-                    p_norm.new_empty((*shape, 1)),
-                    std=1.0 / base_range, a=-1.0, b=0.0,
-                )
-                + 1.0
-            )
-        if self.scale_dist == "uniform":
-            return base_range * torch.rand((*shape, 1), device=p_norm.device)
-        if self.scale_dist == "sm_norm":
-            return base_range * (
-                1 - torch.tanh(torch.randn((*shape, 1), device=p_norm.device).abs() / 2)
-            ) + 1
-        raise ValueError("Unknown scale_dist")
+            u = torch.nn.init.trunc_normal_(
+                e_in.new_empty((*shape, 1)), std=1.0, a=-1.0, b=0.0,
+            ) + 1.0
+        elif self.scale_dist == "uniform":
+            u = torch.rand((*shape, 1), device=e_in.device)
+        elif self.scale_dist == "sm_norm":
+            u = 1 - torch.tanh(torch.randn((*shape, 1), device=e_in.device).abs() / 2)
+        else:
+            raise ValueError("Unknown scale_dist")
+        return e_in.view(-1, 1, 1) * u
 
     @torch.no_grad()
     def poles(self, shape, incoming_rt, **kwargs):
-        p_norm = incoming_rt[..., :3].norm(dim=-1, keepdim=True)
-        p_cc = F.normalize(incoming_rt[..., :3], dim=-1)
+        e_in = incoming_rt[..., 0:1]
+        p_cc = F.normalize(incoming_rt[..., 1:4], dim=-1)
         loc_cc = incoming_rt[..., -3:]
-        rd_scale = self.rd_scale(shape, p_norm)
+        e_sc = self.rd_scale(shape, e_in)
         x = self.geom_trafos.sample(shape, loc_cc, self.kappa, self.bs_frac, self.tanh_theta)
         p_ = self.geom_trafos.sample(shape, p_cc, self.kappa, 0.0, self.tanh_theta)
-        p_sc = rd_scale * p_
-        base = torch.cat((p_sc, x), dim=-1)
+        base = torch.cat((e_sc, p_, x), dim=-1)
         base = torch.cat((incoming_rt, base), dim=1)
         return base
 

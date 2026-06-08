@@ -48,7 +48,10 @@ def test_summary_shape_matches_names():
     B, K = 8, 12
     pdg = torch.tensor([11, -11, 22, 0]).repeat(B, K // 4 + 1)[:, :K]
     active = torch.ones(B, K, dtype=torch.bool)
-    s = event_summary(torch.randn(B, K, 3), torch.randn(B, K, 3), pdg, active, torch.rand(B))
+    s = event_summary(
+        torch.randn(B, K, 3), torch.rand(B, K, 1), torch.randn(B, K, 3),
+        pdg, active, torch.rand(B),
+    )
     assert s.shape == (B, len(SUMMARY_FEATURE_NAMES)) == (B, 31)
 
 
@@ -56,7 +59,9 @@ def test_particle_kinematics_packs_active():
     B, K = 4, 6
     active = torch.zeros(B, K, dtype=torch.bool)
     active[:, :3] = True
-    feats = particle_kinematics(torch.randn(B, K, 3), torch.randn(B, K, 3), active)
+    feats = particle_kinematics(
+        torch.randn(B, K, 3), torch.rand(B, K, 1), torch.randn(B, K, 3), active,
+    )
     assert feats.shape == (B * 3, len(KIN_NAMES))
 
 
@@ -64,7 +69,10 @@ def test_summary_identical_metrics_zero():
     B, K = 64, 10
     pdg = torch.full((B, K), 11)
     active = torch.ones(B, K, dtype=torch.bool)
-    s = event_summary(torch.randn(B, K, 3), torch.randn(B, K, 3), pdg, active, torch.rand(B))
+    s = event_summary(
+        torch.randn(B, K, 3), torch.rand(B, K, 1), torch.randn(B, K, 3),
+        pdg, active, torch.rand(B),
+    )
     sa, sb = standardize(s, s.clone())
     assert compute_mmd(sa, sb).item() < 1e-5
     assert torch.allclose(w1_per_feature(sa, sb), torch.zeros(31), atol=1e-6)

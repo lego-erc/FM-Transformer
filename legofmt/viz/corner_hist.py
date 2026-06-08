@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import shutil
 import numpy as np
 import torch
-from flow_matching.utils.manifolds import Sphere
+from flow_matching.utils.manifolds import Euclidean, Sphere
 from matplotlib.animation import FuncAnimation
 from matplotlib.lines import Line2D
 
@@ -57,7 +57,7 @@ class CornerHist:
             self.cutoff_en = cutoff_en
         self.anim_intermediates = anim_intermediates
         self.geom_trafos = GeomTrafos()
-        self.disp_man = ProductManifold([Sphere(), Sphere()], (3, 3))
+        self.disp_man = ProductManifold([Euclidean(), Sphere(), Sphere()], (1, 3, 3))
         self.figsize = figsize
         self.plot_vars = plot_vars
         self.title = title
@@ -173,7 +173,7 @@ class CornerHist:
         self.sols_e_dep = e_dep.mean()
 
         truth = _F(batch[0])
-        sols_true = batch[0] if batch[0].shape[-1] == 6 else truth.model_in
+        sols_true = batch[0] if batch[0].shape[-1] == 7 else truth.model_in
         sols_cc = sols_cc[:, : sols_true.shape[1]]
         sols_true = torch.where(torch.isnan(sols_cc), torch.nan, sols_true)
 
@@ -229,9 +229,11 @@ class CornerHist:
     @torch.no_grad()
     def make_corner(self, data_cc, fig, color="#FF9D00", data_add=None):
         v = _F(data_cc)
-        data_out = v.out_p.reshape(-1, 6)
-        en_in = data_cc[:, 2, :3].norm(dim=-1)
-        data = self.geom_trafos.to_sph(self.disp_man.projx(data_out)).cpu().numpy()
+        out = v.out_p.reshape(-1, 7)
+        proj = self.disp_man.projx(out)
+        data = self.geom_trafos.to_sph(
+            torch.cat((proj[:, 1:4], proj[:, 4:7]), dim=-1)
+        ).cpu().numpy()
         labels = [
             r"$\theta_\mathrm{mom}$",
             r"$\phi_\mathrm{mom}$",
@@ -239,15 +241,12 @@ class CornerHist:
             r"$\phi_\mathrm{pos}$",
         ]
         range_ = [(0.0, np.pi), (-np.pi, np.pi)] * 2
-        
+
         if self.plot_en is not False:
-            labels += [
-                r"$-\log \frac{\| \vec{p} \|_2}{\| \vec{p}_\mathrm{incoming} \|_2}$"
-            ]
-            norm_fac = torch.log(en_in / self.cutoff_en).view(-1, 1)
-            data_en = (v.out_p[..., :3].norm(dim=-1) - 1).clamp_min(0.) / norm_fac
+            labels += [r"$\hat{E}$"]
+            data_en = proj[:, 0:1].clamp(0.0, 1.0)
             range_ += [(-0.2, 1.2)]
-            data = np.concatenate([data, data_en.reshape(-1, 1).cpu().numpy()], axis=-1)
+            data = np.concatenate([data, data_en.cpu().numpy()], axis=-1)
         if self.plot_edep is not False:
             labels += [r"$E_\mathrm{dep}$"]
             data_add = data_add.repeat_interleave((data.shape[0] // data_add.shape[0])).unsqueeze(
@@ -269,10 +268,12 @@ class CornerHist:
 
     @torch.no_grad()
     def make_cube(self, data, cube, incoming, color="#FF9D00"):
+        def _dirpos(t):
+            return torch.cat((t[..., 1:4], t[..., 4:7]), dim=-1)
         if incoming is not None:
-            incoming = self.geom_trafos.to_cube(self.disp_man.projx(incoming))
+            incoming = self.geom_trafos.to_cube(_dirpos(self.disp_man.projx(incoming)))
         return cube.plot_cube_with_points(
-            self.geom_trafos.to_cube(data),
+            self.geom_trafos.to_cube(_dirpos(data)),
             incoming=incoming,
             arr_c=color,
             arr_lr=0.0,

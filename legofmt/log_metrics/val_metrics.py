@@ -18,7 +18,7 @@ from legofmt.geometry.geom_trafos import GeomTrafos
 
 _GEOM = GeomTrafos()
 
-KIN_NAMES = ["mom_theta", "mom_phi", "mom_|p|", "pos_theta", "pos_phi"]
+KIN_NAMES = ["mom_theta", "mom_phi", "energy", "pos_theta", "pos_phi"]
 _TYPES = (11, -11, 22)
 _TYPE_TAGS = ("em", "ep", "g")
 SUMMARY_FEATURE_NAMES = [
@@ -29,25 +29,25 @@ SUMMARY_FEATURE_NAMES = [
 ] + ["E_dep"]
 
 
-def _spherical(mom, pos):
-    """``(..., 3), (..., 3) -> (..., 5)``: mom (theta, phi), |p|, pos (theta, phi).
+def _spherical(mom, e, pos):
+    """``(..., 3), (..., 1), (..., 3) -> (..., 5)``: mom (theta, phi), energy, pos (theta, phi).
 
     ``GeomTrafos.to_sph`` assumes unit vectors (``acos(z)``), so momentum and
-    position are direction-normalised first; ``|p|`` keeps the magnitude.
+    position are direction-normalised first; ``e`` is the bounded energy scalar.
     """
-    p = mom.norm(dim=-1, keepdim=True)
+    mom_dir = mom / mom.norm(dim=-1, keepdim=True).clamp(min=1e-8)
     pos_dir = pos / pos.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-    return torch.cat([_GEOM.to_sph(mom / p.clamp(min=1e-8)), p, _GEOM.to_sph(pos_dir)], dim=-1)
+    return torch.cat([_GEOM.to_sph(mom_dir), e, _GEOM.to_sph(pos_dir)], dim=-1)
 
 
-def particle_kinematics(mom, pos, active):
+def particle_kinematics(mom, e, pos, active):
     """Flatten active particles to ``(N_active, 5)`` spherical kinematics."""
-    return _spherical(mom, pos)[active]
+    return _spherical(mom, e, pos)[active]
 
 
-def event_summary(mom, pos, pdgid, active, e_dep):
+def event_summary(mom, e, pos, pdgid, active, e_dep):
     """Per-event ``(B, 31)``: per-type {e-, e+, g} kinematic mean+std, then E_dep."""
-    kin = _spherical(mom, pos)
+    kin = _spherical(mom, e, pos)
     feats = []
     for pid in _TYPES:
         m = ((pdgid == pid) & active).unsqueeze(-1).to(kin.dtype)
@@ -110,13 +110,13 @@ class ShowerValMetrics:
         reps = {
             "particle": (
                 KIN_NAMES,
-                particle_kinematics(rcc[..., :3], rcc[..., 3:], active),
-                particle_kinematics(gen[:, 3:, :3], gen[:, 3:, 3:], active),
+                particle_kinematics(rcc[..., 1:4], rcc[..., 0:1], rcc[..., 4:7], active),
+                particle_kinematics(gen[:, 3:, 1:4], gen[:, 3:, 0:1], gen[:, 3:, 4:7], active),
             ),
             "summary": (
                 SUMMARY_FEATURE_NAMES,
-                event_summary(rcc[..., :3], rcc[..., 3:], pdg, active, ds_t.f.edep),
-                event_summary(gen[:, 3:, :3], gen[:, 3:, 3:], pdg, active, gen[:, 1, 0]),
+                event_summary(rcc[..., 1:4], rcc[..., 0:1], rcc[..., 4:7], pdg, active, ds_t.f.edep),
+                event_summary(gen[:, 3:, 1:4], gen[:, 3:, 0:1], gen[:, 3:, 4:7], pdg, active, gen[:, 1, 0]),
             ),
         }
         out = {}

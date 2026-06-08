@@ -32,15 +32,17 @@ def _flow_config() -> dict:
         },
         "model_conf": {
             "manifold": [
-                {"name": "euclidean", "dim": 3},
+                {"name": "euclidean", "dim": 1},
+                {"name": "sphere",    "dim": 3},
                 {"name": "sphere",    "dim": 3},
             ],
+            "max_energy": 300.0,
             "pdgids": pdgids,
             "model_args": {
                 "h_dim": 16,
                 "nlayers": 2,
                 "nhead": 2,
-                "in_dim": 6,
+                "in_dim": 7,
                 "max_seq_l": 7,
                 "ntypes": 4,
                 "nvtypes": 2,
@@ -66,7 +68,7 @@ def _mult_config() -> dict:
             "n_layers": 2,
             "n_heads": 2,
             "dropout": 0.0,
-            "in_dim": 7,
+            "in_dim": 8,
             "ptypes": ptypes,
             "ptypes_in": ptypes_in,
             "max_out_particles": 2,
