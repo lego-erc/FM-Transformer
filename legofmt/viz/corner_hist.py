@@ -257,7 +257,7 @@ class CornerHist:
 
         return corner.corner(
             data,
-            bins=2**6 - 1,
+            bins=99,
             fig=fig,
             labelpad=0.01,
             labels=labels,
