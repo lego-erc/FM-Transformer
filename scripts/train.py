@@ -101,13 +101,22 @@ model.rc.config["dl_conf"]["lds_args"]["data"] = "<dataset_path>"
 model.rc.config["dl_conf"]["data_path"] = None
 model.rc.config["additional"]["comet_exp_key"] = None
 
+ckpt_dir = run.get("ckpt_dir") or os.environ.get(
+    "LEGO_CKPT_DIR", f"./checkpoints/{'flow' if train_model == 'fm' else 'mult'}/"
+)
+ckpt_path = os.path.join(ckpt_dir, f"{name}.pt")
+os.makedirs(ckpt_dir, exist_ok=True)
+
 if train_model == "fm":
     vf = model.model._orig_mod.vf if compile_mode == "model" else model.model.vf
-    state_dict, ckpt_dir = vf.state_dict(), "./checkpoints/flow/"
+    state_dict = vf.state_dict()
 else:
-    state_dict, ckpt_dir = model.state_dict(), "./checkpoints/mult/"
+    state_dict = model.state_dict()
 
 torch.save(
-    {"state_dict": state_dict, "config": model.rc.config},
-    f"{os.environ.get('LEGO_CKPT_DIR', ckpt_dir)}{name}.pt",
+    {
+        "state_dict": state_dict,
+        "config": model.rc.config,
+    },
+    ckpt_path,
 )

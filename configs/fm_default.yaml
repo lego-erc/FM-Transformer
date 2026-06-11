@@ -15,6 +15,7 @@ run:
   val_check_interval: 0.2
   limit_val_batches: 4
   strategy: ddp
+  ckpt_dir: null             # null -> $LEGO_CKPT_DIR -> ./checkpoints/flow|mult/
 
 logging:
   comet: true
