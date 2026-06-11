@@ -101,9 +101,8 @@ model.rc.config["dl_conf"]["lds_args"]["data"] = "<dataset_path>"
 model.rc.config["dl_conf"]["data_path"] = None
 model.rc.config["additional"]["comet_exp_key"] = None
 
-ckpt_dir = run.get("ckpt_dir") or os.environ.get(
-    "LEGO_CKPT_DIR", f"./checkpoints/{'flow' if train_model == 'fm' else 'mult'}/"
-)
+ckpt_base = run.get("ckpt_dir") or os.environ.get("LEGO_CKPT_DIR", "./checkpoints/")
+ckpt_dir = os.path.join(ckpt_base, "flow" if train_model == "fm" else "mult")
 ckpt_path = os.path.join(ckpt_dir, f"{name}.pt")
 os.makedirs(ckpt_dir, exist_ok=True)
 
