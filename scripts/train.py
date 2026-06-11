@@ -5,10 +5,14 @@ from pathlib import Path
 import yaml
 
 parser = argparse.ArgumentParser(description="Train from a YAML config (see configs/).")
-parser.add_argument("config", type=Path, help="path to the YAML config file")
+parser.add_argument("config", type=Path, help="config name (configs/<name>.yaml) or path to a YAML file")
 args = parser.parse_args()
 
-cfg = yaml.safe_load(args.config.read_text())
+cfg_path = args.config if args.config.suffix else args.config.with_suffix(".yaml")
+if not cfg_path.is_file():
+    cfg_path = Path(__file__).resolve().parent.parent / "configs" / cfg_path
+
+cfg = yaml.safe_load(cfg_path.read_text())
 run, log_conf, config = cfg["run"], cfg["logging"], cfg["config"]
 
 for _l in (Path(__file__).resolve().parent.parent / ".env").read_text().splitlines():
