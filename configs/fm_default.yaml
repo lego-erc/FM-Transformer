@@ -10,12 +10,12 @@ run:
   dtype: float32
   epochs: 10
   dataset_size: 20000000     # only used to compute scheduler total_steps
-  compile: forward_fused     # false | model | forward_fused
+  compile: model             # false | model
   gradient_clip_val: 1.0
   val_check_interval: 0.2
   limit_val_batches: 4
-  strategy: ddp_find_unused_parameters_true
-  ckpt_dir: null             # null -> $LEGO_CKPT_DIR -> ./checkpoints/flow|mult/
+  strategy: ddp
+  ckpt_dir: null             # base dir (null -> $LEGO_CKPT_DIR -> ./checkpoints/); flow|mult appended
 
 logging:
   comet: true
@@ -57,11 +57,7 @@ config:
     t_dist: sd3
     t_dist_scale: 0.0
     loss_sc: 0.0
-    occ_loss: 1.0
-    pid_loss: 1.0
-    mask_conf: { p_forward: 0.34, p_inverse: 0.16, ratio: 0.5 }
-    discrete_trained: true
-    discrete_every_n: 2
+    mask_conf: { p_forward: 0.68 }
     cond_cube: false
     model_args:
       h_dim: 256
