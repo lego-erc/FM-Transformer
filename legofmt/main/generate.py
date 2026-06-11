@@ -177,7 +177,7 @@ class GenerateOut(torch.nn.Module):
         """
         pdgid_in = cond[:, -1].long()
         pdgid_in_idx = torch.searchsorted(self.pdgid_in, pdgid_in)
-        mult = self.gen_mult((cond[:, :-1], None, pdgid_in_idx))
+        mult = self.gen_mult((cond[:, :8], None, pdgid_in_idx))
         mult = mult[:, self.ptype_idx] * self.ptype_in_mask
 
         max_particles = self.max_seq_l - 3
