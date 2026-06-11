@@ -10,6 +10,7 @@ exclude-newer = "14d"
 python = ">=3.13.0,<3.15"
 setuptools = "<82"
 lightning = ">=2.5.6,<=2.6.1"
+pyyaml = "*"
 
 [feature.base.pypi-dependencies]
 numpy = "*"
@@ -56,9 +57,8 @@ x-transformers = "==2.18.8"
 [feature.legacy.pypi-dependencies]
 x-transformers = "==2.14.2"
 
-[feature.train.dependencies]
+[feature.comet.dependencies]
 comet-ml = "*"
-uv = "*"
 
 [feature.ci.dependencies]
 pip = ">=25.3,<26"
@@ -72,6 +72,8 @@ x-transformers = "==2.17.9"
 default = ["base", "cuda", "modern"]
 default-osx = ["base", "modern"]
 legacy = ["base", "cuda", "legacy"]
-train = { features = ["base", "cuda", "modern", "train"], no-default-feature = true }
-train-legacy = { features = ["base", "cuda", "legacy", "train"], no-default-feature = true }
+train = { features = ["base", "cuda", "modern"], no-default-feature = true }
+train-comet = { features = ["base", "cuda", "modern", "comet"], no-default-feature = true }
+train-legacy = { features = ["base", "cuda", "legacy"], no-default-feature = true }
+train-legacy-comet = { features = ["base", "cuda", "legacy", "comet"], no-default-feature = true }
 ci = { features = ["base", "cpu", "ci"], no-default-feature = true }
