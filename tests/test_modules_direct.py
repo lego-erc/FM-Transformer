@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import warnings
 
+import pytest
 import torch
 
 from legofmt.data.struct import DataStruct, _F
@@ -198,3 +199,16 @@ def test_reflow_teacher_isolated_from_submodule_registry(tmp_path) -> None:
     assert teacher.model.training is False
     model.train()
     assert teacher.model.training is False
+
+
+@pytest.mark.parametrize("cls", [LEGOLtngVelocity, LEGOLtng])
+def test_all_params_receive_grad(cls) -> None:
+    """One training step touches every parameter (DDP-safety with
+    ``find_unused_parameters=False``)."""
+    model = cls(_tiny_config())
+    model.on_fit_start()
+    model.train()
+    loss = model._step(_fake_batch(), 0)
+    loss.backward()
+    missing = [n for n, p in model.model.named_parameters() if p.grad is None]
+    assert not missing, f"params without grad (DDP would crash): {missing}"

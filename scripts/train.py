@@ -11,17 +11,19 @@ import lightning as ltng
 from lightning.pytorch.loggers import CometLogger
 import schedulefree
 import torch
-from legofmt.main.modules_direct import LEGOLtng
+from legofmt.main.modules import LEGOLtng
 from legofmt.multiplicity.model import MultModel
 
-from pytorch_optimizer import AdEMAMix 
-from pytorch_optimizer import Muon                                                                                                         
-import torch.optim.lr_scheduler as lrs         
-from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR                                                                                                                                                                                                                                 
+from pytorch_optimizer import AdEMAMix
+from pytorch_optimizer import Muon
+import torch.optim.lr_scheduler as lrs
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 
 d_dtype = torch.float32
 torch.set_default_dtype(d_dtype)
-torch.set_float32_matmul_precision("medium")                                                                                                    
+torch.set_float32_matmul_precision("medium")
+
+train_model = "fm"  # "fm" | "mult"
 
 ds_scale = 1
 epochs = 10 * ds_scale
@@ -41,7 +43,7 @@ comet_logger = CometLogger(
 )
 
 dpath_prefix = os.environ.get("LEGO_DATA_DIR", "./data/")
-total_steps = epochs * int(dataset_size / (bs * len(devices)))   
+total_steps = epochs * int(dataset_size / (bs * len(devices)))
 
 config = {
     "dl_conf": {
@@ -71,13 +73,14 @@ config = {
             {"name": "sphere", "dim": 3},
         ],
         "max_energy": 300.0,
-        "proj_ray": False, # True,
         "ot_coupling": True,
         "ot_e_only": False,
+        "proj_ray": False, # True,
         "t_dist": "sd3_grid",
         "t_dist_scale": 0.,
         "loss_sc": 0.,
         "cond_cube": False,
+        "mask_conf": {"p_forward": 0.68},
         "model_args": {
             "h_dim": 2**8,
             "in_dim": 7,
@@ -123,32 +126,26 @@ config = {
             "residual_attn": True,
         },
     },
-      "opt_conf": {                                                                                                                              
-      "opt": "muon",                                                                                                                        
-      "lr": 7e-3,                                                                                           
-      "momentum": 0.95,                                                                                                                      
-      "nesterov": True,                                                                                                                      
-      "ns_steps": 5,                                                                                                                         
-      "weight_decay": 1e-2,                                              
-      "weight_decouple": True,                                                                                                                
-      "adamw_lr": 3e-3,                                                                                                                      
-      "adamw_betas": (0.9, 0.999),                                                                                                            
-      "adamw_wd": 1e-2,                                                                                                                      
-      "adamw_eps": 1e-8,                                                                     
+      "opt_conf": {
+      "opt": "muon",
+      "lr": 7e-3,
+      "momentum": 0.95,
+      "nesterov": True,
+      "ns_steps": 5,
+      "weight_decay": 1e-2,
+      "weight_decouple": True,
+      "adamw_lr": 3e-3,
+      "adamw_betas": (0.9, 0.999),
+      "adamw_wd": 1e-2,
+      "adamw_eps": 1e-8,
     "scheduler": {
-        "cls": "warmup_cosine",                                                                                                                  
-        "total_steps": total_steps,                                                                                                            
+        "cls": "warmup_cosine",
+        "total_steps": total_steps,
         "warmup_frac": 0.1,
-        "eta_min": 1e-6,                                                                                                                       
-        "interval": "step",                                                                                                                    
-    },                                                                                                                                   
-  },      
-    # "opt_conf": {
-    #     "opt": schedulefree.AdamWScheduleFree,
-    #     "lr": 1e-3,
-    #     "weight_decay": 1e-2,
-    #     "betas": (0.95, 0.999),
-    # },                                                                                                                                                                                                                                                                                                                            
+        "eta_min": 1e-6,
+        "interval": "step",
+    },
+  },
     "additional": {
         "epochs": epochs,
         "precision": str(prec) + ", " + torch.get_float32_matmul_precision(),
@@ -170,23 +167,26 @@ trainer = ltng.Trainer(
     gradient_clip_val=1.,
 )
 
-model = LEGOLtng(config)
-model.model = torch.compile(model.model, dynamic=False)
+if train_model == "fm":
+    model = LEGOLtng(config)
+    model.model = torch.compile(model.model, dynamic=False)
+else:
+    model = MultModel(config)
 
 trainer.fit(
     model=model
 )
 
-# model.opt.eval()
-
 model.rc.config["dl_conf"]["lds_args"]["data"] = "<dataset_path>"
 model.rc.config["dl_conf"]["data_path"] = None
 model.rc.config["additional"]["comet_exp_key"] = None
 
+if train_model == "fm":
+    state_dict, ckpt_dir = model.model._orig_mod.vf.state_dict(), "./checkpoints/flow/"
+else:
+    state_dict, ckpt_dir = model.state_dict(), "./checkpoints/mult/"
+
 torch.save(
-    {
-        "state_dict": model.model._orig_mod.vf.state_dict(),
-        "config": model.rc.config,
-    },
-    f"{os.environ.get('LEGO_CKPT_DIR', './checkpoints/flow/')}{name}.pt",
+    {"state_dict": state_dict, "config": model.rc.config},
+    f"{os.environ.get('LEGO_CKPT_DIR', ckpt_dir)}{name}.pt",
 )
