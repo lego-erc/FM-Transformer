@@ -71,6 +71,7 @@ config["additional"]["comet_exp_key"] = logger._experiment_key if logger else No
 
 if logger:
     logger.log_hyperparams(config)
+    logger.experiment.log_asset(str(cfg_path), file_name=cfg_path.name)
 
 trainer = ltng.Trainer(
     max_epochs=epochs,

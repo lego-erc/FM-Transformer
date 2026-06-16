@@ -97,6 +97,7 @@ config:
       ff_swish: true
       ff_glu: true
       attn_qk_norm: true
+      rotary_pos_emb: true
       use_adaptive_rmsnorm: true
       use_adaptive_layerscale: true
       residual_attn: true
