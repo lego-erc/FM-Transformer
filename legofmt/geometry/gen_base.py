@@ -36,15 +36,12 @@ class GenerateBase:
         self.bs_frac = base_conf.get("bs_frac", 0.0)
         self.scale_dist = base_conf.get("scale_dist", "trunc_norm")
 
-        if base_dist == "poles":
-            self.func = self.poles
-
-        else:
+        if base_dist != "poles":
             raise ValueError("base_dist's other than poles are currently deprecated")
 
     def __call__(self, shape, incoming_rt):
         """Samples the configured prior; see :meth:`poles`."""
-        return self.func(shape, incoming_rt=incoming_rt)
+        return self.poles(shape, incoming_rt=incoming_rt)
 
     @torch.no_grad()
     def rd_scale(self, shape, e_in):
