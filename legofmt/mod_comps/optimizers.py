@@ -5,8 +5,8 @@ def muon_factory(params, **kw):
     from pytorch_optimizer import Muon
     ps = list(params)
     return Muon([
-        {"params": [p for p in ps if p.ndim == 2], "use_muon": True},
-        {"params": [p for p in ps if p.ndim != 2], "use_muon": False},
+        {"params": [p for p in ps if p.ndim >= 2], "use_muon": True},
+        {"params": [p for p in ps if p.ndim <  2], "use_muon": False},
     ], **kw)
 
 
