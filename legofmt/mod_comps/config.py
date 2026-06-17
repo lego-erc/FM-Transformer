@@ -129,8 +129,6 @@ class ResolvedLEGOConfig:
             differences rather than 6-D ``cdist``. Gives strict
             energy-ordered pairing. Ignored when :attr:`ot_coupling` is
             ``False``.
-        proj_en_out (bool): if ``True``, apply energy projection to model
-            outputs.
         pdgid_is_idx (bool): if ``True``, treat the PDG-id field of inputs
             as an integer index rather than a raw PDG id.
         loss_sc_fac (float): scalar multiplier for the auxiliary loss term.
@@ -176,7 +174,6 @@ class ResolvedLEGOConfig:
     t_dist_scale: float
     ot_coupling: bool
     ot_e_only: bool
-    proj_en_out: bool
     pdgid_is_idx: bool
     loss_sc_fac: float
     cond_cube: bool
@@ -414,7 +411,6 @@ def _build_resolved(
         t_dist_scale=model_conf.get("t_dist_scale", 1.4),
         ot_coupling=model_conf.get("ot_coupling", False),
         ot_e_only=model_conf.get("ot_e_only", False),
-        proj_en_out=model_conf.get("proj_en_out", False),
         pdgid_is_idx=model_conf.get("pdgid_is_idx", False),
         loss_sc_fac=model_conf.get("loss_sc", 0.0),
         cond_cube=model_conf.get("cond_cube", False),
