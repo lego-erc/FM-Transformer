@@ -15,6 +15,11 @@ try:
 except ImportError:
     slap = None
 
+_OT_COUPLING_REQUIRES_LAP = (
+    "ot_coupling=True requires `torch_lap_cuda_lib`. "
+    "Install it or set model_conf.ot_coupling=False."
+)
+
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.data.struct import DataStruct, _F
 from legofmt.geometry.geom_trafos import GeomTrafos
@@ -173,10 +178,7 @@ class LEGOLtng(ltng.LightningModule):
     def on_fit_start(self) -> None:
         """Initialises the loss, path sampler, and train-mode optimizer."""
         if self.rc.ot_coupling and slap is None:
-            raise RuntimeError(
-                "ot_coupling=True requires `torch_lap_cuda_lib`. "
-                "Install it or set model_conf.ot_coupling=False."
-            )
+            raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
         self.loss_fn = nn.MSELoss()
         self.ps = ProductPathSampler(self.rc.manifold)
         self.model.train()
@@ -224,10 +226,7 @@ class LEGOLtng(ltng.LightningModule):
             )
             if self.rc.ot_coupling and self.model.training:
                 if slap is None:
-                    raise RuntimeError(
-                        "ot_coupling=True requires `torch_lap_cuda_lib`. "
-                        "Install it or set model_conf.ot_coupling=False."
-                    )
+                    raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
                 base = base.where(ds_t.am.full.unsqueeze(-1), data)
                 inf_cond = ds_t.am.out_p.unsqueeze(-1).logical_xor(ds_t.am.out_p.unsqueeze(-2))
                 out = _F(base).out_p
