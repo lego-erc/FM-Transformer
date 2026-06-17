@@ -18,6 +18,47 @@ Both models are `lightning.LightningModule`s configured by a single nested
 
 ---
 
+## Quickstart — generate an event
+
+Point the two paths at your local checkpoints and run:
+
+```python
+import torch
+from legofmt.main.generate import GenerateOut
+
+FLOW_CKPT = "PATH_TO_CHECKPOINTS/flow_ckpt.pt"   # flow-matching checkpoint: {"state_dict", "config"}
+MULT_CKPT = "PATH_TO_CHECKPOINTS/mult_ckpt.pt"   # multiplicity checkpoint:  {"state_dict", "config"}
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+gen = GenerateOut(FLOW_CKPT, MULT_CKPT, device=device)
+
+# One incoming particle; n samples are drawn from it.
+n       = 1                                  # number of samples              total events will be n * B
+pos     = torch.tensor([[0.0, 0.0, -50.0]])  # entry position (on surface)    (B, 3) or (1, 3)
+mom     = torch.tensor([[0.0, 0.0, 1.0]])    # direction (auto-normalised)    (B, 3) or (1, 3)
+energy  = torch.tensor([300.0])              # incoming energy, MeV           (B,) or (1,)
+density = torch.tensor([3.0])                # material density               (B,) or (1,)
+size    = torch.tensor([100.0])              # required, but unused
+pdgids  = torch.tensor([11])                 # a PDG-id, e^- in this case;    (B,) or (1,)
+
+with torch.no_grad():
+    out = gen.gen_model_w_g4_args(n, pos, mom, energy, density, size, pdgids)
+
+# out["per_particle"]["Outgoing"] : [B*n, max_seq_l-3, 8]
+# out["per_particle"]["Incoming"] : [B*n, 1, 8]   layout: [density, px,py,pz, x,y,z, pdgid]
+# out["per_event"]                : {"E_dep", "Density"}
+# out["per_voxel"]                : {"E_dep": empty}
+print(out["per_particle"]["Outgoing"].shape)
+```
+
+Each input has batch size `1` or `B`; with `B > 1` events, `n` samples are drawn
+per event, so the output has `B*n` rows. `mom` is a **direction** — it is
+normalised internally and scaled by `energy` — and `pos` is ray-traced onto the
+conditioning cube for you. (This differs from the raw `gen(cond)` path below,
+where the momentum must already be energy-scaled.)
+
+---
+
 ## Workflow
 
 ```
@@ -26,13 +67,10 @@ Path A — ad-hoc (raw dict in memory):
     (per_event +       (mom cutoff,    (manifold projx,
      per_particle)      NaN/sort)       ray-trace, en. proj)
 
-    - energy_proj.py: normalization for the magnitute of the momentum. 
-    - gen_base.py: flow base sample generation. 
-    - path_sample_mult.py: enables projections and path computations on products of manifolds. 
-    - raytracing_proj.py: projects to the other side of the cube, can add noise. 
-    - geom_trafos.py: cartesian↔spherical conversions, sphere→cube L∞ projection, and a wrapped-Gaussian sphere sampler.
-    
-- ### multiplicity
+Path B — pre-prepped on disk (used by every training entry point):
+    folder/  or  .pt  ───────────────► LEGODataset(path)
+    (data_prepped.pt +                  (loads the (target, mask, attn_mask)
+     meta.json, already DataPrep'd)      3-tuple directly — no prep step)
 
 Both paths yield a DataStruct stream:
 
@@ -77,7 +115,11 @@ and the constructor pulls both keys out. `MultModel` follows the same pattern.
 A reference training entry point is in `scripts/train.py` (4-GPU DDP, Comet
 logger, Muon optimizer with warmup-cosine).
 
-### Generation
+### Generation — lower-level API
+
+The Geant4-shaped entry point `gen_model_w_g4_args(...)` is covered in
+[Quickstart](#quickstart--generate-an-event). Underneath it sits the raw `cond`
+API (and the `couple_in_out_pdgids` constructor flag):
 
 ```python
 from legofmt.main.generate import GenerateOut
@@ -85,13 +127,6 @@ from legofmt.main.generate import GenerateOut
 gen = GenerateOut("flow.pt", "mult.pt", device="cuda",
                   couple_in_out_pdgids=False)  # if True, restrict outgoing
                                                # pdg-ids to the incoming set
-
-# Geant4-style call: each of pos/mom/energy/density/pdgids has size 1 or B,
-# `n` samples are drawn per (broadcast) event → output has B*n rows.
-out = gen.gen_model_w_g4_args(n, pos, mom, energy, density, size, pdgids)
-# → {"per_event":   {"E_dep", "Density"},
-#    "per_particle":{"Incoming", "Outgoing"},
-#    "per_voxel":   {"E_dep": empty}}
 
 # Raw call: cond is [B, 8] = [density, px,py,pz, x,y,z, pdgid_raw]
 sols, mask, attn_mask = gen(cond)
@@ -173,9 +208,9 @@ and row 0 col 1 for `d`) continue to apply to returned samples.
 
 ## Config reference
 
-The config dict has seven top-level sections (`dl_conf`, `base_conf`,
-`model_conf`, `mm_conf`, `opt_conf`, `odeint_conf`, `additional`). Any key not
-listed defaults to the value shown in the source.
+The config dict has eight top-level sections (`dl_conf`, `val_conf`,
+`base_conf`, `model_conf`, `mm_conf`, `opt_conf`, `odeint_conf`, `additional`).
+Any key not listed defaults to the value shown in the source.
 
 ### `dl_conf` — dataloader
 
@@ -188,6 +223,16 @@ listed defaults to the value shown in the source.
 | `is_filtered` | `False` | If `True`, the on-disk file is loaded as-is via `get_filtered` (no cutoff applied). |
 | `bs` | `2**12` | Batch size. |
 | `num_workers` | `4` | `DataLoader` workers (uses `fork` start method if >0). |
+
+### `val_conf` — validation split
+
+Consumed by `LEGOLtng.setup`, which carves a held-out split off the loaded
+training set via `random_split`.
+
+| Key | Default | Effect |
+|---|---|---|
+| `val_frac` | `0.01` | Fraction of the dataset held out for validation (at least 1 event). |
+| `seed` | `0` | Seed for the `random_split` generator — reproducible train/val partition. |
 
 ### `base_conf` — flow base distribution
 
@@ -207,11 +252,13 @@ Top-level FM options:
 | Key | Default | Effect |
 |---|---|---|
 | `manifold` | — | Required. String eval'd in a restricted namespace (only `ProductManifold`, `Euclidean`, `Sphere` are bound), e.g. `"ProductManifold([Euclidean(), Sphere()], (3, 3))"`. The second argument is the per-block ambient dim. |
+| `max_energy` | — | Required (here or in `meta.json`). Upper energy bound (MeV) for the `EnergyProjections` normalisation; with `dl_conf.lds_args.cutoff_mev` (lower bound) it maps physical `|p|` to/from the bounded `[0, 1]` energy scalar. `resolve_legoltng_config` raises `KeyError` if it is found in neither `meta.json` nor `model_conf`. |
 | `proj_ray` | `True` (read by `DataPrep` only) | At prep-time, ray-trace incoming/outgoing positions onto the unit-cube surface via `CubeTrace`. Ignored when loading already-prepped data from disk. |
 | `proj_en` | `False` | Energy normalisation applied in `DataPrep`. Allowed values: `False` / `"identity"` (no-op), `"in_frac"` (divide outgoing momenta by incoming magnitude), `"log"`, `"in_frac_log"`, `"exp"`. (`exp_mult` / `in_mult` exist on `EnergyProjections` but take two arguments and are not callable from this hook.) |
 | `ot_coupling` | `False` | At training time, Hungarian-assign base→data per event for OT-style coupling. Requires the optional `torch_lap_cuda_lib` package; otherwise this raises at first call. |
+| `ot_e_only` | `False` | When `ot_coupling` is on, base the LAP cost on pairwise `\|p\|` (energy) differences instead of the full 6-D `cdist` — strict energy-ordered pairing. Ignored when `ot_coupling=False`. |
 | `cond_cube` | `False` | When solving on the manifold, pass the cube-projected version of the position block as conditioning to the vector field. The integrated state itself stays on the manifold. |
-| `t_dist` | `"uniform"` | Time sampling for the loss: `"uniform"`, `"sm_norm"` (`sigmoid(s · N(0,1))`), or `"sd3"` (SD3 logit-normal mix `1-u + s/3·((π/2·u).sin()² - u)`). |
+| `t_dist` | `"uniform"` | Time sampling for the loss: `"uniform"`, `"sm_norm"` (`sigmoid(s · N(0,1))`), `"sd3"` (SD3 logit-normal mix `1-u + s/3·((π/2·u).sin()² - u)`), or `"sd3_grid"` (50/50 mix of `"sd3"` with a discrete grid `{0, 0.4, 0.8, 0.9}` — sampled with weights `.1/.2/.3/.4` and jittered by `0.02·N(0,1)`). |
 | `t_dist_scale` | `1.4` | Scale `s` for `sm_norm` / `sd3`. |
 | `loss_sc` | `0.0` | Weight of an auxiliary "predict-x1" MSE on the momentum 3-vector (`pred = x_t + (1-t)·v`). `0` disables it. |
 | `pdgid_is_idx` | `False` | If `True`, the pdgid column is treated as an already-indexed vocab id (skipping `convert_pdgids`). Flipped on by `GenerateOut` at inference. |
