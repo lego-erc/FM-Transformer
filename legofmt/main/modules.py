@@ -238,7 +238,8 @@ class LEGOLtng(ltng.LightningModule):
                     cost = torch.cdist(ds_t.f.out_cc, out) + inf_cond * 1e6
                 assign = slap(cost, cost.device).long()
                 out[:] = torch.take_along_dim(out, assign.unsqueeze(-1), dim=1)
-            noise = torch.where(fwd.view(-1, 1, 1), self.gen_base.insert_add(base), noise)
+            base = self.gen_base.insert_add(base)
+            noise = base if noise is None else torch.where(fwd.view(-1, 1, 1), base, noise)
         return torch.where((m == 1).unsqueeze(-1), noise, data)
 
     def _reduce_and_log(
