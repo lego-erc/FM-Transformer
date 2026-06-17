@@ -517,14 +517,26 @@ class LEGOLtng(ltng.LightningModule):
             split_size=split_size, cat_dim=-3,
         )
 
-    def _midpoint_steps(self, x: Tensor, time_grid: Tensor, **extras) -> Tensor:
-        """Fixed-grid midpoint (RK2) integration over ``time_grid``."""
+    def _midpoint_steps(
+        self, x: Tensor, time_grid: Tensor,
+        return_intermediates: bool = False, **extras,
+    ) -> Tensor:
+        """Fixed-grid midpoint (RK2) integration over ``time_grid``.
+
+        Returns the final state, or -- when ``return_intermediates`` -- the
+        stack of states at every ``time_grid`` point (``xs[0]`` is ``x_init``,
+        matching :meth:`ODESolver.sample`).
+        """
+        if return_intermediates:
+            xs = [x]
         for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
             dt = t_b - t_a
             v1 = self.model(x, t_a, **extras)
             v2 = self.model(x + dt / 2 * v1, t_a + dt / 2, **extras)
             x = x + dt * v2
-        return x
+            if return_intermediates:
+                xs.append(x)
+        return torch.stack(xs) if return_intermediates else x
 
     @torch.no_grad()
     def forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None) -> tuple:
