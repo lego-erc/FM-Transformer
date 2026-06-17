@@ -463,8 +463,8 @@ class ResolvedMultConfig:
         dl_conf (dict): dataloader sub-config; consumed by
             :class:`MultLoader` and read for ``num_workers``.
         mm_conf (dict): multiplicity sub-config snapshot; still consumed
-            by :class:`MultLoader` (``use_density``, ``ptypes``,
-            ``ptypes_in``, ``max_out_particles``) and read for ``bs``.
+            by :class:`MultLoader` (``ptypes``, ``ptypes_in``,
+            ``max_out_particles``) and read for ``bs``.
         opt_conf (dict or None): optimizer sub-config. Looked up at
             top-level ``config["opt_conf"]`` first (matches
             :class:`ResolvedLEGOConfig`'s convention), then
