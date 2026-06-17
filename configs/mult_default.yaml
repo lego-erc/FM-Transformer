@@ -28,69 +28,19 @@ config:
       frac: 1.0
       cutoff_mev: 10
       min_particles: 0
-    is_filtered: false
     bs: 4096
     num_workers: 16
 
-  val_conf:
-    val_frac: 0.01
-    seed: 0
-
-  base_conf:
-    kappa: 8.0
-    bs_frac: 0.0
-    base_dist: poles
-    scale_dist: sm_norm
-    tanh_theta: true
-
-  model_conf:
-    manifold:
-      - { name: euclidean, dim: 1 }
-      - { name: sphere, dim: 3 }
-      - { name: sphere, dim: 3 }
-    # reflow_path: <teacher checkpoint .pt>
-    # reflow_kwargs: { method: midpoint, step_size: 0.1 }
-    ot_coupling: true
-    proj_ray: false
-    ot_e_only: false
-    max_energy: 300.0
-    t_dist: sd3
-    t_dist_scale: 0.0
-    loss_sc: 0.0
-    mask_conf: { p_forward: 0.68 }
-    cond_cube: false
-    model_args:
-      h_dim: 256
-      in_dim: 7
-      nlayers: 6
-      nhead: 8
-      dropout: 0.02
-      ff_mult: 4
-      nvtypes: 2
-      use_adaptive_rmsnorm: true
-      use_adaptive_layerscale: true
-      ff_swish: true
-      ff_glu: true
-      ff_no_bias: false
-      attn_flash: true
-      attn_qk_norm: true
-      attn_value_rmsnorm: true
-
   mm_conf:
-    use_density: true
     dropout: 0.05
     h_dim: 128
     n_layers: 6
     n_heads: 6
-    ff_mult: 4
     in_dim: 8
     bs: 4096
     lr: 1.0e-3
-    label_smoothing: 0.0
-    val_frac: 0.0
     weight_decay: 1.0e-2
     warmup_steps: 0
-    ce_focal_gamma: 0.0
     post_emb_norm: false
     use_abs_pos_emb: false
     model_args:
