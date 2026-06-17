@@ -560,10 +560,11 @@ class LEGOLtng(ltng.LightningModule):
             sols = base.masked_fill(~am, torch.nan)
         else:
             step_size = cfg.get("step_size", 0.04)
-            time_grid = cfg.get("time_grid", 
-                torch.arange(
+            time_grid = cfg.get("time_grid")
+            if time_grid is None:
+                time_grid = torch.arange(
                     0, 1 + step_size, step=step_size, device=self.device
-                ).clamp_max(1))
+                ).clamp_max(1)
             sols = self.solve(
                 ds_t, x_init=base,
                 split_size=cfg.get("split_size"),
