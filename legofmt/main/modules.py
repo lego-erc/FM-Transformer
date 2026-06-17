@@ -702,7 +702,7 @@ class LEGOLtngDirect(LEGOLtng):
                 target[..., 0] * m_gen,
             )
         else:
-            loss_sc = pred.new_zeros(())
+            loss_sc = 0.0
         sq = (pred - target) ** 2
         return self._reduce_and_log(sq, ds_t, loss_sc)
 
