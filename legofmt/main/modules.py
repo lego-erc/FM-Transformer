@@ -217,8 +217,8 @@ class LEGOLtng(ltng.LightningModule):
             ds_t = DataStruct(*ds_t)
         data = ds_t.f.model_in
         m = ds_t.m.full
-        noise = self.gen_base.iso(m.shape, data.device)
         fwd = m[:, 2] == 0
+        noise = None if fwd.all() else self.gen_base.iso(m.shape, data.device)
         if fwd.any():
             base = torch.cat(
                 (ds_t.f.non_cc, self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc)), dim=1,
