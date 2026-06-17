@@ -9,7 +9,7 @@ from x_transformers import ContinuousTransformerWrapper, Encoder
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.mod_comps.config import resolve_mult_config
-from legofmt.mod_comps.optimizers import build_optimizer
+from legofmt.mod_comps.optimizers import build_optimizer, schedulefree_adamw
 
 
 class MultLoader(torch.utils.data.Dataset):
@@ -107,8 +107,7 @@ class MultModel(LightningModule):
             self.load_state_dict(rc.state_dict, strict=False)
 
         if rc.opt_conf is None:
-            import schedulefree
-            self.opt = schedulefree.AdamWScheduleFree(
+            self.opt = schedulefree_adamw(
                 self.parameters(),
                 lr=rc.mm_conf.get("lr", 1e-3),
                 betas=(0.95, 0.999),
