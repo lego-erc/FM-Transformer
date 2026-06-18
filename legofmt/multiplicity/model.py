@@ -103,8 +103,7 @@ class InvModel(nn.Module):
 
     def proj_in(self, x):
         x = x.clone()
-        x[..., -6:] = self.geom_trafos.to_cube(x[..., -6:])
-        x[..., -3:] = self.rc.pos_scale * x[..., -3:]
+        x[..., -6:] = self.geom_trafos.to_cube(x[..., -6:], d=self.rc.pos_scale)
         return self.proj_in_(x)
 
     def forward(self, out_tok, out_pid_idx, out_mask, edep):
@@ -183,8 +182,7 @@ class MultModel(LightningModule):
 
     def proj_in(self, x):
         x = x.clone()
-        x[..., -6:] = self.geom_trafos.to_cube(x[..., -6:])
-        x[..., -3:] = self.rc.pos_scale * x[..., -3:]
+        x[..., -6:] = self.geom_trafos.to_cube(x[..., -6:], d=self.rc.pos_scale)
         return self.proj_in_(x)
 
     def _opt_train(self):
