@@ -11,7 +11,6 @@ class GetLEGOData:
         cutoff_mev=10.0,
         min_particles=0,
         device="cpu",
-        is_filtered=False,
         **kwargs,
     ):
         self.dev = device
@@ -19,13 +18,8 @@ class GetLEGOData:
         self.min_particles = min_particles
         self.cutoff_mev = cutoff_mev
 
-        if is_filtered:
-            self.func = self.get_filtered
-        elif cutoff_mev is not None:
-            self.func = self.dataset_cutoff
-
     def __call__(self, *args, **kwargs):
-        return self.func(*args, **kwargs)
+        return self.dataset_cutoff(*args, **kwargs)
 
     def dataset_compact(self, data):
         data_pp = data.get("per_particle")
@@ -76,19 +70,6 @@ class GetLEGOData:
         mask[:, 0] = 0
         data_add = {k: v[idx_rel_events].to(self.dev) for k, v in data_add.items()}
         return data_pp.to(self.dev), mask.to(self.dev), attn_mask.to(self.dev).bool(), data_add
-
-    def get_filtered(
-        self,
-        path: str,
-        **kwargs,
-    ) -> dict:
-        dataset = torch.load(path, map_location="cpu")
-        data_pp = dataset.get("per_particle")
-        data_add = dataset.get("per_event").to(self.dtype)
-        return {
-            "per_particle": data_pp,
-            "per_event": data_add,
-        }
 
 
 class LEGODataset(Dataset):

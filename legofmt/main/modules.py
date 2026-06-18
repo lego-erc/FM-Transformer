@@ -2,7 +2,6 @@ import warnings
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, random_split
 
@@ -15,6 +14,11 @@ try:
     from torch_lap_cuda_lib import solve_lap as slap
 except ImportError:
     slap = None
+
+_OT_COUPLING_REQUIRES_LAP = (
+    "ot_coupling=True requires `torch_lap_cuda_lib`. "
+    "Install it or set model_conf.ot_coupling=False."
+)
 
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.data.struct import DataStruct, _F
@@ -174,10 +178,7 @@ class LEGOLtng(ltng.LightningModule):
     def on_fit_start(self) -> None:
         """Initialises the loss, path sampler, and train-mode optimizer."""
         if self.rc.ot_coupling and slap is None:
-            raise RuntimeError(
-                "ot_coupling=True requires `torch_lap_cuda_lib`. "
-                "Install it or set model_conf.ot_coupling=False."
-            )
+            raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
         self.loss_fn = nn.MSELoss()
         self.ps = ProductPathSampler(self.rc.manifold)
         self.model.train()
@@ -217,18 +218,15 @@ class LEGOLtng(ltng.LightningModule):
             ds_t = DataStruct(*ds_t)
         data = ds_t.f.model_in
         m = ds_t.m.full
-        noise = self.gen_base.iso(m.shape, data.device)
         fwd = m[:, 2] == 0
+        noise = None if fwd.all() else self.gen_base.iso(m.shape, data.device)
         if fwd.any():
             base = torch.cat(
                 (ds_t.f.non_cc, self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc)), dim=1,
             )
             if self.rc.ot_coupling and self.model.training:
                 if slap is None:
-                    raise RuntimeError(
-                        "ot_coupling=True requires `torch_lap_cuda_lib`. "
-                        "Install it or set model_conf.ot_coupling=False."
-                    )
+                    raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
                 base = base.where(ds_t.am.full.unsqueeze(-1), data)
                 inf_cond = ds_t.am.out_p.unsqueeze(-1).logical_xor(ds_t.am.out_p.unsqueeze(-2))
                 out = _F(base).out_p
@@ -240,7 +238,8 @@ class LEGOLtng(ltng.LightningModule):
                     cost = torch.cdist(ds_t.f.out_cc, out) + inf_cond * 1e6
                 assign = slap(cost, cost.device).long()
                 out[:] = torch.take_along_dim(out, assign.unsqueeze(-1), dim=1)
-            noise = torch.where(fwd.view(-1, 1, 1), self.gen_base.insert_add(base), noise)
+            base = self.gen_base.insert_add(base)
+            noise = base if noise is None else torch.where(fwd.view(-1, 1, 1), base, noise)
         return torch.where((m == 1).unsqueeze(-1), noise, data)
 
     def _reduce_and_log(
@@ -518,14 +517,26 @@ class LEGOLtng(ltng.LightningModule):
             split_size=split_size, cat_dim=-3,
         )
 
-    def _midpoint_steps(self, x: Tensor, time_grid: Tensor, **extras) -> Tensor:
-        """Fixed-grid midpoint (RK2) integration over ``time_grid``."""
+    def _midpoint_steps(
+        self, x: Tensor, time_grid: Tensor,
+        return_intermediates: bool = False, **extras,
+    ) -> Tensor:
+        """Fixed-grid midpoint (RK2) integration over ``time_grid``.
+
+        Returns the final state, or -- when ``return_intermediates`` -- the
+        stack of states at every ``time_grid`` point (``xs[0]`` is ``x_init``,
+        matching :meth:`ODESolver.sample`).
+        """
+        if return_intermediates:
+            xs = [x]
         for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
             dt = t_b - t_a
             v1 = self.model(x, t_a, **extras)
             v2 = self.model(x + dt / 2 * v1, t_a + dt / 2, **extras)
             x = x + dt * v2
-        return x
+            if return_intermediates:
+                xs.append(x)
+        return torch.stack(xs) if return_intermediates else x
 
     @torch.no_grad()
     def forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None) -> tuple:
@@ -562,10 +573,11 @@ class LEGOLtng(ltng.LightningModule):
             sols = base.masked_fill(~am, torch.nan)
         else:
             step_size = cfg.get("step_size", 0.04)
-            time_grid = cfg.get("time_grid", 
-                torch.arange(
+            time_grid = cfg.get("time_grid")
+            if time_grid is None:
+                time_grid = torch.arange(
                     0, 1 + step_size, step=step_size, device=self.device
-                ).clamp_max(1))
+                ).clamp_max(1)
             sols = self.solve(
                 ds_t, x_init=base,
                 split_size=cfg.get("split_size"),
@@ -704,7 +716,7 @@ class LEGOLtngDirect(LEGOLtng):
                 target[..., 0] * m_gen,
             )
         else:
-            loss_sc = pred.new_zeros(())
+            loss_sc = 0.0
         sq = (pred - target) ** 2
         return self._reduce_and_log(sq, ds_t, loss_sc)
 

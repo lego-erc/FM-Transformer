@@ -75,6 +75,7 @@ class CornerHist:
         self.fig_sup, self.fig = self.make_fig(
             self.title, cube=self.cube, corner_=self.corner_
         )
+        axes_fig = self.fig[1] if self.cube else self.fig
 
         def is_t(x):
             return isinstance(x, torch.Tensor)
@@ -85,7 +86,7 @@ class CornerHist:
         if is_t_tup(batch) and truth is not None and is_t_tup(truth):
 
             def anim_wrapper_(i):
-                for axis in (self.fig[1] if self.cube else self.fig).get_axes():
+                for axis in axes_fig.get_axes():
                     axis.clear()
                 return self.plot_tensors(batch[i], truth[i])
 
@@ -95,7 +96,7 @@ class CornerHist:
             if batch[0].ndim > 3:  # sequence of batches
 
                 def anim_wrapper_(i):
-                    for axis in (self.fig[1] if self.cube else self.fig).get_axes():
+                    for axis in axes_fig.get_axes():
                         axis.clear()
                     prepped = self.prep(batch[i])
                     self.fig_sup.suptitle(
@@ -114,7 +115,7 @@ class CornerHist:
             sols, mask, attn_mask = self.model(batch)
 
             def anim_wrapper_(i):
-                for axis in (self.fig[1] if self.cube else self.fig).get_axes():
+                for axis in axes_fig.get_axes():
                     axis.clear()
                 return self.prep(batch, sols=sols[i])
 
