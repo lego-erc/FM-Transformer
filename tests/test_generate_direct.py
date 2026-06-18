@@ -84,7 +84,9 @@ def _mult_config() -> dict:
             "dropout": 0.0,
             "use_abs_pos_emb": False,
             "post_emb_norm": False,
+            "train_inverse": True,
             "model_args": {"use_adaptive_rmsnorm": True},
+            "inv_model_args": {"use_adaptive_rmsnorm": True},
         },
         "opt_conf": {"opt": "schedulefree", "lr": 1e-3},
     }
