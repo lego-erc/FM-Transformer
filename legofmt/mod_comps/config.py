@@ -462,8 +462,8 @@ class ResolvedMultConfig:
             :class:`x_transformers.ContinuousTransformerWrapper`.
         pos_scale (float): scale applied to the position triplet inside
             :meth:`MultModel.proj_in`.
-        model_args (dict): keyword arguments splatted into
-            :class:`x_transformers.Decoder`.
+        model_args (dict): keyword arguments splatted into the count
+            model's :class:`x_transformers.Decoder`.
         dl_conf (dict): dataloader sub-config; consumed by
             :class:`MultLoader` and read for ``num_workers``.
         mm_conf (dict): multiplicity sub-config snapshot; still consumed
@@ -479,6 +479,17 @@ class ResolvedMultConfig:
             for round-trip via :func:`resolve_mult_config`.
         state_dict (dict or None): ``None`` for fresh training; otherwise
             the module state dict to load into :class:`MultModel`.
+        train_inverse (bool): when ``True``, :class:`MultModel` also builds
+            and co-trains a separate inverse-PID model
+            (:class:`~legofmt.multiplicity.model.InvModel`). Baked into the
+            saved config so inference reconstruction rebuilds it.
+        inv_model_args (dict): keyword arguments splatted into the inverse
+            model's :class:`x_transformers.Encoder` (defaults to
+            ``model_args``).
+        inv_h_dim (int): inverse-model hidden dim (defaults to ``h_dim``).
+        inv_n_layers (int): inverse-model depth (defaults to ``n_layers``).
+        inv_n_heads (int): inverse-model attention heads (defaults to
+            ``n_heads``).
     """
 
     max_seq_len: int
@@ -503,6 +514,12 @@ class ResolvedMultConfig:
     config: dict
 
     state_dict: dict | None
+
+    train_inverse: bool
+    inv_model_args: dict[str, Any]
+    inv_h_dim: int
+    inv_n_layers: int
+    inv_n_heads: int
 
 
 def resolve_mult_config(full_config: dict) -> ResolvedMultConfig:
@@ -689,4 +706,9 @@ def _build_resolved_mult(
         opt_conf=config.get("opt_conf", mm_conf.get("opt_conf")),
         config=config,
         state_dict=state_dict,
+        train_inverse=mm_conf.get("train_inverse", False),
+        inv_model_args=mm_conf.get("inv_model_args", mm_conf.get("model_args", {})),
+        inv_h_dim=mm_conf.get("inv_h_dim", mm_conf.get("h_dim", 512)),
+        inv_n_layers=mm_conf.get("inv_n_layers", mm_conf.get("n_layers", 6)),
+        inv_n_heads=mm_conf.get("inv_n_heads", mm_conf.get("n_heads", 8)),
     )

@@ -93,7 +93,19 @@ config:
     ce_focal_gamma: 0.0
     post_emb_norm: false
     use_abs_pos_emb: false
-    model_args:
+    train_inverse: false       # co-train the separate inverse-PID model (InvModel)
+    model_args:                # splatted into the count model's Decoder
+      ff_swish: true
+      ff_glu: true
+      attn_qk_norm: true
+      rotary_pos_emb: true
+      use_adaptive_rmsnorm: true
+      use_adaptive_layerscale: true
+      residual_attn: true
+    # inverse model (used only when train_inverse: true); inv_h_dim/_n_layers/
+    # _n_heads default to the count values, inv_model_args defaults to model_args.
+    # Note: rotary_xpos is invalid on the bidirectional Encoder.
+    inv_model_args:            # splatted into the inverse model's Encoder
       ff_swish: true
       ff_glu: true
       attn_qk_norm: true
