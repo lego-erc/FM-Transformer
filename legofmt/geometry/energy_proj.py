@@ -24,6 +24,12 @@ class EnergyProjections:
         norm = self.cutoff * (self.max_energy / self.cutoff) ** e.clamp(0.0, 1.0)
         return dir_ * norm
 
+    def to_mev(self, e_model: Tensor, e_in: Tensor) -> Tensor:
+        """Converts the log-scale model space energy back to MeV scale.
+        Assumes the model space energy to lie between 0 and 1."""
+        s_out = (1 - e_model.clamp(0.0, 1.0)) * e_in.clamp(0.0, 1.0)
+        return self.cutoff * (self.max_energy / self.cutoff) ** s_out
+
     def in_frac_log(self, p_x: Tensor) -> Tensor:
         p_x = self.in_frac(p_x)
         p_x[:, 1:] = self.log(p_x[:, 1:])
