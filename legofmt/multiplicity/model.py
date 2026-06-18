@@ -98,7 +98,7 @@ class InvModel(nn.Module):
         self.proj_in_ = nn.Linear(rc.in_dim, rc.inv_h_dim)
         self.embd_out_ = nn.Embedding(rc.ptypes.shape[0], rc.inv_h_dim)
         self.proj_cond_ = nn.Linear(1, rc.inv_h_dim)
-        self.embd_query_ = nn.Parameter(torch.zeros(rc.inv_h_dim))
+        self.embd_query_ = nn.Parameter(torch.randn(rc.inv_h_dim) * 0.02)
         self.proj_pid_ = nn.Linear(rc.inv_h_dim, rc.n_ptypes_in)
 
     def proj_in(self, x):
