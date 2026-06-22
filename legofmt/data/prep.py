@@ -9,13 +9,20 @@ from .struct import _F
 class DataPrep:
     def __init__(self, config):
         config = config.get("config", config)
-        model_conf = config.get("model_conf").copy()
-        self.in_dim = model_conf.get("model_args").get("in_dim")
-        self.manifold = build_manifold(model_conf.get("manifold"))
-        self.proj_ray = model_conf.get("proj_ray", True)
+        if "model_conf" in config:
+            model_conf = config.get("model_conf").copy()
+            self.manifold = build_manifold(model_conf.get("manifold"))
+            self.proj_ray = model_conf.get("proj_ray", True)
+            cutoff_mev = config["dl_conf"]["lds_args"].get("cutoff_mev")
+            max_energy = model_conf["max_energy"]
+        else:
+            self.manifold = build_manifold(config.get("manifold"))
+            self.proj_ray = config.get("proj_ray")
+            cutoff_mev = config.get("cutoff_mev")
+            max_energy = config.get("max_energy")
         self.pen = EnergyProjections(
-            cutoff_mev=config["dl_conf"]["lds_args"]["cutoff_mev"],
-            max_energy=model_conf["max_energy"],
+            cutoff_mev=cutoff_mev,
+            max_energy=max_energy,
         )
         self.ppa = CubeTrace()
 
