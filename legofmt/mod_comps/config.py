@@ -137,6 +137,11 @@ class ResolvedLEGOConfig:
             additionally conditions on a step-size ``d`` (the ``d=0`` slice
             stays the velocity field) and one Euler step (``t=0->1``) solves
             at inference. ``0`` (default) is the plain velocity model.
+        one_step_euler_sections (int): ``K`` -- number of dyadic step-size
+            levels for the consistency ladder; the queried step is drawn from
+            ``{1, 1/2, ..., 2**-(K-1)}``. The ladder grounds every rung in the
+            FM field (the ``d->0`` limit); too few levels leaves the
+            intermediate steps unanchored and the term diverges. Default ``8``.
         cond_cube (bool): if ``True``, project the conditioning position
             onto the cube before each forward pass.
         mask_conf (dict): training-mask mixture; ``p_forward`` is the
@@ -182,6 +187,7 @@ class ResolvedLEGOConfig:
     pdgid_is_idx: bool
     loss_sc_fac: float
     one_step_euler_fac: float
+    one_step_euler_sections: int
     cond_cube: bool
 
     mask_conf: dict
@@ -423,6 +429,7 @@ def _build_resolved(
         pdgid_is_idx=model_conf.get("pdgid_is_idx", False),
         loss_sc_fac=model_conf.get("loss_sc", 0.0),
         one_step_euler_fac=one_step_euler_fac,
+        one_step_euler_sections=model_conf.get("one_step_euler_sections", 8),
         cond_cube=model_conf.get("cond_cube", False),
         mask_conf=model_conf.get("mask_conf", {}),
         max_energy=model_conf["max_energy"],

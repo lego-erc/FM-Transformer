@@ -357,19 +357,18 @@ class LEGOLtng(ltng.LightningModule):
     def _one_step_euler_loss(self, base: Tensor, ds_t: DataStruct, pdgid_idx: Tensor) -> Tensor:
         mask, am = ds_t.m.full, ds_t.am.full
         gen = (mask == 1).unsqueeze(-1)
-        rep = dict(
-            mask=mask.repeat(2, 1), attn_mask=am.repeat(2, 1),
-            types=self.types_embd, pdgids=pdgid_idx.repeat(2, 1, 1),
-        )
-        steps = base.new_tensor([0.5, 1.0]).repeat_interleave(base.shape[0]).unsqueeze(-1)
-        s_half, s_pred = self.model(base.repeat(2, 1, 1), base.new_zeros(()), d=steps, **rep).chunk(2)
+        ckw = dict(mask=mask, attn_mask=am, types=self.types_embd, pdgids=pdgid_idx)
         with torch.no_grad():
-            x_mid = torch.where(gen, self.model.manifold.projx(base + 0.5 * s_half), base)
-            s_mid = self.model(
-                x_mid, base.new_full((), 0.5), d=base.new_full((base.shape[0], 1), 0.5),
-                mask=mask, attn_mask=am, types=self.types_embd, pdgids=pdgid_idx,
-            )
-        tgt = 0.5 * (s_half.detach() + s_mid)
+            i = torch.randint(1, self.rc.one_step_euler_sections + 1, (base.shape[0], 1), device=base.device)
+            step = 2.0 ** -(i - 1).to(base.dtype)             # queried step D, (B, 1)
+            half = step / 2
+            t0 = (torch.rand_like(step) * (1.0 / step).round()).floor() * step  # grid-aligned start
+            x0 = self.ps.sample(base, ds_t.f.model_in, t0.squeeze(-1)).x_t
+            s_half = self.model(x0, t0, d=half, **ckw)
+            x_mid = torch.where(gen, self.model.manifold.projx(x0 + half.unsqueeze(-1) * s_half), x0)
+            s_mid = self.model(x_mid, t0 + half, d=half, **ckw)
+            tgt = 0.5 * (s_half + s_mid)
+        s_pred = self.model(x0, t0, d=step, **ckw)
         g = gen & am.unsqueeze(-1)
         sc = ((s_pred - tgt) ** 2 * g).sum() / (g.sum().clamp(min=1) * s_pred.shape[-1])
         if self.training:
