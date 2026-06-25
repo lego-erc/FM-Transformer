@@ -132,6 +132,11 @@ class ResolvedLEGOConfig:
         pdgid_is_idx (bool): if ``True``, treat the PDG-id field of inputs
             as an integer index rather than a raw PDG id.
         loss_sc_fac (float): scalar multiplier for the auxiliary loss term.
+        one_step_euler_fac (float): weight of the one-step-Euler self-consistency term.
+            ``> 0`` enables the flow-map distillation path: the model
+            additionally conditions on a step-size ``d`` (the ``d=0`` slice
+            stays the velocity field) and one Euler step (``t=0->1``) solves
+            at inference. ``0`` (default) is the plain velocity model.
         cond_cube (bool): if ``True``, project the conditioning position
             onto the cube before each forward pass.
         mask_conf (dict): training-mask mixture; ``p_forward`` is the
@@ -176,6 +181,7 @@ class ResolvedLEGOConfig:
     ot_e_only: bool
     pdgid_is_idx: bool
     loss_sc_fac: float
+    one_step_euler_fac: float
     cond_cube: bool
 
     mask_conf: dict
@@ -402,6 +408,9 @@ def _build_resolved(
     Returns:
         ResolvedLEGOConfig: the assembled, frozen configuration.
     """
+    one_step_euler_fac = model_conf.get("one_step_euler_fac", 0.0)
+    if one_step_euler_fac > 0:
+        model_args.setdefault("step_cond", True)
     return ResolvedLEGOConfig(
         max_seq_l=max_seq_l,
         pdgids_template=pdgids.contiguous(),
@@ -413,6 +422,7 @@ def _build_resolved(
         ot_e_only=model_conf.get("ot_e_only", False),
         pdgid_is_idx=model_conf.get("pdgid_is_idx", False),
         loss_sc_fac=model_conf.get("loss_sc", 0.0),
+        one_step_euler_fac=one_step_euler_fac,
         cond_cube=model_conf.get("cond_cube", False),
         mask_conf=model_conf.get("mask_conf", {}),
         max_energy=model_conf["max_energy"],

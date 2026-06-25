@@ -88,6 +88,7 @@ class ProjectModel(ModelWrapper, nn.Module):
         attn_mask: torch.Tensor,
         types: torch.Tensor,
         pdgids: torch.Tensor | None = None,
+        d: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Velocity at every slot, projected to the manifold tangent.
 
@@ -101,6 +102,10 @@ class ProjectModel(ModelWrapper, nn.Module):
             attn_mask: real-token mask ``(B, L)``.
             types: slot-type ids ``(B, L)``.
             pdgids: species indices ``(B, L)``.
+            d: step size for a step-conditioned (one-step-Euler) field,
+                broadcastable to ``(B, L)``. Ignored unless the wrapped
+                field has ``step_cond=True``; defaults to ``0`` (the
+                instantaneous velocity slice) when omitted.
 
         Returns:
             Tangent velocity ``(B, L, in_dim)``.
@@ -109,7 +114,10 @@ class ProjectModel(ModelWrapper, nn.Module):
         pm = attn_mask.unsqueeze(-1)
         t = torch.atleast_2d(t).expand_as(attn_mask)
         t = torch.where(mask == 1, t, 1.)
-        v = self.vf(x_surr, mask, attn_mask, types, pdgids, t=t)
+        if getattr(self.vf, "step_cond", False):
+            d = x.new_zeros(()) if d is None else d
+            d = torch.atleast_2d(d).expand_as(attn_mask)
+        v = self.vf(x_surr, mask, attn_mask, types, pdgids, t=t, d=d)
         v_proj_dense = self.manifold.proju(x_proj_dense, v)
         return torch.where(pm, v_proj_dense, v)
 
@@ -340,7 +348,33 @@ class LEGOLtng(ltng.LightningModule):
         else:
             loss_sc = 0.0
         sq = (v_out - ps_.dx_t) ** 2
-        return self._reduce_and_log(sq, ds_t, loss_sc)
+        loss = self._reduce_and_log(sq, ds_t, loss_sc)
+
+        if self.rc.one_step_euler_fac > 0:
+            loss = loss + self.rc.one_step_euler_fac * self._one_step_euler_loss(base, ds_t, pdgid_idx)
+        return loss
+
+    def _one_step_euler_loss(self, base: Tensor, ds_t: DataStruct, pdgid_idx: Tensor) -> Tensor:
+        mask, am = ds_t.m.full, ds_t.am.full
+        gen = (mask == 1).unsqueeze(-1)
+        rep = dict(
+            mask=mask.repeat(2, 1), attn_mask=am.repeat(2, 1),
+            types=self.types_embd, pdgids=pdgid_idx.repeat(2, 1, 1),
+        )
+        steps = base.new_tensor([0.5, 1.0]).repeat_interleave(base.shape[0]).unsqueeze(-1)
+        s_half, s_pred = self.model(base.repeat(2, 1, 1), base.new_zeros(()), d=steps, **rep).chunk(2)
+        with torch.no_grad():
+            x_mid = torch.where(gen, self.model.manifold.projx(base + 0.5 * s_half), base)
+            s_mid = self.model(
+                x_mid, base.new_full((), 0.5), d=base.new_full((base.shape[0], 1), 0.5),
+                mask=mask, attn_mask=am, types=self.types_embd, pdgids=pdgid_idx,
+            )
+        tgt = 0.5 * (s_half.detach() + s_mid)
+        g = gen & am.unsqueeze(-1)
+        sc = ((s_pred - tgt) ** 2 * g).sum() / (g.sum().clamp(min=1) * s_pred.shape[-1])
+        if self.training:
+            self.log("loss/one_step_euler", sc.detach(), on_step=True, on_epoch=False, logger=True, sync_dist=False)
+        return sc
 
     def training_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
         """Lightning training hook; delegates to :meth:`_step`."""
@@ -492,6 +526,19 @@ class LEGOLtng(ltng.LightningModule):
 
         if x_init is None:
             x_init = self.gen_base_wrapper(ds_t)
+
+        if method == "one_step_euler":
+            def _jump(xi, m, a, pi):
+                s = self.model(
+                    xi, xi.new_zeros(()), mask=m, attn_mask=a,
+                    types=self.types_embd, pdgids=pi, d=xi.new_ones(()),
+                )
+                return torch.where((m == 1).unsqueeze(-1), self.model.manifold.projx(xi + s), xi)
+            return self.chunked(
+                _jump, x_init, ds_t.m.full, ds_t.am.full, pdgids_idx,
+                split_size=split_size, cat_dim=-3,
+            )
+
         explicit_grid = time_grid is not None
         if time_grid is None:
             time_grid = x_init.new_tensor([1.0, 0.0] if reverse else [0.0, 1.0])

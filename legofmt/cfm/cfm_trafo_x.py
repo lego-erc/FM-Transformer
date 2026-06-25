@@ -118,9 +118,12 @@ class CFMTrafo_x(nn.Module):
         npdgids: int = 1,
         dim_in_out: int | None = None,
         time_cond: bool = True,
+        step_cond: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
+        if step_cond and not time_cond:
+            raise ValueError("step_cond=True requires time_cond=True")
         ntypes = ntypes if ntypes is not None else max_seq_l
         self.h_dim = h_dim
         self.in_dim = in_dim
@@ -129,6 +132,7 @@ class CFMTrafo_x(nn.Module):
         self.ntypes = ntypes
         self.npdgids = npdgids
         self.time_cond = time_cond
+        self.step_cond = step_cond
 
         self.vf = ContinuousTransformerWrapper(
             dim_in=dim_in_out,
@@ -205,6 +209,7 @@ class CFMTrafo_x(nn.Module):
         types: Tensor,
         pdgids: Tensor | None,
         t: Tensor | None = None,
+        d: Tensor | None = None,
     ) -> Tensor:
         """Compute the velocity field (``time_cond=True``) or residual
         (``time_cond=False``) at the generated slots.
@@ -220,6 +225,9 @@ class CFMTrafo_x(nn.Module):
                 ``[0, npdgids)``.
             t: Flow time, broadcastable to ``(B, 1)``. Required when
                 ``time_cond=True``; ignored when ``False``.
+            d: Step size, broadcastable to ``(B, n)``. Used only when
+                ``step_cond=True``; its sinusoidal embedding (same
+                frequencies as ``t``) is added to the time embedding.
 
         Returns:
             ``(B, n, in_dim)`` field, zeroed where ``mask != 1``.
@@ -233,6 +241,9 @@ class CFMTrafo_x(nn.Module):
         if self.time_cond:
             tf = t.unsqueeze(-1) * self.freqs
             cond = torch.where(self.mask_freqs.bool(), tf.sin(), tf.cos())
+            if self.step_cond and d is not None:
+                df = d.unsqueeze(-1) * self.freqs
+                cond = cond + torch.where(self.mask_freqs.bool(), df.sin(), df.cos())
         else:
             cond = self.global_cond.expand(x.shape[0], -1)
 
