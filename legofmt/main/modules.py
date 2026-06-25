@@ -3,7 +3,6 @@ from pathlib import Path
 
 import torch
 from torch import Tensor, nn
-from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils.data import DataLoader, random_split
 
 import lightning as ltng
@@ -375,13 +374,18 @@ class LEGOLtng(ltng.LightningModule):
             was_train = self.model.training
             self.model.eval()                          # no dropout in the derivative
             self.model.no_detach = True                # let the JVP see the input projection
+            # flash/efficient SDPA has no forward-AD; force the manual attention path.
+            attends = [m for m in self.model.modules() if hasattr(m, "flash")]
+            flash_saved = [m.flash for m in attends]
+            for m in attends:
+                m.flash = False
             try:
-                # flash/efficient SDPA has no forward-AD; force the math kernel for the JVP.
-                with sdpa_kernel(SDPBackend.MATH):
-                    v_bar, dvdt = torch.func.jvp(
-                        vbar, (x, t, d), (v, torch.ones_like(t), -torch.ones_like(d)),
-                    )
+                v_bar, dvdt = torch.func.jvp(
+                    vbar, (x, t, d), (v, torch.ones_like(t), -torch.ones_like(d)),
+                )
             finally:
+                for m, f in zip(attends, flash_saved):
+                    m.flash = f
                 self.model.no_detach = False
                 self.model.train(was_train)
             tgt = (v + d.unsqueeze(-1) * dvdt).detach()
