@@ -3,6 +3,7 @@ from pathlib import Path
 
 import torch
 from torch import Tensor, nn
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.utils.data import DataLoader, random_split
 
 import lightning as ltng
@@ -375,9 +376,11 @@ class LEGOLtng(ltng.LightningModule):
             self.model.eval()                          # no dropout in the derivative
             self.model.no_detach = True                # let the JVP see the input projection
             try:
-                v_bar, dvdt = torch.func.jvp(
-                    vbar, (x, t, d), (v, torch.ones_like(t), -torch.ones_like(d)),
-                )
+                # flash/efficient SDPA has no forward-AD; force the math kernel for the JVP.
+                with sdpa_kernel(SDPBackend.MATH):
+                    v_bar, dvdt = torch.func.jvp(
+                        vbar, (x, t, d), (v, torch.ones_like(t), -torch.ones_like(d)),
+                    )
             finally:
                 self.model.no_detach = False
                 self.model.train(was_train)
