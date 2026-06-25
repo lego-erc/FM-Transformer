@@ -3,13 +3,13 @@
 
 run:
   train_model: mult          # fm | mult
-  name: rp_full_v1_090626
-  devices: [5, 6, 7]
+  name: rp_mult_v2_220626
+  devices: [0, 1, 2, 3]
   precision: 32
   matmul_precision: medium
   dtype: float32
   epochs: 10
-  dataset_size: 20000000     # only used to compute scheduler total_steps
+  dataset_size: 20_000_000     # only used to compute scheduler total_steps
   compile: false             # only applies to the fm model
   gradient_clip_val: 1.0
   val_check_interval: 0.2
@@ -24,7 +24,7 @@ logging:
 config:
   dl_conf:
     lds_args:
-      data: rp_lqar_full_er_080626   # prefixed with $LEGO_DATA_DIR at runtime
+      data: rp_190626   # prefixed with $LEGO_DATA_DIR at runtime
       frac: 1.0
       cutoff_mev: 10
       min_particles: 0
@@ -42,8 +42,8 @@ config:
     weight_decay: 1.0e-2
     warmup_steps: 0
     post_emb_norm: false
-    use_abs_pos_emb: false
-    train_inverse: false       # co-train the separate inverse-PID model (InvModel)
+    use_abs_pos_emb: true
+    train_inverse: true       # co-train the separate inverse-PID model (InvModel)
     model_args:                # splatted into the count model's Decoder
       ff_swish: true
       ff_glu: true
@@ -63,6 +63,7 @@ config:
       use_adaptive_rmsnorm: true
       use_adaptive_layerscale: true
       residual_attn: true
+      rotary_pos_emb: true
 
   opt_conf:
     opt: muon

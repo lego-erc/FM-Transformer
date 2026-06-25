@@ -3,13 +3,13 @@
 
 run:
   train_model: fm            # fm | mult
-  name: rp_full_v1_090626
-  devices: [5, 6, 7]
+  name: rp_fm_v1_240626
+  devices: [1, 2, 3, 4]
   precision: 32
   matmul_precision: medium
   dtype: float32
   epochs: 10
-  dataset_size: 20000000     # only used to compute scheduler total_steps
+  dataset_size: 20_000_000     # only used to compute scheduler total_steps
   compile: model             # false | model
   gradient_clip_val: 1.0
   val_check_interval: 0.2
@@ -56,10 +56,10 @@ config:
     t_dist: sd3
     t_dist_scale: 0.0
     loss_sc: 0.0
-    mask_conf: { p_forward: 0.68 }
+    mask_conf: { p_forward: 1. }
     cond_cube: false
     model_args:
-      h_dim: 256
+      h_dim: 128
       in_dim: 7
       nlayers: 6
       nhead: 8
