@@ -1,5 +1,6 @@
 import argparse
 import os
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -8,14 +9,16 @@ parser = argparse.ArgumentParser(description="Train from a YAML config (see conf
 parser.add_argument("config", type=Path, help="config name (configs/<name>.yaml) or path to a YAML file")
 args = parser.parse_args()
 
+ROOT = Path(__file__).resolve().parent.parent
+
 cfg_path = args.config if args.config.suffix else args.config.with_suffix(".yaml")
 if not cfg_path.is_file():
-    cfg_path = Path(__file__).resolve().parent.parent / "configs" / cfg_path
+    cfg_path = ROOT / "configs" / cfg_path
 
 cfg = yaml.safe_load(cfg_path.read_text())
 run, log_conf, config = cfg["run"], cfg["logging"], cfg["config"]
 
-for _l in (Path(__file__).resolve().parent.parent / ".env").read_text().splitlines():
+for _l in (ROOT / ".env").read_text().splitlines():
     if "=" in _l and not _l.lstrip().startswith("#"):
         _k, _v = _l.split("=", 1)
         os.environ.setdefault(_k.strip(), _v.strip().strip('"\''))
@@ -69,6 +72,13 @@ config["additional"]["precision"] = (
     str(run["precision"]) + ", " + torch.get_float32_matmul_precision()
 )
 config["additional"]["comet_exp_key"] = logger._experiment_key if logger else None
+try:
+    git_rev = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+    ).strip()
+except (subprocess.CalledProcessError, FileNotFoundError):
+    git_rev = None
+config["additional"]["git_rev"] = git_rev
 
 if logger:
     logger.log_hyperparams(config)
