@@ -351,13 +351,42 @@ class LEGOLtng(ltng.LightningModule):
         loss = self._reduce_and_log(sq, ds_t, loss_sc)
 
         if self.rc.one_step_euler_fac > 0:
-            loss = loss + self.rc.one_step_euler_fac * self._one_step_euler_loss(base, ds_t, pdgid_idx)
+            loss = loss + self.rc.one_step_euler_fac * self._one_step_euler_loss(base, ds_t, pdgid_idx, ps_)
         return loss
 
-    def _one_step_euler_loss(self, base: Tensor, ds_t: DataStruct, pdgid_idx: Tensor) -> Tensor:
+    def _one_step_euler_loss(
+        self, base: Tensor, ds_t: DataStruct, pdgid_idx: Tensor, ps_,
+    ) -> Tensor:
+        """Self-consistency term teaching the t=0->1 jump. ``bootstrap`` mode
+        uses the two-half-step ladder; ``derivative`` mode uses the MeanFlow
+        identity ``v̄ = v + d·dv̄/dt`` via one JVP (sign verified in tests).
+        Either way the d=0 slice stays the FM-trained velocity field."""
         mask, am = ds_t.m.full, ds_t.am.full
         gen = (mask == 1).unsqueeze(-1)
+        g = gen & am.unsqueeze(-1)
         ckw = dict(mask=mask, attn_mask=am, types=self.types_embd, pdgids=pdgid_idx)
+
+        if self.rc.one_step_euler_mode == "derivative":
+            x, t, v = ps_.x_t, ps_.t, ps_.dx_t        # v = instantaneous velocity (FM target)
+            d = torch.rand_like(t[:, :1]) * (1 - t[:, :1])         # window in (0, 1-t]
+            def vbar(x_, t_, d_):
+                return self.model(x_, t_, d=d_, **ckw)
+            was_train = self.model.training
+            self.model.eval()                          # no dropout in the derivative
+            self.model.no_detach = True                # let the JVP see the input projection
+            try:
+                v_bar, dvdt = torch.func.jvp(
+                    vbar, (x, t, d), (v, torch.ones_like(t), -torch.ones_like(d)),
+                )
+            finally:
+                self.model.no_detach = False
+                self.model.train(was_train)
+            tgt = (v + d.unsqueeze(-1) * dvdt).detach()
+            sc = ((v_bar - tgt) ** 2 * g).sum() / (g.sum().clamp(min=1) * v_bar.shape[-1])
+            if self.training:
+                self.log("loss/one_step_euler", sc.detach(), on_step=True, on_epoch=False, logger=True, sync_dist=False)
+            return sc
+
         with torch.no_grad():
             i = torch.randint(1, self.rc.one_step_euler_sections + 1, (base.shape[0], 1), device=base.device)
             step = 2.0 ** -(i - 1).to(base.dtype)             # queried step D, (B, 1)
@@ -369,7 +398,6 @@ class LEGOLtng(ltng.LightningModule):
             s_mid = self.model(x_mid, t0 + half, d=half, **ckw)
             tgt = 0.5 * (s_half + s_mid)
         s_pred = self.model(x0, t0, d=step, **ckw)
-        g = gen & am.unsqueeze(-1)
         sc = ((s_pred - tgt) ** 2 * g).sum() / (g.sum().clamp(min=1) * s_pred.shape[-1])
         if self.training:
             self.log("loss/one_step_euler", sc.detach(), on_step=True, on_epoch=False, logger=True, sync_dist=False)
