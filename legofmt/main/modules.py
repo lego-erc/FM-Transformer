@@ -352,47 +352,25 @@ class LEGOLtng(ltng.LightningModule):
 
         if self.rc.one_step_euler_fac > 0:
             loss = loss + self.rc.one_step_euler_fac * self._one_step_euler_loss(base, ds_t, pdgid_idx, ps_)
+
+        if self.rc.proj_dist_fac > 0:        # Idea 2: + distance after projecting to the sphere
+            nrm = torch.nn.functional.normalize
+            end = ps_.x_t + (1 - ps_.t)[..., None] * v_out
+            pe = torch.cat([nrm(end[..., 1:4], -1), nrm(end[..., 4:7], -1)], -1)
+            g = ((ds_t.m.full == 1) & (ds_t.am.full == 1)).unsqueeze(-1)
+            proj = ((pe - ds_t.f.model_in[..., 1:7]) ** 2 * g).sum() / (g.sum().clamp(min=1) * 6)
+            if self.training:
+                self.log("loss/proj_dist", proj.detach(), on_step=True, on_epoch=False, logger=True)
+            loss = loss + self.rc.proj_dist_fac * proj
         return loss
 
     def _one_step_euler_loss(
         self, base: Tensor, ds_t: DataStruct, pdgid_idx: Tensor, ps_,
     ) -> Tensor:
-        """Self-consistency term teaching the t=0->1 jump. ``bootstrap`` mode
-        uses the two-half-step ladder; ``derivative`` mode uses the MeanFlow
-        identity ``v̄ = v + d·dv̄/dt`` via one JVP (sign verified in tests).
-        Either way the d=0 slice stays the FM-trained velocity field."""
         mask, am = ds_t.m.full, ds_t.am.full
         gen = (mask == 1).unsqueeze(-1)
         g = gen & am.unsqueeze(-1)
         ckw = dict(mask=mask, attn_mask=am, types=self.types_embd, pdgids=pdgid_idx)
-
-        if self.rc.one_step_euler_mode == "derivative":
-            x, t, v = ps_.x_t, ps_.t, ps_.dx_t        # v = instantaneous velocity (FM target)
-            d = torch.rand_like(t[:, :1]) * (1 - t[:, :1])         # window in (0, 1-t]
-            def vbar(x_, t_, d_):
-                return self.model(x_, t_, d=d_, **ckw)
-            was_train = self.model.training
-            self.model.eval()                          # no dropout in the derivative
-            self.model.no_detach = True                # let the JVP see the input projection
-            # flash/efficient SDPA has no forward-AD; force the manual attention path.
-            attends = [m for m in self.model.modules() if hasattr(m, "flash")]
-            flash_saved = [m.flash for m in attends]
-            for m in attends:
-                m.flash = False
-            try:
-                v_bar, dvdt = torch.func.jvp(
-                    vbar, (x, t, d), (v, torch.ones_like(t), -torch.ones_like(d)),
-                )
-            finally:
-                for m, f in zip(attends, flash_saved):
-                    m.flash = f
-                self.model.no_detach = False
-                self.model.train(was_train)
-            tgt = (v + d.unsqueeze(-1) * dvdt).detach()
-            sc = ((v_bar - tgt) ** 2 * g).sum() / (g.sum().clamp(min=1) * v_bar.shape[-1])
-            if self.training:
-                self.log("loss/one_step_euler", sc.detach(), on_step=True, on_epoch=False, logger=True, sync_dist=False)
-            return sc
 
         with torch.no_grad():
             i = torch.randint(1, self.rc.one_step_euler_sections + 1, (base.shape[0], 1), device=base.device)
@@ -588,10 +566,14 @@ class LEGOLtng(ltng.LightningModule):
                 return_intermediates=return_intermediates, **common,
             )
 
-        return self.chunked(
+        out = self.chunked(
             _sample, x_init, ds_t.m.full, ds_t.am.full, pdgids_idx,
             split_size=split_size, cat_dim=-3,
         )
+        if self.rc.proj_dist_fac > 0:
+            nrm = torch.nn.functional.normalize
+            out = torch.cat([out[..., 0:1], nrm(out[..., 1:4], dim=-1), nrm(out[..., 4:7], dim=-1)], -1)
+        return out
 
     def _midpoint_steps(
         self, x: Tensor, time_grid: Tensor,
