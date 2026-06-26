@@ -561,31 +561,26 @@ class LEGOLtng(ltng.LightningModule):
         if x_init is None:
             x_init = self.gen_base_wrapper(ds_t)
 
-        if method == "one_step_euler":
-            def _jump(xi, m, a, pi):
-                s = self.model(
-                    xi, xi.new_zeros(()), mask=m, attn_mask=a,
-                    types=self.types_embd, pdgids=pi, d=xi.new_ones(()),
-                )
-                return torch.where((m == 1).unsqueeze(-1), self.model.manifold.projx(xi + s), xi)
-            return self.chunked(
-                _jump, x_init, ds_t.m.full, ds_t.am.full, pdgids_idx,
-                split_size=split_size, cat_dim=-3,
-            )
-
         explicit_grid = time_grid is not None
         if time_grid is None:
-            time_grid = x_init.new_tensor([1.0, 0.0] if reverse else [0.0, 1.0])
+            if method == "euler":
+                n = max(round(1.0 / step_size), 1)
+                time_grid = torch.linspace(0., 1., n + 1, device=x_init.device, dtype=x_init.dtype)
+                if reverse:
+                    time_grid = time_grid.flip(0)
+            else:
+                time_grid = x_init.new_tensor([1.0, 0.0] if reverse else [0.0, 1.0])
 
         if method == "midpoint" and not explicit_grid:
             time_grid = x_init.new_tensor([1., 0.5, 0.] if reverse else [0., 0.5, 1.])
 
         def _sample(x_init, mask, attn_mask, pdgids_idx):
+            extras = dict(mask=mask, attn_mask=attn_mask, types=self.types_embd, pdgids=pdgids_idx)
             if method == "midpoint":
-                return self._midpoint_steps(
-                    x_init, time_grid,
-                    mask=mask, attn_mask=attn_mask,
-                    types=self.types_embd, pdgids=pdgids_idx,
+                return self._midpoint_steps(x_init, time_grid, **extras)
+            if method == "euler":
+                return self._euler_steps(
+                    x_init, time_grid, return_intermediates=return_intermediates, **extras,
                 )
             return solver.sample(
                 x_init=x_init, time_grid=time_grid,
@@ -615,6 +610,21 @@ class LEGOLtng(ltng.LightningModule):
             v1 = self.model(x, t_a, **extras)
             v2 = self.model(x + dt / 2 * v1, t_a + dt / 2, **extras)
             x = x + dt * v2
+            if return_intermediates:
+                xs.append(x)
+        return torch.stack(xs) if return_intermediates else x
+
+    def _euler_steps(
+        self, x: Tensor, time_grid: Tensor,
+        return_intermediates: bool = False, **extras,
+    ) -> Tensor:
+        gen = (extras["mask"] == 1).unsqueeze(-1)
+        if return_intermediates:
+            xs = [x]
+        for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
+            dt = t_b - t_a
+            s = self.model(x, t_a, d=dt.abs(), **extras)
+            x = torch.where(gen, self.model.manifold.projx(x + dt * s), x)
             if return_intermediates:
                 xs.append(x)
         return torch.stack(xs) if return_intermediates else x
