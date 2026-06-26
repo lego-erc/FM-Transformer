@@ -356,7 +356,7 @@ class LEGOLtng(ltng.LightningModule):
         if self.rc.proj_dist_fac > 0:        # Idea 2: + distance after projecting to the sphere
             nrm = torch.nn.functional.normalize
             end = ps_.x_t + (1 - ps_.t)[..., None] * v_out
-            pe = torch.cat([nrm(end[..., 1:4], -1), nrm(end[..., 4:7], -1)], -1)
+            pe = torch.cat([nrm(end[..., 1:4], dim=-1), nrm(end[..., 4:7], dim=-1)], -1)
             g = ((ds_t.m.full == 1) & (ds_t.am.full == 1)).unsqueeze(-1)
             proj = ((pe - ds_t.f.model_in[..., 1:7]) ** 2 * g).sum() / (g.sum().clamp(min=1) * 6)
             if self.training:
