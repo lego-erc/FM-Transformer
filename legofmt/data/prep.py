@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 from ..geometry.energy_proj import EnergyProjections
@@ -46,7 +47,9 @@ class DataPrep:
             ray = torch.cat((dir_[:, 0], pos[:, 0]), dim=-1)
             pos = pos.clone()
             pos[:, 0] = self.ppa(ray)[..., 3:]
-        return self.manifold.projx(torch.cat((e, dir_, pos), dim=-1))
+        return self.manifold.projx(
+            torch.cat((e, F.normalize(dir_, dim=-1), F.normalize(pos, dim=-1)), dim=-1)
+        )
 
     @torch.no_grad()
     def format_add(self, batch: tuple) -> Tensor:
