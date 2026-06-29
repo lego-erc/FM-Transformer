@@ -371,6 +371,7 @@ class LEGOLtng(ltng.LightningModule):
         gen = (mask == 1).unsqueeze(-1)
         g = gen & am.unsqueeze(-1)
         ckw = dict(mask=mask, attn_mask=am, types=self.types_embd, pdgids=pdgid_idx)
+        man = self.model.manifold
 
         with torch.no_grad():
             i = torch.randint(1, self.rc.one_step_euler_sections + 1, (base.shape[0], 1), device=base.device)
@@ -379,9 +380,10 @@ class LEGOLtng(ltng.LightningModule):
             t0 = (torch.rand_like(step) * (1.0 / step).round()).floor() * step  # grid-aligned start
             x0 = self.ps.sample(base, ds_t.f.model_in, t0.squeeze(-1)).x_t
             s_half = self.model(x0, t0, d=half, **ckw)
-            x_mid = torch.where(gen, self.model.manifold.projx(x0 + half.unsqueeze(-1) * s_half), x0)
+            x_mid = torch.where(gen, man.expmap(x0, half.unsqueeze(-1) * s_half), x0)
             s_mid = self.model(x_mid, t0 + half, d=half, **ckw)
-            tgt = 0.5 * (s_half + s_mid)
+            x_end = torch.where(gen, man.expmap(x_mid, half.unsqueeze(-1) * s_mid), x0)
+            tgt = man.logmap(x0, x_end) / step.unsqueeze(-1)
         s_pred = self.model(x0, t0, d=step, **ckw)
         sc = ((s_pred - tgt) ** 2 * g).sum() / (g.sum().clamp(min=1) * s_pred.shape[-1])
         if self.training:
@@ -587,11 +589,13 @@ class LEGOLtng(ltng.LightningModule):
         """
         if return_intermediates:
             xs = [x]
+        man = self.model.manifold
         for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
             dt = t_b - t_a
             v1 = self.model(x, t_a, **extras)
-            v2 = self.model(x + dt / 2 * v1, t_a + dt / 2, **extras)
-            x = x + dt * v2
+            x_half = man.expmap(x, dt / 2 * v1)
+            v2 = self.model(x_half, t_a + dt / 2, **extras)
+            x = man.expmap(x, dt * man.proju(x, v2))
             if return_intermediates:
                 xs.append(x)
         return torch.stack(xs) if return_intermediates else x
@@ -606,7 +610,7 @@ class LEGOLtng(ltng.LightningModule):
         for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
             dt = t_b - t_a
             s = self.model(x, t_a, d=dt.abs(), **extras)
-            x = torch.where(gen, self.model.manifold.projx(x + dt * s), x)
+            x = torch.where(gen, self.model.manifold.expmap(x, dt * s), x)
             if return_intermediates:
                 xs.append(x)
         return torch.stack(xs) if return_intermediates else x
