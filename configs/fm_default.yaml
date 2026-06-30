@@ -47,8 +47,6 @@ config:
       - { name: euclidean, dim: 1 }
       - { name: sphere, dim: 3 }
       - { name: sphere, dim: 3 }
-    # reflow_path: <teacher checkpoint .pt>
-    # reflow_kwargs: { method: midpoint, step_size: 0.1 }
     ot_coupling: true
     proj_ray: false
     ot_e_only: false

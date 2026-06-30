@@ -132,16 +132,16 @@ class ResolvedLEGOConfig:
         pdgid_is_idx (bool): if ``True``, treat the PDG-id field of inputs
             as an integer index rather than a raw PDG id.
         loss_sc_fac (float): scalar multiplier for the auxiliary loss term.
-        one_step_euler_fac (float): weight of the one-step-Euler self-consistency term.
-            ``> 0`` enables the flow-map distillation path: the model
-            additionally conditions on a step-size ``d`` (the ``d=0`` slice
-            stays the velocity field) and one Euler step (``t=0->1``) solves
-            at inference. ``0`` (default) is the plain velocity model.
+        one_step_euler_fac (float): weight of the one-step-Euler self-consistency
+            term. ``> 0`` enables the straight-path distillation: a dyadic ladder
+            of expmap steps trains the single velocity field so that one full step
+            matches two chained half steps, making one Euler step (``t=0->1``)
+            solve at inference. ``0`` (default) is the plain velocity model.
         one_step_euler_sections (int): ``K`` -- number of dyadic step-size
             levels for the consistency ladder; the queried step is drawn from
             ``{1, 1/2, ..., 2**-(K-1)}``. The ladder grounds every rung in the
-            FM field (the ``d->0`` limit); too few levels leaves the
-            intermediate steps unanchored and the term diverges. Default ``8``.
+            FM field (the instantaneous, zero-length step); too few levels leaves
+            the intermediate steps unanchored and the term diverges. Default ``8``.
         cond_cube (bool): if ``True``, project the conditioning position
             onto the cube before each forward pass.
         mask_conf (dict): training-mask mixture; ``p_forward`` is the
@@ -168,11 +168,6 @@ class ResolvedLEGOConfig:
             :func:`resolve_legoltng_config`.
         state_dict (dict or None): ``None`` for fresh training; otherwise
             the model state dict to load into ``LEGOLtng.model.vf``.
-        reflow_path (str or None): checkpoint of a velocity teacher used to
-            build a fixed base->target coupling for the direct model;
-            ``None`` falls back to the data target.
-        reflow_kwargs (dict): solver kwargs passed to the teacher's
-            :meth:`solve` when building that coupling.
     """
 
     max_seq_l: int
@@ -188,7 +183,6 @@ class ResolvedLEGOConfig:
     loss_sc_fac: float
     one_step_euler_fac: float
     one_step_euler_sections: int
-    proj_dist_fac: float
     cond_cube: bool
 
     mask_conf: dict
@@ -203,9 +197,6 @@ class ResolvedLEGOConfig:
     config: dict
 
     state_dict: dict | None
-
-    reflow_path: str | None
-    reflow_kwargs: dict
 
 
 def resolve_legoltng_config(full_config: dict) -> ResolvedLEGOConfig:
@@ -416,8 +407,6 @@ def _build_resolved(
         ResolvedLEGOConfig: the assembled, frozen configuration.
     """
     one_step_euler_fac = model_conf.get("one_step_euler_fac", 0.0)
-    if one_step_euler_fac > 0:
-        model_args.setdefault("step_cond", True)
     return ResolvedLEGOConfig(
         max_seq_l=max_seq_l,
         pdgids_template=pdgids.contiguous(),
@@ -431,7 +420,6 @@ def _build_resolved(
         loss_sc_fac=model_conf.get("loss_sc", 0.0),
         one_step_euler_fac=one_step_euler_fac,
         one_step_euler_sections=model_conf.get("one_step_euler_sections", 8),
-        proj_dist_fac=model_conf.get("proj_dist_fac", 0.0),
         cond_cube=model_conf.get("cond_cube", False),
         mask_conf=model_conf.get("mask_conf", {}),
         max_energy=model_conf["max_energy"],
@@ -442,8 +430,6 @@ def _build_resolved(
         val_conf=config.get("val_conf", {}),
         config=config,
         state_dict=state_dict,
-        reflow_path=model_conf.get("reflow_path"),
-        reflow_kwargs=model_conf.get("reflow_kwargs", {}),
     )
 
 

@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from ..main.modules import LEGOLtng, LEGOLtngDirect
+from ..main.modules import LEGOLtng
 from ..multiplicity.model import MultModel
 from ..geometry.raytracing_proj import CubeTrace
 from ..geometry.energy_proj import EnergyProjections
@@ -261,9 +261,3 @@ class GenerateIn(GenerateOut):
             [sols.new_zeros(1), self.pdgids.to(sols.dtype)]
         )[sols[..., -1].long()]
         return _F(sols).in_p
-
-
-class GenerateOutDirect(GenerateOut):
-    """Direct variant — uses :class:`legofmt.main.modules.LEGOLtngDirect`
-    as the flow component."""
-    flow_cls = LEGOLtngDirect

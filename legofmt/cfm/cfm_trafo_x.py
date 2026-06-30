@@ -117,13 +117,9 @@ class CFMTrafo_x(nn.Module):
         xavier_gain: float = 1.0,
         npdgids: int = 1,
         dim_in_out: int | None = None,
-        time_cond: bool = True,
-        step_cond: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
-        if step_cond and not time_cond:
-            raise ValueError("step_cond=True requires time_cond=True")
         ntypes = ntypes if ntypes is not None else max_seq_l
         self.h_dim = h_dim
         self.in_dim = in_dim
@@ -131,8 +127,6 @@ class CFMTrafo_x(nn.Module):
         self.nvtypes = nvtypes
         self.ntypes = ntypes
         self.npdgids = npdgids
-        self.time_cond = time_cond
-        self.step_cond = step_cond
 
         self.vf = ContinuousTransformerWrapper(
             dim_in=dim_in_out,
@@ -171,13 +165,10 @@ class CFMTrafo_x(nn.Module):
         ):
             nn.init.xavier_normal_(p, gain=xavier_gain)
 
-        if time_cond:
-            # Vaswani-style sinusoidal time embedding, freqs scaled by h_dim.
-            self.register_buffer("freqs", h_dim * 1e-4 ** (torch.arange(h_dim) / h_dim))
-            self.register_buffer("mask_freqs", torch.arange(h_dim) % 2)
-            self._register_load_state_dict_pre_hook(self._legacy_param_rename)
-        else:
-            self.global_cond = nn.Parameter(torch.zeros(1, h_dim))
+        # Vaswani-style sinusoidal time embedding, freqs scaled by h_dim.
+        self.register_buffer("freqs", h_dim * 1e-4 ** (torch.arange(h_dim) / h_dim))
+        self.register_buffer("mask_freqs", torch.arange(h_dim) % 2)
+        self._register_load_state_dict_pre_hook(self._legacy_param_rename)
 
     @staticmethod
     def _legacy_param_rename(state_dict, prefix, *_):
@@ -208,11 +199,9 @@ class CFMTrafo_x(nn.Module):
         attn_mask: Tensor,
         types: Tensor,
         pdgids: Tensor | None,
-        t: Tensor | None = None,
-        d: Tensor | None = None,
+        t: Tensor,
     ) -> Tensor:
-        """Compute the velocity field (``time_cond=True``) or residual
-        (``time_cond=False``) at the generated slots.
+        """Compute the velocity field at the generated slots.
 
         Args:
             x: Per-token features, shape ``(B, n, in_dim)``.
@@ -223,11 +212,7 @@ class CFMTrafo_x(nn.Module):
                 ``[0, ntypes)``.
             pdgids: Particle-species indices, shape ``(B, n)``, values in
                 ``[0, npdgids)``.
-            t: Flow time, broadcastable to ``(B, 1)``. Required when
-                ``time_cond=True``; ignored when ``False``.
-            d: Step size, broadcastable to ``(B, n)``. Used only when
-                ``step_cond=True``; its sinusoidal embedding (same
-                frequencies as ``t``) is added to the time embedding.
+            t: Flow time, broadcastable to ``(B, 1)``.
 
         Returns:
             ``(B, n, in_dim)`` field, zeroed where ``mask != 1``.
@@ -238,19 +223,9 @@ class CFMTrafo_x(nn.Module):
         so = (-1, n, self.in_dim)
         s4 = (-1, n, self.h_dim, self.in_dim)
 
-        if self.time_cond:
-            tf = t.unsqueeze(-1) * self.freqs
-            cond = torch.where(self.mask_freqs.bool(), tf.sin(), tf.cos())
-            if self.step_cond and d is not None:
-                df = d.unsqueeze(-1) * self.freqs
-                cond = cond + torch.where(self.mask_freqs.bool(), df.sin(), df.cos())
-        else:
-            cond = self.global_cond.expand(x.shape[0], -1)
+        tf = t.unsqueeze(-1) * self.freqs
+        cond = torch.where(self.mask_freqs.bool(), tf.sin(), tf.cos())
 
-        # Up-projection: the three source-indexed weights are summed
-        # before the einsum (single fused contraction); biases summed
-        # likewise; divide by 3 to average. Inlined to let intermediates
-        # be freed before the next op.
         embd = (
             torch.einsum(
                 "ijl,ijkl->ijk", x,
@@ -261,9 +236,7 @@ class CFMTrafo_x(nn.Module):
           + self.cond_bi_mask  [mi].view(s3)
           + self.cond_bi_types [ti].view(s3)
           + self.cond_bi_pdgids[pi].view(s3)
-        ) / 3
-        if self.time_cond:
-            embd = embd + cond
+        ) / 3 + cond
 
         # Encoder. Inner project_in / project_out are identities unless
         # dim_in_out was set.

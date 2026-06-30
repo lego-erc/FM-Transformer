@@ -1,6 +1,3 @@
-import warnings
-from pathlib import Path
-
 import torch
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, random_split
@@ -88,7 +85,6 @@ class ProjectModel(ModelWrapper, nn.Module):
         attn_mask: torch.Tensor,
         types: torch.Tensor,
         pdgids: torch.Tensor | None = None,
-        d: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Velocity at every slot, projected to the manifold tangent.
 
@@ -102,10 +98,6 @@ class ProjectModel(ModelWrapper, nn.Module):
             attn_mask: real-token mask ``(B, L)``.
             types: slot-type ids ``(B, L)``.
             pdgids: species indices ``(B, L)``.
-            d: step size for a step-conditioned (one-step-Euler) field,
-                broadcastable to ``(B, L)``. Ignored unless the wrapped
-                field has ``step_cond=True``; defaults to ``0`` (the
-                instantaneous velocity slice) when omitted.
 
         Returns:
             Tangent velocity ``(B, L, in_dim)``.
@@ -114,10 +106,7 @@ class ProjectModel(ModelWrapper, nn.Module):
         pm = attn_mask.unsqueeze(-1)
         t = torch.atleast_2d(t).expand_as(attn_mask)
         t = torch.where(mask == 1, t, 1.)
-        if getattr(self.vf, "step_cond", False):
-            d = x.new_zeros(()) if d is None else d
-            d = torch.atleast_2d(d).expand_as(attn_mask)
-        v = self.vf(x_surr, mask, attn_mask, types, pdgids, t=t, d=d)
+        v = self.vf(x_surr, mask, attn_mask, types, pdgids, t=t)
         v_proj_dense = self.manifold.proju(x_proj_dense, v)
         return torch.where(pm, v_proj_dense, v)
 
@@ -352,16 +341,6 @@ class LEGOLtng(ltng.LightningModule):
 
         if self.rc.one_step_euler_fac > 0:
             loss = loss + self.rc.one_step_euler_fac * self._one_step_euler_loss(base, ds_t, pdgid_idx, ps_)
-
-        if self.rc.proj_dist_fac > 0:        # Idea 2: + distance after projecting to the sphere
-            nrm = torch.nn.functional.normalize
-            end = ps_.x_t + (1 - ps_.t)[..., None] * v_out
-            pe = torch.cat([nrm(end[..., 1:4], dim=-1), nrm(end[..., 4:7], dim=-1)], -1)
-            g = ((ds_t.m.full == 1) & (ds_t.am.full == 1)).unsqueeze(-1)
-            proj = ((pe - ds_t.f.model_in[..., 1:7]) ** 2 * g).sum() / (g.sum().clamp(min=1) * 6)
-            if self.training:
-                self.log("loss/proj_dist", proj.detach(), on_step=True, on_epoch=False, logger=True)
-            loss = loss + self.rc.proj_dist_fac * proj
         return loss
 
     def _one_step_euler_loss(
@@ -379,12 +358,12 @@ class LEGOLtng(ltng.LightningModule):
             half = step / 2
             t0 = (torch.rand_like(step) * (1.0 / step).round()).floor() * step  # grid-aligned start
             x0 = self.ps.sample(base, ds_t.f.model_in, t0.squeeze(-1)).x_t
-            s_half = self.model(x0, t0, d=half, **ckw)
+            s_half = self.model(x0, t0, **ckw)
             x_mid = torch.where(gen, man.expmap(x0, half.unsqueeze(-1) * s_half), x0)
-            s_mid = self.model(x_mid, t0 + half, d=half, **ckw)
+            s_mid = self.model(x_mid, t0 + half, **ckw)
             x_end = torch.where(gen, man.expmap(x_mid, half.unsqueeze(-1) * s_mid), x0)
             tgt = man.logmap(x0, x_end) / step.unsqueeze(-1)
-        s_pred = self.model(x0, t0, d=step, **ckw)
+        s_pred = self.model(x0, t0, **ckw)
         sc = ((s_pred - tgt) ** 2 * g).sum() / (g.sum().clamp(min=1) * s_pred.shape[-1])
         if self.training:
             self.log("loss/one_step_euler", sc.detach(), on_step=True, on_epoch=False, logger=True, sync_dist=False)
@@ -572,9 +551,6 @@ class LEGOLtng(ltng.LightningModule):
             _sample, x_init, ds_t.m.full, ds_t.am.full, pdgids_idx,
             split_size=split_size, cat_dim=-3,
         )
-        if self.rc.proj_dist_fac > 0:
-            nrm = torch.nn.functional.normalize
-            out = torch.cat([out[..., 0:1], nrm(out[..., 1:4], dim=-1), nrm(out[..., 4:7], dim=-1)], -1)
         return out
 
     def _midpoint_steps(
@@ -609,7 +585,7 @@ class LEGOLtng(ltng.LightningModule):
             xs = [x]
         for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
             dt = t_b - t_a
-            s = self.model(x, t_a, d=dt.abs(), **extras)
+            s = self.model(x, t_a, **extras)
             x = torch.where(gen, self.model.manifold.expmap(x, dt * s), x)
             if return_intermediates:
                 xs.append(x)
@@ -675,147 +651,3 @@ class LEGOLtng(ltng.LightningModule):
             T = sols.shape[0]
             pdgids = pdgids.unsqueeze(0).expand(T, -1, -1, -1)
         return torch.cat((sols, pdgids), dim=-1), ds_t.m.full, ds_t.am.full
-
-
-def _build_reflow_teacher(reflow_path: str | None) -> nn.Module | None:
-    """Frozen, ``torch.compile``'d velocity teacher for reflow; ``None`` if path unset/missing."""
-    if reflow_path is None:
-        return None
-    if not Path(reflow_path).is_file():
-        warnings.warn(f"reflow_path={reflow_path!r} not found; reflow disabled.", stacklevel=2)
-        return None
-    teacher = LEGOLtng(torch.load(reflow_path, map_location="cpu", weights_only=False))
-    teacher.eval().requires_grad_(False)
-    teacher.model = torch.compile(teacher.model, dynamic=False)
-    return teacher
-
-
-class ProjectModelDirect(ProjectModel):
-    """Residual-prediction wrapper for the no-time direct model. Mirror
-    of :class:`ProjectModel`; only the forward differs (no time argument,
-    residual instead of velocity, single Euler step + safe sphere snap)."""
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        mask: torch.Tensor,
-        attn_mask: torch.Tensor,
-        types: torch.Tensor,
-        pdgids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Residual step ``base + vf(base)`` with a manifold snap at generated slots.
-
-        Returns:
-            Final features ``(B, L, in_dim)``.
-        """
-        _, x_attended, x_surr = self._prep_x(x, attn_mask)
-        residual = self.vf(x_surr, mask, attn_mask, types, pdgids)
-        out_raw = x_attended + residual
-        gen = (mask == 1).unsqueeze(-1)
-        ref = torch.zeros_like(out_raw)
-        ref[..., 1] = 1.0
-        ref[..., 4] = 1.0
-        safe = torch.where(gen, out_raw, ref)
-        out_proj = self.manifold.projx(safe)
-        return torch.where(gen, out_proj, out_raw)
-
-
-class LEGOLtngDirect(LEGOLtng):
-    """Direct (residual-prediction) variant of :class:`LEGOLtng`.
-
-    The transformer predicts the residual ``target - base`` at the
-    generated slots; the wrapper applies one Euler step
-    ``final = base + residual`` (plus a manifold snap on the sphere half)
-    and the loss is MSE between predicted and target.
-
-    When ``model_conf.reflow_path`` is set to a velocity-model checkpoint,
-    that model is loaded as a frozen teacher and ``teacher.solve(base)``
-    replaces the data target — giving the direct student a fixed
-    ``base -> target`` coupling per batch (the prerequisite for one-step
-    Euler to reach the target). When the path is unset or missing,
-    training falls back to MSE against the data target.
-    """
-
-    def __init__(self, full_config: dict) -> None:
-        """Builds the direct model and, if configured, the frozen reflow teacher."""
-        super().__init__(full_config)
-        object.__setattr__(
-            self, "reflow_teacher", _build_reflow_teacher(self.rc.reflow_path),
-        )
-
-    def _build_model(self, rc) -> nn.Module:
-        """Constructs the no-time residual-prediction wrapper."""
-        return ProjectModelDirect(
-            CFMTrafo_x(**rc.model_args, time_cond=False),
-            rc.manifold,
-            cond_cube=rc.cond_cube,
-        )
-
-    @torch.no_grad()
-    def on_fit_start(self) -> None:
-        """Initialises base state and moves the reflow teacher to the device."""
-        super().on_fit_start()
-        if self.reflow_teacher is not None:
-            self.reflow_teacher.to(self.device)
-
-    def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
-        """One direct-model step: residual MSE to the target (data, or the
-        reflow teacher's solved coupling).
-
-        Returns:
-            Scalar loss.
-        """
-        with torch.no_grad():
-            ds_t = DataStruct(ds_t.f.full, self._sample_mask(ds_t), ds_t.am.full)
-            base = self.gen_base_wrapper(ds_t)
-            pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
-            if self.reflow_teacher is not None:
-                solve_kwargs = dict(self.rc.reflow_kwargs)
-                if (
-                    "time_grid" not in solve_kwargs
-                    and solve_kwargs.get("method", "midpoint") == "midpoint"
-                ):
-                    solve_kwargs["time_grid"] = base.new_tensor([0.0, 1.0])
-                target = self.reflow_teacher.solve(
-                    ds_t, x_init=base, **solve_kwargs,
-                )
-            else:
-                target = ds_t.f.model_in
-        pred = self.model(
-            base,
-            mask=ds_t.m.full, attn_mask=ds_t.am.full,
-            types=self.types_embd, pdgids=pdgid_idx,
-        )
-        if self.rc.loss_sc_fac > 0:
-            m_gen = (ds_t.m.full == 1).to(pred.dtype)
-            loss_sc = self.loss_fn(
-                pred[..., 0] * m_gen,
-                target[..., 0] * m_gen,
-            )
-        else:
-            loss_sc = 0.0
-        sq = (pred - target) ** 2
-        return self._reduce_and_log(sq, ds_t, loss_sc)
-
-    @torch.no_grad()
-    def solve(
-        self,
-        ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]",
-        x_init: Tensor | None = None,
-        split_size: int | None = None,
-        **_kw,
-    ) -> Tensor:
-        """Single-pass residual prediction from the base prior (no ODE)."""
-        ds_t, pdgids_idx = self._prep_solve(ds_t)
-        if x_init is None:
-            x_init = self.gen_base_wrapper(ds_t)
-
-        def _fwd(x, m, a, pi):
-            return self.model(
-                x, mask=m, attn_mask=a, types=self.types_embd, pdgids=pi,
-            )
-
-        return self.chunked(
-            _fwd, x_init, ds_t.m.full, ds_t.am.full, pdgids_idx,
-            split_size=split_size,
-        )
