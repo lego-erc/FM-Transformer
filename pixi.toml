@@ -2,7 +2,11 @@
 authors = ["rdebrand <richard.hildebrandt@tum.de>"]
 channels = ["conda-forge"]
 name = "legofmt"
-platforms = ["linux-64", "osx-arm64"]
+platforms = [
+    "linux-64",
+    { name = "linux-64-cuda", platform = "linux-64", cuda = "13.0" },
+    "osx-arm64",
+]
 version = "0.1.0"
 exclude-newer = "14d"
 
@@ -24,8 +28,8 @@ legofmt = { path = ".", editable = true }
 [feature.cuda.pypi-options]
 no-build-isolation = ["torch-lap-cuda"]
 
-[feature.cuda.system-requirements]
-cuda = "13.0"
+[feature.cuda]
+platforms = ["linux-64-cuda"]
 
 [feature.cuda.dependencies]
 uv = "*"
