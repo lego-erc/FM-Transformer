@@ -305,7 +305,8 @@ def _resolve_fresh(config: dict) -> ResolvedLEGOConfig:
 
     model_args["npdgids"] = pdgids.shape[0] + 1
     model_args.setdefault("max_seq_l", max_seq_l)
-    _n_prefix = len(model_conf.get("cond_scalars", ("Density",))) + 1
+    model_conf.setdefault("cond_scalars", tuple(meta.get("cond_scalars", ("Density",))))
+    _n_prefix = len(model_conf["cond_scalars"]) + 1
     model_args.setdefault("ntypes", _n_prefix + 2)
     # ``pdgids`` lives at model_conf scope (one level above model_args) so
     # it is preserved by the manual torch.save round-trip in scripts/train.py.
