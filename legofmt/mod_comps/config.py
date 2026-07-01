@@ -701,7 +701,9 @@ def _build_resolved_mult(
     if not torch.is_tensor(ptypes_in):
         ptypes_in = torch.tensor(ptypes_in)
 
-    set_layout(tuple(mm_conf.get("cond_scalars", ("Density",))))
+    _cond_scalars = tuple(mm_conf.get("cond_scalars", ("Density",)))
+    set_layout(_cond_scalars)
+    in_dim = len(_cond_scalars) + 7
 
     return ResolvedMultConfig(
         max_seq_len=ptypes.shape[0],
@@ -710,7 +712,7 @@ def _build_resolved_mult(
         ptypes=ptypes.contiguous(),
         ptypes_in=ptypes_in.contiguous(),
         h_dim=mm_conf.get("h_dim", 512),
-        in_dim=mm_conf.get("in_dim", 6),
+        in_dim=in_dim,
         n_layers=mm_conf.get("n_layers", 6),
         n_heads=mm_conf.get("n_heads", 8),
         dropout=mm_conf.get("dropout", 0.1),
