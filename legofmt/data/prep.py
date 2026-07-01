@@ -5,7 +5,7 @@ from torch import Tensor
 from ..geometry.energy_proj import EnergyProjections
 from ..geometry.raytracing_proj import CubeTrace
 from ..mod_comps.config import build_manifold
-from .struct import _F
+from .struct import _F, cond_scalars, set_layout
 
 class DataPrep:
     def __init__(self, config):
@@ -16,11 +16,14 @@ class DataPrep:
             self.proj_ray = model_conf.get("proj_ray", True)
             cutoff_mev = config["dl_conf"]["lds_args"].get("cutoff_mev")
             max_energy = model_conf["max_energy"]
+            cond = model_conf.get("cond_scalars", ("Density",))
         else:
             self.manifold = build_manifold(config.get("manifold"))
             self.proj_ray = config.get("proj_ray")
             cutoff_mev = config.get("cutoff_mev")
             max_energy = config.get("max_energy")
+            cond = config.get("cond_scalars", ("Density",))
+        set_layout(cond)
         self.pen = EnergyProjections(
             cutoff_mev=cutoff_mev,
             max_energy=max_energy,
@@ -56,11 +59,16 @@ class DataPrep:
         cc_ext, mask, attn_mask, data_add = batch
         e_dep = torch.ones_like(cc_ext[:, :1])
         e_dep[..., 0] = data_add.get("E_dep").view_as(e_dep[..., 0]) / self.pen.max_energy
-        density = torch.ones_like(cc_ext[:, :1])
-        density[..., 0] = data_add.get("Density").view_as(density[..., 0])
-        target = torch.cat((density, e_dep, cc_ext), dim=1).nan_to_num()
+        cond_rows = []
+        for name in cond_scalars():
+            row = torch.ones_like(cc_ext[:, :1])
+            row[..., 0] = data_add.get(name).view_as(row[..., 0])
+            cond_rows.append(row)
+        target = torch.cat((cond_rows[0], e_dep, *cond_rows[1:], cc_ext), dim=1).nan_to_num()
         _F(target).non_p[..., -1] = 0
-        mask = torch.cat((torch.zeros_like(mask[:, :1]),
-                          torch.ones_like(mask[:, :1]), mask), dim=1)
-        attn_mask = torch.cat((torch.ones_like(attn_mask[:, :2]), attn_mask), dim=1)
+        z, o = torch.zeros_like(mask[:, :1]), torch.ones_like(mask[:, :1])
+        mask = torch.cat((z, o, *([z] * (len(cond_rows) - 1)), mask), dim=1)
+        attn_mask = torch.cat(
+            (torch.ones_like(attn_mask[:, :1]).repeat(1, len(cond_rows) + 1), attn_mask), dim=1,
+        )
         return target, mask, attn_mask

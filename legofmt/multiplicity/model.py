@@ -8,6 +8,7 @@ from lightning import LightningModule
 from x_transformers import ContinuousTransformerWrapper, Decoder, Encoder
 
 from legofmt.data.dataloaders import LEGODataset
+from legofmt.data.struct import cond_scalars
 from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.mod_comps.config import resolve_mult_config
 from legofmt.mod_comps.optimizers import build_optimizer, schedulefree_adamw
@@ -27,18 +28,19 @@ class MultLoader(torch.utils.data.Dataset):
 
         ds = LEGODataset(**lds_conf).data
         ds_f = ds.f
-        density = ds_f.d.unsqueeze(-1)
+        # in_dim must be len(cond_scalars) + 7
+        conds = torch.cat([ds_f.cond(n).unsqueeze(-1) for n in cond_scalars()], dim=-1)
 
         self.pdgid_in_idx = torch.searchsorted(
             ptypes_in, ds_f.in_p[..., 0, -1].contiguous()
         ).clamp(0, ptypes_in.shape[0] - 1)
-        self.in_tok = torch.cat((density, ds_f.in_cc.squeeze(-2)), dim=-1)
+        self.in_tok = torch.cat((conds, ds_f.in_cc.squeeze(-2)), dim=-1)
         self.counts = (ds_f.out_p[..., -1:] == ptypes.view(1, 1, -1)).sum(1).clamp_max(max_particles - 1)
 
         if self.train_inverse:
             out_cc = ds_f.out_cc.nan_to_num()
             self.out_tok = torch.cat(
-                (density.unsqueeze(1).expand(-1, out_cc.shape[1], -1), out_cc), dim=-1
+                (conds.unsqueeze(1).expand(-1, out_cc.shape[1], -1), out_cc), dim=-1
             ).contiguous()
             self.out_pid_idx = torch.searchsorted(ptypes, ds_f.out_p[..., -1].long()).clamp(max=ptypes.shape[0] - 1)
             self.out_mask = ds.am.out_p.bool()

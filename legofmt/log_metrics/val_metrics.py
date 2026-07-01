@@ -14,6 +14,8 @@ all the slot/column conventions, so ``LEGOLtng`` only connects and logs.
 
 import torch
 
+from legofmt.data.struct import _F
+
 from legofmt.geometry.geom_trafos import GeomTrafos
 
 _GEOM = GeomTrafos()
@@ -106,17 +108,18 @@ class ShowerValMetrics:
 
     def __call__(self, lego, ds_t) -> dict:
         gen = self._generate(lego, ds_t)
+        gout = _F(gen).out_p  # layout-aware outgoing slice (handles extra cond slots)
         active, pdg, rcc = ds_t.am.out_p, ds_t.f.out_p[..., -1], ds_t.f.out_cc
         reps = {
             "particle": (
                 KIN_NAMES,
                 particle_kinematics(rcc[..., 1:4], rcc[..., 0:1], rcc[..., 4:7], active),
-                particle_kinematics(gen[:, 3:, 1:4], gen[:, 3:, 0:1], gen[:, 3:, 4:7], active),
+                particle_kinematics(gout[..., 1:4], gout[..., 0:1], gout[..., 4:7], active),
             ),
             "summary": (
                 SUMMARY_FEATURE_NAMES,
                 event_summary(rcc[..., 1:4], rcc[..., 0:1], rcc[..., 4:7], pdg, active, ds_t.f.edep),
-                event_summary(gen[:, 3:, 1:4], gen[:, 3:, 0:1], gen[:, 3:, 4:7], pdg, active, gen[:, 1, 0]),
+                event_summary(gout[..., 1:4], gout[..., 0:1], gout[..., 4:7], pdg, active, _F(gen).edep),
             ),
         }
         out = {}

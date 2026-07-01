@@ -135,7 +135,8 @@ class LEGOLtng(ltng.LightningModule):
         self.register_buffer("pdgids_template", rc.pdgids_template)
         self.register_buffer(
             "types_embd",
-            torch.arange(rc.max_seq_l, dtype=torch.int64).clamp_max(3).view(1, -1),
+            torch.arange(rc.max_seq_l, dtype=torch.int64)
+            .clamp_max(rc.n_prefix + 1).view(1, -1),
         )
 
         self.model = self._build_model(rc)
@@ -215,7 +216,7 @@ class LEGOLtng(ltng.LightningModule):
             ds_t = DataStruct(*ds_t)
         data = ds_t.f.model_in
         m = ds_t.m.full
-        fwd = m[:, 2] == 0
+        fwd = m[:, self.rc.n_prefix] == 0  # incoming slot conditions => forward event
         noise = None if fwd.all() else self.gen_base.iso(m.shape, data.device)
         if fwd.any():
             base = torch.cat(
@@ -296,7 +297,7 @@ class LEGOLtng(ltng.LightningModule):
             return ds_t.m.full
         fwd = ds_t.m.full
         inv = (fwd == 0) & (ds_t.am.full == 1)
-        inv[:, 0] = 0
+        inv[:, :self.rc.n_prefix] = 0  # all conditioning scalars stay conditioning
         pick = torch.rand(fwd.shape[0], device=fwd.device) < self.rc.mask_conf.get("p_forward", 0.5)
         return torch.where(pick.unsqueeze(-1), fwd, inv.long())
 

@@ -29,6 +29,8 @@ from typing import Any
 import torch
 from flow_matching.utils.manifolds import Euclidean, Sphere
 
+from ..data.struct import set_layout
+
 from legofmt.geometry.path_sample_mult import ProductManifold
 
 # Registry of factor manifolds available to the structured spec form.
@@ -184,6 +186,8 @@ class ResolvedLEGOConfig:
     one_step_euler_fac: float
     one_step_euler_sections: int
     cond_cube: bool
+    cond_scalars: tuple[str, ...]
+    n_prefix: int
 
     mask_conf: dict
 
@@ -301,7 +305,8 @@ def _resolve_fresh(config: dict) -> ResolvedLEGOConfig:
 
     model_args["npdgids"] = pdgids.shape[0] + 1
     model_args.setdefault("max_seq_l", max_seq_l)
-    model_args.setdefault("ntypes", 4)
+    _n_prefix = len(model_conf.get("cond_scalars", ("Density",))) + 1
+    model_args.setdefault("ntypes", _n_prefix + 2)
     # ``pdgids`` lives at model_conf scope (one level above model_args) so
     # it is preserved by the manual torch.save round-trip in scripts/train.py.
     model_conf["pdgids"] = pdgids
@@ -407,6 +412,9 @@ def _build_resolved(
         ResolvedLEGOConfig: the assembled, frozen configuration.
     """
     one_step_euler_fac = model_conf.get("one_step_euler_fac", 0.0)
+    cond_scalars = tuple(model_conf.get("cond_scalars", ("Density",)))
+    n_prefix = len(cond_scalars) + 1  # + edep slot (generated)
+    set_layout(cond_scalars)
     return ResolvedLEGOConfig(
         max_seq_l=max_seq_l,
         pdgids_template=pdgids.contiguous(),
@@ -421,6 +429,8 @@ def _build_resolved(
         one_step_euler_fac=one_step_euler_fac,
         one_step_euler_sections=model_conf.get("one_step_euler_sections", 8),
         cond_cube=model_conf.get("cond_cube", False),
+        cond_scalars=cond_scalars,
+        n_prefix=n_prefix,
         mask_conf=model_conf.get("mask_conf", {}),
         max_energy=model_conf["max_energy"],
         cutoff_mev=config["dl_conf"]["lds_args"]["cutoff_mev"],
@@ -571,7 +581,10 @@ def _resolve_fresh_mult(config: dict) -> ResolvedMultConfig:
         raise KeyError("Fresh-training mult config requires dl_conf.lds_args.data")
 
     meta = json.loads(Path(dpath, "meta.json").read_text())
-    mm_conf.setdefault("max_out_particles", meta["ntokens"] - 3)
+    cond_scalars = tuple(mm_conf.get("cond_scalars", meta.get("cond_scalars", ("Density",))))
+    set_layout(cond_scalars)  # before MultLoader, which reads layout-dependent accessors
+    n_prefix = len(cond_scalars) + 1
+    mm_conf.setdefault("max_out_particles", meta["ntokens"] - (n_prefix + 1))
     mm_conf.setdefault(
         "ptypes", torch.tensor(meta["particles"]).sort().values
     )
@@ -686,6 +699,8 @@ def _build_resolved_mult(
         ptypes = torch.tensor(ptypes)
     if not torch.is_tensor(ptypes_in):
         ptypes_in = torch.tensor(ptypes_in)
+
+    set_layout(tuple(mm_conf.get("cond_scalars", ("Density",))))
 
     return ResolvedMultConfig(
         max_seq_len=ptypes.shape[0],
