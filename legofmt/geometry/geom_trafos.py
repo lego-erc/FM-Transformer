@@ -40,7 +40,10 @@ class GeomTrafos:
         return torch.cat((theta, phi), dim=-1)
 
     def sample(self, n: tuple, loc_cc, kappa: torch.Tensor, bs_frac: float = 0.0, tanh_theta: bool = False):
-        loc_theta, loc_phi = self.to_sph(loc_cc).expand((*n, -1)).clone().split(1, -1)
+        loc = self.to_sph(loc_cc).expand((*n, -1))
+        if bs_frac > 0.0:
+            loc = loc.clone()
+        loc_theta, loc_phi = loc.split(1, -1)
         if bs_frac > 0.0:
             loc_theta[: round(bs_frac * n[0])] = loc_theta[0] + torch.pi
         if not tanh_theta:

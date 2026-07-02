@@ -15,6 +15,11 @@ try:
 except ImportError:
     slap = None
 
+_OT_COUPLING_REQUIRES_LAP = (
+    "ot_coupling=True requires `torch_lap_cuda_lib`. "
+    "Install it or set model_conf.ot_coupling=False."
+)
+
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.data.struct import DataStruct, _F
 from legofmt.geometry.geom_trafos import GeomTrafos
@@ -36,6 +41,14 @@ class ProjectModel(ModelWrapper, nn.Module):
         manifold: ProductManifold,
         **kwargs: dict,
     ) -> None:
+        """Wraps a velocity field with manifold projection.
+
+        Args:
+            vf: the factorized transformer (:class:`CFMTrafo_x`).
+            manifold: product manifold the features live on.
+            **kwargs: reads ``cond_cube`` and ``no_detach``; the rest are
+                retained on :attr:`kwargs`.
+        """
         nn.Module.__init__(self)
         self.vf = vf
         self.manifold = manifold
@@ -47,6 +60,14 @@ class ProjectModel(ModelWrapper, nn.Module):
     def _prep_x(
         self, x: torch.Tensor, attn_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Projects ``x`` onto the manifold at attended slots.
+
+        Returns:
+            tuple: ``(x_proj_full, x_attended, x_surr)`` -- the fully
+            projected features, the attend-gated (optionally detached)
+            features, and the surrogate fed to the transformer
+            (cube-projected position when :attr:`cond_cube`).
+        """
         x_proj_full = self.manifold.projx(x)
         x_attended = torch.where(attn_mask.unsqueeze(-1), x_proj_full, x)
         if not self.no_detach:
@@ -68,6 +89,22 @@ class ProjectModel(ModelWrapper, nn.Module):
         types: torch.Tensor,
         pdgids: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Velocity at every slot, projected to the manifold tangent.
+
+        Holds conditioning slots at ``t=1`` (zero path velocity) and
+        projects the field onto the tangent space at attended slots.
+
+        Args:
+            x: features ``(B, L, in_dim)``.
+            t: flow time, broadcastable to ``(B, L)``.
+            mask: token roles ``(B, L)``; ``1`` = generated.
+            attn_mask: real-token mask ``(B, L)``.
+            types: slot-type ids ``(B, L)``.
+            pdgids: species indices ``(B, L)``.
+
+        Returns:
+            Tangent velocity ``(B, L, in_dim)``.
+        """
         x_proj_dense, _, x_surr = self._prep_x(x, attn_mask)
         pm = attn_mask.unsqueeze(-1)
         t = torch.atleast_2d(t).expand_as(attn_mask)
@@ -76,9 +113,24 @@ class ProjectModel(ModelWrapper, nn.Module):
         v_proj_dense = self.manifold.proju(x_proj_dense, v)
         return torch.where(pm, v_proj_dense, v)
 
-
 class LEGOLtng(ltng.LightningModule):
+    """Riemannian flow-matching model over padded particle sequences.
+
+    Pairs a :class:`ProjectModel` velocity field with a manifold path
+    sampler. Generation is mask-driven: slots with ``mask==0`` are held at
+    their conditioning value, slots with ``mask==1`` are flowed from the
+    base prior.
+    """
+
     def __init__(self, full_config: dict) -> None:
+        """Builds the model, base sampler, optimizer, and buffers.
+
+        Args:
+            full_config: raw config dict, resolved via
+                :func:`~legofmt.mod_comps.config.resolve_legoltng_config`. A
+                ``"state_dict"`` key triggers checkpoint restore, loaded
+                non-strictly for backward compatibility.
+        """
         super().__init__()
         rc = resolve_legoltng_config(full_config)
         self.rc = rc
@@ -105,6 +157,7 @@ class LEGOLtng(ltng.LightningModule):
             self.model.vf.load_state_dict(rc.state_dict, strict=False)
 
     def _build_model(self, rc) -> nn.Module:
+        """Constructs the wrapped velocity field; overridden by subclasses."""
         return ProjectModel(
             CFMTrafo_x(**rc.model_args),
             rc.manifold,
@@ -123,11 +176,9 @@ class LEGOLtng(ltng.LightningModule):
 
     @torch.no_grad()
     def on_fit_start(self) -> None:
+        """Initialises the loss, path sampler, and train-mode optimizer."""
         if self.rc.ot_coupling and slap is None:
-            raise RuntimeError(
-                "ot_coupling=True requires `torch_lap_cuda_lib`. "
-                "Install it or set model_conf.ot_coupling=False."
-            )
+            raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
         self.loss_fn = nn.MSELoss()
         self.ps = ProductPathSampler(self.rc.manifold)
         self.model.train()
@@ -135,54 +186,93 @@ class LEGOLtng(ltng.LightningModule):
 
     @torch.no_grad()
     def convert_pdgids(self, pdgids: Tensor) -> Tensor:
+        """Maps raw PDG ids to compact indices into :attr:`pdgids_template`.
+
+        Unknown, zero, or sentinel ids collapse to index ``0`` (the
+        reserved empty/unknown class).
+
+        Args:
+            pdgids: raw PDG id tensor.
+
+        Returns:
+            Integer index tensor of the same shape.
+        """
         cond = torch.isnan(pdgids) | (pdgids == 0) | (pdgids >= 1e8)
         pdgid_idx = torch.searchsorted(self.pdgids_template, pdgids.contiguous()) + 1
         return pdgid_idx.masked_fill_(cond, 0)
 
     @torch.no_grad()
     def gen_base_wrapper(self, ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]") -> Tensor:
+        """Builds the flow's starting point: noise at generated slots, data elsewhere.
+
+        Forward events (incoming slot conditions) draw the conditioning-aware
+        ``poles`` prior around the incoming ray, OT-coupled to the targets
+        during training when ``ot_coupling`` is set; inverse events draw the
+        isotropic prior. Conditioning slots (``mask==0``) keep their data
+        value, so the path interpolates base->data only where ``mask==1``.
+
+        Returns:
+            Base features ``(B, L, in_dim)``.
+        """
         if not isinstance(ds_t, DataStruct):
             ds_t = DataStruct(*ds_t)
-        base = torch.cat((ds_t.f.non_cc, self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc)), dim=1)
-        if self.rc.ot_coupling and self.model.training:
-            if slap is None:
-                raise RuntimeError(
-                    "ot_coupling=True requires `torch_lap_cuda_lib`. "
-                    "Install it or set model_conf.ot_coupling=False."
-                )
-            base = base.where(ds_t.am.full.unsqueeze(-1), ds_t.f.model_in)
-            inf_cond = ds_t.am.out_p.unsqueeze(-1).logical_xor(ds_t.am.out_p.unsqueeze(-2))
-            out = _F(base).out_p
-            if self.rc.ot_e_only:
-                nt = ds_t.f.out_cc[..., 0:1]
-                nb = out[..., 0].unsqueeze(-2)
-                cost = (nt - nb).abs() + inf_cond * 1e6
-            else:
-                cost = torch.cdist(ds_t.f.out_cc, out) + inf_cond * 1e6
-            assign = slap(cost, cost.device).long()
-            out[:] = torch.take_along_dim(out, assign.unsqueeze(-1), dim=1)
-        return self.gen_base.insert_add(base)  # E_dep
+        data = ds_t.f.model_in
+        m = ds_t.m.full
+        fwd = m[:, 2] == 0
+        noise = None if fwd.all() else self.gen_base.iso(m.shape, data.device)
+        if fwd.any():
+            base = torch.cat(
+                (ds_t.f.non_cc, self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc)), dim=1,
+            )
+            if self.rc.ot_coupling and self.model.training:
+                if slap is None:
+                    raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
+                base = base.where(ds_t.am.full.unsqueeze(-1), data)
+                inf_cond = ds_t.am.out_p.unsqueeze(-1).logical_xor(ds_t.am.out_p.unsqueeze(-2))
+                out = _F(base).out_p
+                if self.rc.ot_e_only:
+                    nt = ds_t.f.out_cc[..., 0:1]
+                    nb = out[..., 0].unsqueeze(-2)
+                    cost = (nt - nb).abs() + inf_cond * 1e6
+                else:
+                    cost = torch.cdist(ds_t.f.out_cc, out) + inf_cond * 1e6
+                assign = slap(cost, cost.device).long()
+                out[:] = torch.take_along_dim(out, assign.unsqueeze(-1), dim=1)
+            base = self.gen_base.insert_add(base)
+            noise = base if noise is None else torch.where(fwd.view(-1, 1, 1), base, noise)
+        return torch.where((m == 1).unsqueeze(-1), noise, data)
 
     def _reduce_and_log(
         self,
         sq: Tensor,
         ds_t: DataStruct,
         loss_sc,
-        *,
-        edep_w: float = 1.0,
-        e_w: float = 1.0,
-        x_w: float = 1.0,
     ) -> Tensor:
-        out = sq[:, 3:] * (ds_t.m.out_p.unsqueeze(-1) == 1)
-        loss_edep = edep_w * sq[:, 1].mean()
-        loss_e = e_w * out[..., 0:1].mean()
-        loss_dir = out[..., 1:4].mean()
-        loss_x = x_w * out[..., 4:7].mean()
+        """Masked-mean of the per-component squared error, logged and summed.
+
+        Averages the energy, direction, and position errors over the
+        generated-and-real slots (``mask==1 & attn_mask==1``) so the scale
+        is independent of the mask fraction, then adds the scaled auxiliary
+        term.
+
+        Args:
+            sq: per-element squared error ``(B, L, in_dim)``.
+            ds_t: the masked data struct for this step.
+            loss_sc: auxiliary (energy) loss term, or ``0``.
+
+        Returns:
+            Scalar training loss.
+        """
+        g = ((ds_t.m.full == 1) & (ds_t.am.full == 1)).unsqueeze(-1)
+        denom = g.sum().clamp(min=1)
+        out = sq * g
+        loss_e = out[..., 0:1].sum() / denom
+        loss_dir = out[..., 1:4].sum() / (denom * 3)
+        loss_x = out[..., 4:7].sum() / (denom * 3)
         if self.training:
             log_sc = loss_sc.detach() if torch.is_tensor(loss_sc) else loss_sc
             self.log_dict(
                 {
-                    "loss/edep": loss_edep.detach(),
                     "loss/energy": loss_e.detach(),
                     "loss/out_dir": loss_dir.detach(),
                     "loss/out_pos": loss_x.detach(),
@@ -190,10 +280,38 @@ class LEGOLtng(ltng.LightningModule):
                 },
                 on_step=True, on_epoch=False, logger=True, sync_dist=False,
             )
-        return loss_edep + loss_e + loss_dir + loss_x + self.rc.loss_sc_fac * loss_sc
+        return loss_e + loss_dir + loss_x + self.rc.loss_sc_fac * loss_sc
+
+    @torch.no_grad()
+    def _sample_mask(self, ds_t: DataStruct) -> Tensor:
+        """Samples the per-slot generation mask for a training step.
+
+        Returns the dataset mask unchanged when no ``mask_conf`` is set
+        (forward-only, backward-compatible). Otherwise each event keeps the
+        dataset's forward mask with probability ``p_forward`` or flips to
+        the inverse mask -- the complement of the forward mask over the
+        attended slots, with the density slot always conditioning.
+
+        Returns:
+            Long mask ``(B, L)``; ``1`` = generated.
+        """
+        if not self.rc.mask_conf:
+            return ds_t.m.full
+        fwd = ds_t.m.full
+        inv = (fwd == 0) & (ds_t.am.full == 1)
+        inv[:, 0] = 0
+        pick = torch.rand(fwd.shape[0], device=fwd.device) < self.rc.mask_conf.get("p_forward", 0.5)
+        return torch.where(pick.unsqueeze(-1), fwd, inv.long())
 
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
+        """One train/val step: the flow-matching MSE over a sampled mask
+        and flow time.
+
+        Returns:
+            Scalar loss.
+        """
         with torch.no_grad():
+            ds_t = DataStruct(ds_t.f.full, self._sample_mask(ds_t), ds_t.am.full)
             base = self.gen_base_wrapper(ds_t)
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
             if self.rc.t_dist == "sm_norm":
@@ -222,14 +340,16 @@ class LEGOLtng(ltng.LightningModule):
         else:
             loss_sc = 0.0
         sq = (v_out - ps_.dx_t) ** 2
-        return self._reduce_and_log(sq, ds_t, loss_sc, edep_w=2.0, e_w=2.0, x_w=8.0)
+        return self._reduce_and_log(sq, ds_t, loss_sc)
 
     def training_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
+        """Lightning training hook; delegates to :meth:`_step`."""
         loss = self._step(batch, _batch_idx)
         return loss
 
     @torch.no_grad()
     def validation_step(self, batch: DataStruct, _batch_idx: int | Tensor) -> Tensor:
+        """Lightning validation hook; logs the loss and shower metrics."""
         bs = len(batch)
         loss = self._step(batch, _batch_idx)
         self.log("Validation Loss", loss, on_step=True, on_epoch=True, sync_dist=True, batch_size=bs)
@@ -238,6 +358,7 @@ class LEGOLtng(ltng.LightningModule):
         return loss
 
     def configure_optimizers(self):
+        """Returns the optimizer, with its LR scheduler when one is configured."""
         if self._lr_sched is None:
             return self.opt
         return {"optimizer": self.opt, "lr_scheduler": self._lr_sched}
@@ -254,6 +375,7 @@ class LEGOLtng(ltng.LightningModule):
         )
 
     def _make_loader(self, dataset, *, shuffle: bool) -> DataLoader:
+        """Builds a :class:`~torch.utils.data.DataLoader` over ``dataset``."""
         num_workers = self.rc.dl_conf.get("num_workers", 4)
         return DataLoader(
             dataset,
@@ -266,12 +388,21 @@ class LEGOLtng(ltng.LightningModule):
         )
 
     def train_dataloader(self) -> DataLoader:
+        """Shuffled loader over the training split."""
         return self._make_loader(self._train_ds, shuffle=True)
 
     def val_dataloader(self) -> DataLoader:
+        """Unshuffled loader over the validation split."""
         return self._make_loader(self._val_ds, shuffle=False)
 
     def chunked(self, fn, *tensors, split_size=None, dim=0, cat_dim=None):
+        """Applies ``fn`` to ``tensors`` in row chunks, concatenating results.
+
+        Runs ``fn`` once when ``split_size`` is unset or covers the whole
+        batch; otherwise splits each tensor along ``dim`` and concatenates
+        the outputs along ``cat_dim`` (defaulting to ``dim``). Bounds peak
+        memory during sampling.
+        """
 
         if split_size is None or split_size >= tensors[0].shape[dim]:
             return fn(*tensors)
@@ -285,6 +416,11 @@ class LEGOLtng(ltng.LightningModule):
     def _prep_solve(
         self, ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]",
     ) -> tuple[DataStruct, Tensor]:
+        """Switches to eval mode and resolves species indices before sampling.
+
+        Returns:
+            tuple: ``(ds_t, pdgids_idx)``.
+        """
         if not isinstance(ds_t, DataStruct):
             ds_t = DataStruct(*ds_t)
         if self.model.training:
@@ -308,6 +444,26 @@ class LEGOLtng(ltng.LightningModule):
         time_grid: Tensor | None = None,
         return_intermediates: bool = False,
     ) -> Tensor:
+        """Integrates the ODE from the base prior to particles (or its inverse).
+
+        Wraps :class:`~flow_matching.solver.ODESolver`. With ``compute_ll``
+        it returns the log-likelihood under the flow instead of samples;
+        with ``reverse`` it integrates data->base. Conditioning slots stay
+        pinned to their data value throughout.
+
+        Args:
+            ds_t: data struct (or ``(f, m, am)`` tuple) carrying the mask.
+            x_init: starting features; defaults to the base prior.
+            reverse: integrate ``t: 1->0`` instead of ``0->1``.
+            compute_ll: return the log-likelihood rather than samples.
+            log_p0: base log-density for the likelihood path.
+            split_size: row-chunk size for bounded memory.
+            step_size, method, time_grid: ODE-solver controls.
+            return_intermediates: also return every solver step.
+
+        Returns:
+            Sampled features, log-likelihood, or the step stack per the flags.
+        """
         ds_t, pdgids_idx = self._prep_solve(ds_t)
         am = ds_t.am.full.unsqueeze(-1)
         cc = ds_t.f.model_in.where(am, ds_t.f.in_cc)
@@ -361,16 +517,42 @@ class LEGOLtng(ltng.LightningModule):
             split_size=split_size, cat_dim=-3,
         )
 
-    def _midpoint_steps(self, x: Tensor, time_grid: Tensor, **extras) -> Tensor:
+    def _midpoint_steps(
+        self, x: Tensor, time_grid: Tensor,
+        return_intermediates: bool = False, **extras,
+    ) -> Tensor:
+        """Fixed-grid midpoint (RK2) integration over ``time_grid``.
+
+        Returns the final state, or -- when ``return_intermediates`` -- the
+        stack of states at every ``time_grid`` point (``xs[0]`` is ``x_init``,
+        matching :meth:`ODESolver.sample`).
+        """
+        if return_intermediates:
+            xs = [x]
         for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
             dt = t_b - t_a
             v1 = self.model(x, t_a, **extras)
             v2 = self.model(x + dt / 2 * v1, t_a + dt / 2, **extras)
             x = x + dt * v2
-        return x
+            if return_intermediates:
+                xs.append(x)
+        return torch.stack(xs) if return_intermediates else x
 
     @torch.no_grad()
     def forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None) -> tuple:
+        """Generates particles for ``batch`` end to end.
+
+        Flows the kinematics with :meth:`solve` for the slots selected by
+        the task mask. Non-attended slots are filled with ``NaN``.
+
+        Args:
+            batch: data struct (or ``(f, m, am)`` tuple) with the task mask.
+
+        Returns:
+            tuple: ``(features-with-pdgid, mask, attn_mask)``; the features
+            gain a trailing PDG-id column and lead with the solver-step axis
+            when intermediates are requested.
+        """
         if self.model.training:
             self.model.eval()
             self._opt_eval()
@@ -382,18 +564,20 @@ class LEGOLtng(ltng.LightningModule):
             self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=False)
 
         ds_t = DataStruct(*batch) if isinstance(batch, tuple) else batch
+        base = self.gen_base_wrapper(ds_t)
+
         pdgids = ds_t.f.pdgids
         am = ds_t.am.full.unsqueeze(-1)
-        base = self.gen_base_wrapper(ds_t)
 
         if cfg.get("return_base", False):
             sols = base.masked_fill(~am, torch.nan)
         else:
             step_size = cfg.get("step_size", 0.04)
-            time_grid = cfg.get("time_grid", 
-                torch.arange(
+            time_grid = cfg.get("time_grid")
+            if time_grid is None:
+                time_grid = torch.arange(
                     0, 1 + step_size, step=step_size, device=self.device
-                ).clamp_max(1))
+                ).clamp_max(1)
             sols = self.solve(
                 ds_t, x_init=base,
                 split_size=cfg.get("split_size"),
@@ -442,6 +626,11 @@ class ProjectModelDirect(ProjectModel):
         types: torch.Tensor,
         pdgids: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Residual step ``base + vf(base)`` with a manifold snap at generated slots.
+
+        Returns:
+            Final features ``(B, L, in_dim)``.
+        """
         _, x_attended, x_surr = self._prep_x(x, attn_mask)
         residual = self.vf(x_surr, mask, attn_mask, types, pdgids)
         out_raw = x_attended + residual
@@ -471,13 +660,14 @@ class LEGOLtngDirect(LEGOLtng):
     """
 
     def __init__(self, full_config: dict) -> None:
+        """Builds the direct model and, if configured, the frozen reflow teacher."""
         super().__init__(full_config)
-        object.__setattr__(self.rc, "ot_coupling", False)
         object.__setattr__(
             self, "reflow_teacher", _build_reflow_teacher(self.rc.reflow_path),
         )
 
     def _build_model(self, rc) -> nn.Module:
+        """Constructs the no-time residual-prediction wrapper."""
         return ProjectModelDirect(
             CFMTrafo_x(**rc.model_args, time_cond=False),
             rc.manifold,
@@ -486,12 +676,20 @@ class LEGOLtngDirect(LEGOLtng):
 
     @torch.no_grad()
     def on_fit_start(self) -> None:
+        """Initialises base state and moves the reflow teacher to the device."""
         super().on_fit_start()
         if self.reflow_teacher is not None:
             self.reflow_teacher.to(self.device)
 
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
+        """One direct-model step: residual MSE to the target (data, or the
+        reflow teacher's solved coupling).
+
+        Returns:
+            Scalar loss.
+        """
         with torch.no_grad():
+            ds_t = DataStruct(ds_t.f.full, self._sample_mask(ds_t), ds_t.am.full)
             base = self.gen_base_wrapper(ds_t)
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
             if self.reflow_teacher is not None:
@@ -518,7 +716,7 @@ class LEGOLtngDirect(LEGOLtng):
                 target[..., 0] * m_gen,
             )
         else:
-            loss_sc = pred.new_zeros(())
+            loss_sc = 0.0
         sq = (pred - target) ** 2
         return self._reduce_and_log(sq, ds_t, loss_sc)
 
@@ -530,6 +728,7 @@ class LEGOLtngDirect(LEGOLtng):
         split_size: int | None = None,
         **_kw,
     ) -> Tensor:
+        """Single-pass residual prediction from the base prior (no ODE)."""
         ds_t, pdgids_idx = self._prep_solve(ds_t)
         if x_init is None:
             x_init = self.gen_base_wrapper(ds_t)

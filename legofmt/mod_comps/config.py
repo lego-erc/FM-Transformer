@@ -122,19 +122,22 @@ class ResolvedLEGOConfig:
             (e.g. ``"uniform"``, ``"sd3"``, ``"sd3_grid"``).
         t_dist_scale (float): scale parameter for the time distribution.
         ot_coupling (bool): if ``True``, use optimal-transport coupling
-            during training. Requires ``torch_lap_cuda_lib`` to be
-            importable; :class:`LEGOLtng` validates this at construction.
-        ot_e_only (bool): if ``True``, the LAP cost uses pairwise ``|mom|``
-            magnitude differences rather than 6-D ``cdist``. Gives strict
+            for the forward base during training. Requires
+            ``torch_lap_cuda_lib`` to be importable; :class:`LEGOLtng`
+            validates this at fit start.
+        ot_e_only (bool): if ``True``, the LAP cost uses pairwise energy
+            differences rather than 6-D ``cdist``. Gives strict
             energy-ordered pairing. Ignored when :attr:`ot_coupling` is
             ``False``.
-        proj_en_out (bool): if ``True``, apply energy projection to model
-            outputs.
         pdgid_is_idx (bool): if ``True``, treat the PDG-id field of inputs
             as an integer index rather than a raw PDG id.
         loss_sc_fac (float): scalar multiplier for the auxiliary loss term.
         cond_cube (bool): if ``True``, project the conditioning position
             onto the cube before each forward pass.
+        mask_conf (dict): training-mask mixture; ``p_forward`` is the
+            probability of keeping the dataset's forward mask, otherwise the
+            event trains on the inverse (complement) mask. Empty keeps the
+            dataset mask (forward-only, the default).
         max_energy (float): maximum particle energy (MeV) the model was
             trained on; the upper bound of the energy normalisation.
         cutoff_mev (float): low-energy cutoff (MeV); the lower bound of the
@@ -155,6 +158,11 @@ class ResolvedLEGOConfig:
             :func:`resolve_legoltng_config`.
         state_dict (dict or None): ``None`` for fresh training; otherwise
             the model state dict to load into ``LEGOLtng.model.vf``.
+        reflow_path (str or None): checkpoint of a velocity teacher used to
+            build a fixed base->target coupling for the direct model;
+            ``None`` falls back to the data target.
+        reflow_kwargs (dict): solver kwargs passed to the teacher's
+            :meth:`solve` when building that coupling.
     """
 
     max_seq_l: int
@@ -166,10 +174,11 @@ class ResolvedLEGOConfig:
     t_dist_scale: float
     ot_coupling: bool
     ot_e_only: bool
-    proj_en_out: bool
     pdgid_is_idx: bool
     loss_sc_fac: float
     cond_cube: bool
+
+    mask_conf: dict
 
     max_energy: float
     cutoff_mev: float
@@ -402,10 +411,10 @@ def _build_resolved(
         t_dist_scale=model_conf.get("t_dist_scale", 1.4),
         ot_coupling=model_conf.get("ot_coupling", False),
         ot_e_only=model_conf.get("ot_e_only", False),
-        proj_en_out=model_conf.get("proj_en_out", False),
         pdgid_is_idx=model_conf.get("pdgid_is_idx", False),
         loss_sc_fac=model_conf.get("loss_sc", 0.0),
         cond_cube=model_conf.get("cond_cube", False),
+        mask_conf=model_conf.get("mask_conf", {}),
         max_energy=model_conf["max_energy"],
         cutoff_mev=config["dl_conf"]["lds_args"]["cutoff_mev"],
         dl_conf=config["dl_conf"],
@@ -454,8 +463,8 @@ class ResolvedMultConfig:
         dl_conf (dict): dataloader sub-config; consumed by
             :class:`MultLoader` and read for ``num_workers``.
         mm_conf (dict): multiplicity sub-config snapshot; still consumed
-            by :class:`MultLoader` (``use_density``, ``ptypes``,
-            ``ptypes_in``, ``max_out_particles``) and read for ``bs``.
+            by :class:`MultLoader` (``ptypes``, ``ptypes_in``,
+            ``max_out_particles``) and read for ``bs``.
         opt_conf (dict or None): optimizer sub-config. Looked up at
             top-level ``config["opt_conf"]`` first (matches
             :class:`ResolvedLEGOConfig`'s convention), then

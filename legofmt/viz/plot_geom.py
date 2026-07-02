@@ -2,8 +2,6 @@ import matplotlib.pyplot as plt
 import torch
 from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
 
-from ..geometry.geom_trafos import GeomTrafos
-
 plt.rcParams.update(
     {
         "axes.labelpad": 8,
@@ -22,7 +20,6 @@ class PlotGeom:
     def __init__(self, figure=None, ax=None):
         self.figure = figure
         self.ax = ax
-        self.geom_trafos = GeomTrafos()
 
     def do_ax(self):
         if self.figure is None:
@@ -112,37 +109,3 @@ class PlotGeom:
         )
 
         return self.plot_points(ax, coords, incoming, arr_lw, arr_l, arr_lr, arr_c)
-
-    def plot_sphere_with_points(
-        self,
-        coords: torch.Tensor,
-        incoming: torch.Tensor | None = None,
-        arr_lw: float = 1.0,
-        arr_l: float = 1.0 / 4,
-        arr_lr: float = 0.1,
-        arr_c: str = "b",
-    ) -> None:
-        pi_range = torch.linspace(0, torch.pi, 37)
-        grid_sph = torch.stack(
-            torch.meshgrid(pi_range, 2 * pi_range, indexing="xy"), dim=-1
-        )
-        cc = self.geom_trafos.to_cc(grid_sph)
-
-        ax = self.do_ax()
-        for i in range(0, 36, 2):
-            ax.plot(
-                *cc[i].movedim(-1, 0).cpu().numpy(),
-                linestyle="--",
-                color="k",
-                linewidth=0.5,
-                alpha=0.5,
-            )
-            ax.plot(
-                *cc[:, i].movedim(-1, 0).cpu().numpy(),
-                linestyle="--",
-                color="k",
-                linewidth=0.5,
-                alpha=0.5,
-            )
-
-        return self.plot_points(ax, coords, incoming, arr_lw, arr_l, arr_lr, arr_c, 1.0)
