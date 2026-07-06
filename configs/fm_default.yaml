@@ -40,6 +40,7 @@ config:
     bs_frac: 0.0
     base_dist: poles
     scale_dist: sm_norm
+    sm_scale: 0.5            # sm_norm tanh temperature (0.5 = old /2); raise to flatten the energy base
     tanh_theta: true
 
   model_conf:
