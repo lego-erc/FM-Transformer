@@ -478,8 +478,11 @@ class LEGOLtng(ltng.LightningModule):
             if self.trainer.is_global_zero:
                 dev = self.trainer.strategy.root_device
                 self.base_head.to(dev)
+                loader = self._make_loader(
+                    self._train_ds, shuffle=True, bs=self.rc.base_pretrain_bs
+                )
                 final = self.pretrain_base(b.to(dev) for _, b in zip(
-                    range(self.rc.base_pretrain_batches), self.train_dataloader()))
+                    range(self.rc.base_pretrain_batches), loader))
                 self.base_head.cpu()
                 print(f"base_head: pretrained on {self.rc.base_pretrain_batches} "
                       f"batches (final moment loss {final:.4f}), frozen")
@@ -488,12 +491,12 @@ class LEGOLtng(ltng.LightningModule):
             self.base_head.load_state_dict(sd)
             self.base_head.requires_grad_(False)
 
-    def _make_loader(self, dataset, *, shuffle: bool) -> DataLoader:
+    def _make_loader(self, dataset, *, shuffle: bool, bs: int | None = None) -> DataLoader:
         """Builds a :class:`~torch.utils.data.DataLoader` over ``dataset``."""
         num_workers = self.rc.dl_conf.get("num_workers", 4)
         return DataLoader(
             dataset,
-            batch_size=self.rc.dl_conf.get("bs", 2**12),
+            batch_size=bs if bs is not None else self.rc.dl_conf.get("bs", 2**12),
             shuffle=shuffle,
             num_workers=num_workers,
             pin_memory=True,

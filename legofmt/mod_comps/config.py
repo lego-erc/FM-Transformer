@@ -187,6 +187,7 @@ class ResolvedLEGOConfig:
     ot_e_only: bool
     base_dist_loss: float
     base_pretrain_batches: int
+    base_pretrain_bs: int | None
     pdgid_is_idx: bool
     loss_sc_fac: float
     one_step_euler_fac: float
@@ -434,6 +435,7 @@ def _build_resolved(
         ot_e_only=model_conf.get("ot_e_only", False),
         base_dist_loss=model_conf.get("base_dist_loss", 0.0),
         base_pretrain_batches=model_conf.get("base_pretrain_batches", 300),
+        base_pretrain_bs=model_conf.get("base_pretrain_bs"),
         pdgid_is_idx=model_conf.get("pdgid_is_idx", False),
         loss_sc_fac=model_conf.get("loss_sc", 0.0),
         one_step_euler_fac=one_step_euler_fac,
