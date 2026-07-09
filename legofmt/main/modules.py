@@ -146,9 +146,20 @@ class LEGOLtng(ltng.LightningModule):
         self.sym = CubeSymmetry() if rc.canon_sym else None
         self.val_metrics = ShowerValMetrics()
 
-        self.opt, self._lr_sched = build_optimizer(
-            self.model.parameters(), rc.opt_conf,
-        )
+        self._base_dist_loss = None
+        params = list(self.model.parameters())
+        if rc.base_dist_loss > 0 and self.gen_base.scale_dist == "sm_norm":
+            self.base_head = nn.Linear(3, 1)
+            bc = rc.config.get("base_conf") or {}
+            with torch.no_grad():
+                self.base_head.weight.zero_()
+                self.base_head.bias.copy_(torch.tensor(
+                    [float(self.gen_base.sm_scale)]).log())
+                if (hs := bc.get("base_head")) is not None:
+                    self.base_head.load_state_dict(hs)
+                    self.base_head.requires_grad_(not bc.get("base_head_frozen", False))
+            params += [p for p in self.base_head.parameters() if p.requires_grad]
+        self.opt, self._lr_sched = build_optimizer(params, rc.opt_conf)
         self._opt_is_sf = hasattr(self.opt, "train") and callable(
             getattr(self.opt, "train", None),
         )
@@ -222,11 +233,29 @@ class LEGOLtng(ltng.LightningModule):
         """
         if not isinstance(ds_t, DataStruct):
             ds_t = DataStruct(*ds_t)
+        self._base_dist_loss = None
         data = ds_t.f.model_in
         m = ds_t.m.full
         fwd = m[:, self.rc.n_prefix] == 0  # incoming slot conditions => forward event
         noise = None if fwd.all() else self.gen_base.iso(m.shape, data.device)
         if fwd.any():
+            if hasattr(self, "base_head"):
+                learn = self.model.training and self.base_head.weight.requires_grad
+                with torch.set_grad_enabled(learn):
+                    s = self.base_head(torch.cat((
+                        ds_t.f.in_cc[..., 0],
+                        ds_t.am.out_p.sum(-1, keepdim=True) / ds_t.am.out_p.shape[-1],
+                        ds_t.f.d.unsqueeze(-1)), dim=-1)).exp()
+                    if learn:
+                        z = 2 ** 0.5 * torch.erfinv(torch.linspace(
+                            -0.995, 0.995, 100, device=s.device))  # N(0,1) quantile nodes
+                        u_b = 1 - (z.abs() * s).tanh().mean(-1)
+                        v = (ds_t.am.out_p & fwd.unsqueeze(-1)).float()
+                        n = v.sum(-1).clamp(min=1)
+                        u_t = (ds_t.f.out_cc[..., 0] * v).sum(-1) / n
+                        ev = (v.sum(-1) > 0).float()
+                        self._base_dist_loss = ((u_b - u_t) ** 2 * ev).sum() / ev.sum().clamp(min=1)
+                self.gen_base.sm_scale = s.detach().unsqueeze(-1)
             base = torch.cat(
                 (ds_t.f.non_cc, self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc)), dim=1,
             )
@@ -354,6 +383,15 @@ class LEGOLtng(ltng.LightningModule):
 
         if self.rc.one_step_euler_fac > 0:
             loss = loss + self.rc.one_step_euler_fac * self._one_step_euler_loss(base, ds_t, pdgid_idx, ps_)
+
+        if (ot := self._base_dist_loss) is not None:
+            loss = loss + self.rc.base_dist_loss * ot
+            if self.training:
+                self.log_dict(
+                    {"loss/base_dist": ot.detach(),
+                     "base/sm_scale": self.gen_base.sm_scale.detach().mean()},
+                    on_step=True, on_epoch=False, logger=True, sync_dist=False,
+                )
         return loss
 
     def _one_step_euler_loss(
@@ -381,6 +419,28 @@ class LEGOLtng(ltng.LightningModule):
         if self.training:
             self.log("loss/one_step_euler", sc.detach(), on_step=True, on_epoch=False, logger=True, sync_dist=False)
         return sc
+
+    def pretrain_base(self, batches, lr: float = 1e-2) -> float:
+        """Fits ``base_head`` by moment matching, then freezes it; runs
+        automatically via :meth:`setup`. Returns the last loss value."""
+        if slap is None:
+            raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
+        opt = torch.optim.Adam(self.base_head.parameters(), lr=lr)
+        was_training = self.model.training
+        self.model.train()
+        ot = float("nan")
+        for ds_t in batches:
+            opt.zero_grad()
+            self.gen_base_wrapper(ds_t)
+            if self._base_dist_loss is None:
+                continue
+            self._base_dist_loss.backward()
+            opt.step()
+            ot = self._base_dist_loss.item()
+        self.model.train(was_training)
+        self.base_head.requires_grad_(False)
+        self._base_dist_loss = None
+        return ot
 
     def training_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
         """Lightning training hook; delegates to :meth:`_step`."""
@@ -413,6 +473,20 @@ class LEGOLtng(ltng.LightningModule):
         self._train_ds, self._val_ds = random_split(
             full, [len(full) - n_val, n_val], generator=gen,
         )
+        if (self.rc.base_pretrain_batches and getattr(self, "_trainer", None)
+                and hasattr(self, "base_head") and self.base_head.weight.requires_grad):
+            if self.trainer.is_global_zero:
+                dev = self.trainer.strategy.root_device
+                self.base_head.to(dev)
+                final = self.pretrain_base(b.to(dev) for _, b in zip(
+                    range(self.rc.base_pretrain_batches), self.train_dataloader()))
+                self.base_head.cpu()
+                print(f"base_head: pretrained on {self.rc.base_pretrain_batches} "
+                      f"batches (final moment loss {final:.4f}), frozen")
+            sd = self.trainer.strategy.broadcast(
+                {k: v.cpu() for k, v in self.base_head.state_dict().items()}, src=0)
+            self.base_head.load_state_dict(sd)
+            self.base_head.requires_grad_(False)
 
     def _make_loader(self, dataset, *, shuffle: bool) -> DataLoader:
         """Builds a :class:`~torch.utils.data.DataLoader` over ``dataset``."""

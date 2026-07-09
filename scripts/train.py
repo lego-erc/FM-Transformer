@@ -120,6 +120,11 @@ trainer.fit(
 model.rc.config["dl_conf"]["lds_args"]["data"] = "<dataset_path>"
 model.rc.config["dl_conf"]["data_path"] = None
 model.rc.config["additional"]["comet_exp_key"] = None
+if hasattr(model, "base_head"):
+    model.rc.config["base_conf"]["base_head"] = {
+        k: v.cpu() for k, v in model.base_head.state_dict().items()
+    }
+    model.rc.config["base_conf"]["base_head_frozen"] = not model.base_head.weight.requires_grad
 
 ckpt_base = run.get("ckpt_dir") or os.environ.get("LEGO_CKPT_DIR", "./checkpoints/")
 ckpt_dir = os.path.join(ckpt_base, "flow" if train_model == "fm" else "mult")
