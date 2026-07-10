@@ -146,6 +146,10 @@ class ResolvedLEGOConfig:
             the intermediate steps unanchored and the term diverges. Default ``8``.
         cond_cube (bool): if ``True``, project the conditioning position
             onto the cube before each forward pass.
+        canon_sym (bool): if ``True``, canonicalize forward events by the
+            cube-symmetry rotation that maps the incoming face to ``+x``
+            (:class:`~legofmt.geometry.symmetry_projections.CubeSymmetry`),
+            un-rotating generated outputs. Off by default (no-op).
         mask_conf (dict): training-mask mixture; ``p_forward`` is the
             probability of keeping the dataset's forward mask, otherwise the
             event trains on the inverse (complement) mask. Empty keeps the
@@ -186,6 +190,7 @@ class ResolvedLEGOConfig:
     one_step_euler_fac: float
     one_step_euler_sections: int
     cond_cube: bool
+    canon_sym: bool
     cond_scalars: tuple[str, ...]
     n_prefix: int
 
@@ -430,6 +435,7 @@ def _build_resolved(
         one_step_euler_fac=one_step_euler_fac,
         one_step_euler_sections=model_conf.get("one_step_euler_sections", 8),
         cond_cube=model_conf.get("cond_cube", False),
+        canon_sym=model_conf.get("canon_sym", False),
         cond_scalars=cond_scalars,
         n_prefix=n_prefix,
         mask_conf=model_conf.get("mask_conf", {}),
@@ -474,6 +480,10 @@ class ResolvedMultConfig:
             :class:`x_transformers.ContinuousTransformerWrapper`.
         pos_scale (float): scale applied to the position triplet inside
             :meth:`MultModel.proj_in`.
+        canon_sym (bool): if ``True``, canonicalize the incoming particle by
+            the cube-symmetry rotation that maps its face to ``+x`` inside
+            :meth:`MultModel.proj_in` (counts are rotation-invariant, so
+            there is no output to un-rotate). Off by default (no-op).
         model_args (dict): keyword arguments splatted into the count
             model's :class:`x_transformers.Decoder`.
         dl_conf (dict): dataloader sub-config; consumed by
@@ -518,6 +528,7 @@ class ResolvedMultConfig:
     use_abs_pos_emb: bool
     post_emb_norm: bool
     pos_scale: float
+    canon_sym: bool
     model_args: dict[str, Any]
 
     dl_conf: dict
@@ -719,6 +730,7 @@ def _build_resolved_mult(
         use_abs_pos_emb=mm_conf.get("use_abs_pos_emb", True),
         post_emb_norm=mm_conf.get("post_emb_norm", True),
         pos_scale=mm_conf.get("pos_scale", 50.0),
+        canon_sym=mm_conf.get("canon_sym", False),
         model_args=mm_conf.get("model_args", {}),
         dl_conf=dl_conf,
         mm_conf=mm_conf,

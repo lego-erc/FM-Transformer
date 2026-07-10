@@ -24,6 +24,7 @@ from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt.geometry.gen_base import GenerateBase
 from legofmt.geometry.path_sample_mult import ProductPathSampler, ProductManifold
 from legofmt.geometry.raytracing_proj import CubeTrace
+from legofmt.geometry.symmetry_projections import CubeSymmetry
 from legofmt.mod_comps.config import resolve_legoltng_config
 from legofmt.mod_comps.optimizers import build_optimizer
 from legofmt.log_metrics.val_metrics import ShowerValMetrics
@@ -142,6 +143,7 @@ class LEGOLtng(ltng.LightningModule):
         self.model = self._build_model(rc)
         self.gen_base = GenerateBase(rc.config)
         self.ppa = CubeTrace()
+        self.sym = CubeSymmetry() if rc.canon_sym else None
         self.val_metrics = ShowerValMetrics()
 
         self.opt, self._lr_sched = build_optimizer(
@@ -198,6 +200,12 @@ class LEGOLtng(ltng.LightningModule):
         cond = torch.isnan(pdgids) | (pdgids == 0) | (pdgids >= 1e8)
         pdgid_idx = torch.searchsorted(self.pdgids_template, pdgids.contiguous()) + 1
         return pdgid_idx.masked_fill_(cond, 0)
+
+    def _canon_dirs(self, x: Tensor, face: Tensor, fwd: Tensor, inverse: bool = False) -> Tensor:
+        rot = self.sym.uncanonicalize if inverse else self.sym.canonicalize
+        dirs = rot(torch.stack((x[..., 1:4], x[..., 4:7]), dim=-2), face)
+        new = torch.cat((x[..., 0:1], dirs[..., 0, :], dirs[..., 1, :], x[..., 7:]), dim=-1)
+        return torch.where(fwd[:, None, None], new, x)
 
     @torch.no_grad()
     def gen_base_wrapper(self, ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]") -> Tensor:
@@ -310,6 +318,10 @@ class LEGOLtng(ltng.LightningModule):
         """
         with torch.no_grad():
             ds_t = DataStruct(ds_t.f.full, self._sample_mask(ds_t), ds_t.am.full)
+            if self.sym is not None:
+                fwd = ds_t.m.full[:, self.rc.n_prefix] == 0
+                face = self.sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
+                ds_t = DataStruct(self._canon_dirs(ds_t.f.full, face, fwd), ds_t.m.full, ds_t.am.full)
             base = self.gen_base_wrapper(ds_t)
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
             if self.rc.t_dist == "sm_norm":
@@ -618,6 +630,10 @@ class LEGOLtng(ltng.LightningModule):
             self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=False)
 
         ds_t = DataStruct(*batch) if isinstance(batch, tuple) else batch
+        if self.sym is not None:
+            fwd = ds_t.m.full[:, self.rc.n_prefix] == 0
+            face = self.sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
+            ds_t = DataStruct(self._canon_dirs(ds_t.f.full, face, fwd), ds_t.m.full, ds_t.am.full)
         base = self.gen_base_wrapper(ds_t)
 
         pdgids = ds_t.f.pdgids
@@ -647,6 +663,12 @@ class LEGOLtng(ltng.LightningModule):
                 keep = torch.isin(pdgids_idx, self.convert_pdgids(filter_pdgid)) | (pdgids_idx == 0)
                 sols.masked_fill_(~keep, torch.nan)
                 pdgids = pdgids.masked_fill(~keep, 0)
+
+        if self.sym is not None:
+            if sols.dim() == 4:
+                sols = torch.stack([self._canon_dirs(s, face, fwd, inverse=True) for s in sols])
+            else:
+                sols = self._canon_dirs(sols, face, fwd, inverse=True)
 
         if sols.dim() == 4:
             T = sols.shape[0]

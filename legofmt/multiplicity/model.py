@@ -10,6 +10,7 @@ from x_transformers import ContinuousTransformerWrapper, Decoder, Encoder
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.data.struct import cond_scalars
 from legofmt.geometry.geom_trafos import GeomTrafos
+from legofmt.geometry.symmetry_projections import CubeSymmetry
 from legofmt.mod_comps.config import resolve_mult_config
 from legofmt.mod_comps.optimizers import build_optimizer, schedulefree_adamw
 
@@ -127,6 +128,7 @@ class MultModel(LightningModule):
         self.register_buffer("ptypes", rc.ptypes)
         self.register_buffer("ptypes_in", rc.ptypes_in)
         self.geom_trafos = GeomTrafos()
+        self.sym = CubeSymmetry() if rc.canon_sym else None
 
         self.model = ContinuousTransformerWrapper(
             max_seq_len=rc.max_seq_len,
@@ -183,6 +185,10 @@ class MultModel(LightningModule):
 
     def proj_in(self, x):
         x = x.clone()
+        if self.sym is not None:
+            face = self.sym.face_of(x[..., -3:])
+            dirs = self.sym.canonicalize(torch.stack((x[..., -6:-3], x[..., -3:]), dim=-2), face)
+            x[..., -6:-3], x[..., -3:] = dirs[..., 0, :], dirs[..., 1, :]
         x[..., -6:] = self.geom_trafos.to_cube(x[..., -6:], d=self.rc.pos_scale)
         return self.proj_in_(x)
 
