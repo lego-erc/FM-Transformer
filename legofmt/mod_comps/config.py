@@ -135,6 +135,11 @@ class ResolvedLEGOConfig:
         loss_sc_fac (float): scalar multiplier for the auxiliary loss term.
         cond_cube (bool): if ``True``, project the conditioning position
             onto the cube before each forward pass.
+        max_energy (float): maximum particle energy (MeV) the model was
+            trained on; the upper bound of the energy normalisation.
+        cutoff_mev (float): low-energy cutoff (MeV); the lower bound of the
+            energy normalisation. Together with :attr:`max_energy` it maps
+            physical ``|p|`` to and from the bounded ``[0, 1]`` energy scalar.
         dl_conf (dict): dataloader sub-config, passed through to the
             dataset constructor.
         opt_conf (dict): optimizer sub-config, consumed by
@@ -165,6 +170,9 @@ class ResolvedLEGOConfig:
     pdgid_is_idx: bool
     loss_sc_fac: float
     cond_cube: bool
+
+    max_energy: float
+    cutoff_mev: float
 
     dl_conf: dict
     opt_conf: dict
@@ -261,6 +269,22 @@ def _resolve_fresh(config: dict) -> ResolvedLEGOConfig:
     pdgids = (
         torch.tensor(meta["particles"], dtype=torch.int64).sort().values.contiguous()
     )
+
+    max_energy = meta.get("max_energy", model_conf.get("max_energy"))
+    if max_energy is None:
+        raise KeyError(
+            f"max_energy missing from {dpath}/meta.json and model_conf; "
+            "regenerate meta.json or set model_conf['max_energy']."
+        )
+    model_conf["max_energy"] = max_energy
+    cutoff_mev = meta.get(
+        "cutoff_mev", config["dl_conf"]["lds_args"].get("cutoff_mev")
+    )
+    if cutoff_mev is None:
+        raise KeyError(
+            f"cutoff_mev missing from {dpath}/meta.json and dl_conf.lds_args."
+        )
+    config["dl_conf"]["lds_args"]["cutoff_mev"] = cutoff_mev
 
     model_args["npdgids"] = pdgids.shape[0] + 1
     model_args.setdefault("max_seq_l", max_seq_l)
@@ -382,6 +406,8 @@ def _build_resolved(
         pdgid_is_idx=model_conf.get("pdgid_is_idx", False),
         loss_sc_fac=model_conf.get("loss_sc", 0.0),
         cond_cube=model_conf.get("cond_cube", False),
+        max_energy=model_conf["max_energy"],
+        cutoff_mev=config["dl_conf"]["lds_args"]["cutoff_mev"],
         dl_conf=config["dl_conf"],
         opt_conf=config["opt_conf"],
         odeint_conf=config.get("odeint_conf", {}),

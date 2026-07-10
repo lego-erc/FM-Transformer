@@ -9,9 +9,9 @@ class _F:
         self.full = f
 
     @property
-    def d(self) -> Tensor: return self.full[..., 0, 1]
+    def d(self) -> Tensor: return self.full[..., 0, 0]
     @property
-    def edep(self) -> Tensor: return self.full[..., 1, 1]
+    def edep(self) -> Tensor: return self.full[..., 1, 0]
     @property
     def pdgids(self) -> Tensor: return self.full[..., -1:]
     @property
@@ -21,15 +21,15 @@ class _F:
     @property
     def out_p(self) -> Tensor: return self.full[..., 3:, :]
     @property
-    def non_cc(self) -> Tensor: return self.full[..., :2, 1:7]
+    def non_cc(self) -> Tensor: return self.full[..., :2, 0:7]
     @property
-    def in_cc(self) -> Tensor: return self.full[..., 2:3, 1:7]
+    def in_cc(self) -> Tensor: return self.full[..., 2:3, 0:7]
     @property
-    def out_cc(self) -> Tensor: return self.full[..., 3:, 1:7]
+    def out_cc(self) -> Tensor: return self.full[..., 3:, 0:7]
     @property
-    def model_in(self) -> Tensor: return self.full[..., 1:7]
+    def model_in(self) -> Tensor: return self.full[..., 0:7]
     @property
-    def mom(self) -> Tensor: return self.full[..., 1:4]
+    def energy(self) -> Tensor: return self.full[..., 0:1]
 
 
 class _M:

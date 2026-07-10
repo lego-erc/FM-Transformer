@@ -154,8 +154,8 @@ class LEGOLtng(ltng.LightningModule):
             inf_cond = ds_t.am.out_p.unsqueeze(-1).logical_xor(ds_t.am.out_p.unsqueeze(-2))
             out = _F(base).out_p
             if self.rc.ot_e_only:
-                nt = ds_t.f.out_cc[..., :3].norm(dim=-1)[..., None]
-                nb = out[..., :3].norm(dim=-1)[..., None, :]
+                nt = ds_t.f.out_cc[..., 0:1]
+                nb = out[..., 0].unsqueeze(-2)
                 cost = (nt - nb).abs() + inf_cond * 1e6
             else:
                 cost = torch.cdist(ds_t.f.out_cc, out) + inf_cond * 1e6
@@ -170,24 +170,27 @@ class LEGOLtng(ltng.LightningModule):
         loss_sc,
         *,
         edep_w: float = 1.0,
+        e_w: float = 1.0,
         x_w: float = 1.0,
     ) -> Tensor:
         out = sq[:, 3:] * (ds_t.m.out_p.unsqueeze(-1) == 1)
         loss_edep = edep_w * sq[:, 1].mean()
-        loss_p = out[..., :3].mean()
-        loss_x = x_w * out[..., 3:].mean()
+        loss_e = e_w * out[..., 0:1].mean()
+        loss_dir = out[..., 1:4].mean()
+        loss_x = x_w * out[..., 4:7].mean()
         if self.training:
             log_sc = loss_sc.detach() if torch.is_tensor(loss_sc) else loss_sc
             self.log_dict(
                 {
                     "loss/edep": loss_edep.detach(),
-                    "loss/out_eucl": loss_p.detach(),
-                    "loss/out_sph": loss_x.detach(),
+                    "loss/energy": loss_e.detach(),
+                    "loss/out_dir": loss_dir.detach(),
+                    "loss/out_pos": loss_x.detach(),
                     "loss/sc": log_sc,
                 },
                 on_step=True, on_epoch=False, logger=True, sync_dist=False,
             )
-        return loss_edep + loss_p + loss_x + self.rc.loss_sc_fac * loss_sc
+        return loss_edep + loss_e + loss_dir + loss_x + self.rc.loss_sc_fac * loss_sc
 
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
         with torch.no_grad():
@@ -214,12 +217,12 @@ class LEGOLtng(ltng.LightningModule):
         )
         if self.rc.loss_sc_fac > 0:
             am = ds_t.am.full
-            pred = ((1 - ps_.t)[..., None] * v_out[..., :3] + ps_.x_t[..., :3]).norm(dim=-1)
-            loss_sc = self.loss_fn(pred * am, ds_t.f.mom.norm(dim=-1) * am)
+            pred = ((1 - ps_.t)[..., None] * v_out[..., 0:1] + ps_.x_t[..., 0:1]).squeeze(-1)
+            loss_sc = self.loss_fn(pred * am, ds_t.f.energy.squeeze(-1) * am)
         else:
             loss_sc = 0.0
         sq = (v_out - ps_.dx_t) ** 2
-        return self._reduce_and_log(sq, ds_t, loss_sc, edep_w=2.0, x_w=8.0)
+        return self._reduce_and_log(sq, ds_t, loss_sc, edep_w=2.0, e_w=2.0, x_w=8.0)
 
     def training_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
         loss = self._step(batch, _batch_idx)
@@ -382,7 +385,6 @@ class LEGOLtng(ltng.LightningModule):
         pdgids = ds_t.f.pdgids
         am = ds_t.am.full.unsqueeze(-1)
         base = self.gen_base_wrapper(ds_t)
-        densities = ds_t.f.d[:, None, None].expand_as(base[..., :1])
 
         if cfg.get("return_base", False):
             sols = base.masked_fill(~am, torch.nan)
@@ -410,9 +412,8 @@ class LEGOLtng(ltng.LightningModule):
 
         if sols.dim() == 4:
             T = sols.shape[0]
-            densities = densities.unsqueeze(0).expand(T, -1, -1, -1)
             pdgids = pdgids.unsqueeze(0).expand(T, -1, -1, -1)
-        return torch.cat((densities, sols, pdgids), dim=-1), ds_t.m.full, ds_t.am.full
+        return torch.cat((sols, pdgids), dim=-1), ds_t.m.full, ds_t.am.full
 
 
 def _build_reflow_teacher(reflow_path: str | None) -> nn.Module | None:
@@ -446,7 +447,8 @@ class ProjectModelDirect(ProjectModel):
         out_raw = x_attended + residual
         gen = (mask == 1).unsqueeze(-1)
         ref = torch.zeros_like(out_raw)
-        ref[..., 3] = 1.0
+        ref[..., 1] = 1.0
+        ref[..., 4] = 1.0
         safe = torch.where(gen, out_raw, ref)
         out_proj = self.manifold.projx(safe)
         return torch.where(gen, out_proj, out_raw)
@@ -512,8 +514,8 @@ class LEGOLtngDirect(LEGOLtng):
         if self.rc.loss_sc_fac > 0:
             m_gen = (ds_t.m.full == 1).to(pred.dtype)
             loss_sc = self.loss_fn(
-                pred[..., :3].norm(dim=-1) * m_gen,
-                target[..., :3].norm(dim=-1) * m_gen,
+                pred[..., 0] * m_gen,
+                target[..., 0] * m_gen,
             )
         else:
             loss_sc = pred.new_zeros(())

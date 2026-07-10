@@ -40,15 +40,17 @@ def _tiny_config() -> dict:
             },
             "model_conf": {
                 "manifold": [
-                    {"name": "euclidean", "dim": 3},
+                    {"name": "euclidean", "dim": 1},
+                    {"name": "sphere",    "dim": 3},
                     {"name": "sphere",    "dim": 3},
                 ],
+                "max_energy": 300.0,
                 "pdgids": pdgids,
                 "model_args": {
                     "h_dim": 16,
                     "nlayers": 2,
                     "nhead": 2,
-                    "in_dim": 6,
+                    "in_dim": 7,
                     "max_seq_l": 5,
                     "ntypes": 4,
                     "nvtypes": 2,
@@ -70,14 +72,18 @@ def _fake_batch(B: int = 2, L: int = 5) -> DataStruct:
     """Synthetic batch matching the padded sequence layout: 2 conditioning
     slots, 1 incoming-particle slot, then ``L - 3`` outgoing slots."""
     f = torch.zeros(B, L, 8)
-    f[:, 0, 1] = 1.0
-    f[:, 1, 1] = 0.1
-    _F(f).non_p[..., 2:-1] = 1.0
-    f[:, 2, 1:4] = torch.tensor([0.0, 0.0, 150.0])
+    f[:, 0, 0] = 1.0
+    f[:, 1, 0] = 0.1
+    _F(f).non_p[..., 1:-1] = 1.0
+    f[:, 2, 0] = 0.8
+    f[:, 2, 1:4] = torch.tensor([0.0, 0.0, 1.0])
     f[:, 2, 4:7] = torch.tensor([0.0, 0.0, -1.0])
     f[:, 2, 7] = 22.0
     g = torch.Generator().manual_seed(0)
-    f[:, 3:, 1:4] = torch.randn(B, L - 3, 3, generator=g) * 30.0
+    f[:, 3:, 0] = torch.rand(B, L - 3, generator=g)
+    f[:, 3:, 1:4] = torch.nn.functional.normalize(
+        torch.randn(B, L - 3, 3, generator=g), dim=-1,
+    )
     f[:, 3:, 4:7] = torch.nn.functional.normalize(
         torch.randn(B, L - 3, 3, generator=g), dim=-1,
     )
@@ -107,9 +113,11 @@ def test_forward_shapes_and_sphere_projection() -> None:
         mask=ds.m.full, attn_mask=ds.am.full,
         types=model.types_embd, pdgids=model.convert_pdgids(ds.f.pdgids),
     )
-    assert out.shape == ds.f.full.shape[:2] + (6,)
-    norms = out[:, 3:, 3:6].norm(dim=-1)
-    assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5), norms
+    assert out.shape == ds.f.full.shape[:2] + (7,)
+    dir_norms = out[:, 3:, 1:4].norm(dim=-1)
+    pos_norms = out[:, 3:, 4:7].norm(dim=-1)
+    assert torch.allclose(dir_norms, torch.ones_like(dir_norms), atol=1e-5), dir_norms
+    assert torch.allclose(pos_norms, torch.ones_like(pos_norms), atol=1e-5), pos_norms
 
 
 def _save_velocity_teacher(tmp_path) -> str:
