@@ -121,6 +121,14 @@ class LEGOLtng(ltng.LightningModule):
         if getattr(self, "_opt_is_sf", False):
             self.opt.eval()
 
+    def on_validation_model_eval(self) -> None:
+        super().on_validation_model_eval()
+        self._opt_eval()
+
+    def on_validation_model_train(self) -> None:
+        super().on_validation_model_train()
+        self._opt_train()
+
     @torch.no_grad()
     def on_fit_start(self) -> None:
         if self.rc.ot_coupling and slap is None:
