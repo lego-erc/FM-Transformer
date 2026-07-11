@@ -42,7 +42,8 @@ class GeomTrafos:
     def sample(self, n: tuple, loc_cc, kappa: torch.Tensor, bs_frac: float = 0.0, tanh_theta: bool = False):
         loc_theta, loc_phi = self.to_sph(loc_cc).expand((*n, -1)).clone().split(1, -1)
         if bs_frac > 0.0:
-            loc_theta[: round(bs_frac * n[0])] = loc_theta[0] + torch.pi
+            k = round(bs_frac * n[0])
+            loc_theta[:k] = loc_theta[:k] + torch.pi
         if not tanh_theta:
             samples_theta = ((
                 2 / kappa * torch.randn(n, device=loc_cc.device) + torch.pi
