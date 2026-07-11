@@ -27,7 +27,7 @@ class GeomTrafos:
 
     def to_cube(self, p_and_x, d=1.0):
         p, x_ = p_and_x.split(3, -1)
-        x = x_ / x_.abs().max(-1, keepdim=True).values * d
+        x = x_ / x_.abs().max(-1, keepdim=True).values.clamp_min(1e-8) * d
         return torch.cat((p, x), dim=-1)
 
     def rotate(self, sph, alpha, beta):
