@@ -6,6 +6,7 @@ import lightning as ltng
 
 from flow_matching.solver import ODESolver
 from flow_matching.utils import ModelWrapper
+from flow_matching.utils.manifolds import Sphere
 
 try:
     from torch_lap_cuda_lib import solve_lap as slap
@@ -270,7 +271,14 @@ class LEGOLtng(ltng.LightningModule):
                     nb = out[..., 0].unsqueeze(-2)
                     cost = (nt - nb).abs() + inf_cond * 1e6
                 else:
-                    cost = torch.cdist(ds_t.f.out_cc, out) + inf_cond * 1e6
+                    man = self.rc.manifold
+                    tgt = ds_t.f.out_cc.unsqueeze(-2).split(man.ambient_dims, dim=-1)
+                    ref = out.unsqueeze(-3).split(man.ambient_dims, dim=-1)
+                    cost = sum(
+                        ((a * b).sum(-1).clamp(-1 + 1e-6, 1 - 1e-6).acos()
+                         if isinstance(mf, Sphere) else (a - b).norm(dim=-1)) ** 2
+                        for mf, a, b in zip(man.manifolds, tgt, ref)
+                    ).sqrt() + inf_cond * 1e6
                 assign = slap(cost, cost.device).long()
                 out[:] = torch.take_along_dim(out, assign.unsqueeze(-1), dim=1)
             base = self.gen_base.insert_add(base)
