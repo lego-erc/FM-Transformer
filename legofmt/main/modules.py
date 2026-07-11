@@ -356,7 +356,7 @@ class LEGOLtng(ltng.LightningModule):
         def _sample(x_init, mask, attn_mask, pdgids_idx):
             if method == "midpoint":
                 return self._midpoint_steps(
-                    x_init, time_grid,
+                    x_init, time_grid, return_intermediates=return_intermediates,
                     mask=mask, attn_mask=attn_mask,
                     types=self.types_embd, pdgids=pdgids_idx,
                 )
@@ -371,13 +371,17 @@ class LEGOLtng(ltng.LightningModule):
             split_size=split_size, cat_dim=-3,
         )
 
-    def _midpoint_steps(self, x: Tensor, time_grid: Tensor, **extras) -> Tensor:
+    def _midpoint_steps(
+        self, x: Tensor, time_grid: Tensor, return_intermediates: bool = False, **extras,
+    ) -> Tensor:
+        xs = [x]
         for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
             dt = t_b - t_a
             v1 = self.model(x, t_a, **extras)
             v2 = self.model(x + dt / 2 * v1, t_a + dt / 2, **extras)
             x = x + dt * v2
-        return x
+            xs.append(x)
+        return torch.stack(xs) if return_intermediates else x
 
     @torch.no_grad()
     def forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None) -> tuple:
