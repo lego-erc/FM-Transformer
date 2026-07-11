@@ -3,7 +3,9 @@ from pathlib import Path
 
 import torch
 from torch import Tensor, nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import (
+    BatchSampler, DataLoader, RandomSampler, SequentialSampler, random_split,
+)
 
 import lightning as ltng
 
@@ -265,10 +267,11 @@ class LEGOLtng(ltng.LightningModule):
 
     def _make_loader(self, dataset, *, shuffle: bool) -> DataLoader:
         num_workers = self.rc.dl_conf.get("num_workers", 4)
+        sampler = (RandomSampler if shuffle else SequentialSampler)(dataset)
         return DataLoader(
             dataset,
-            batch_size=self.rc.dl_conf.get("bs", 2**12),
-            shuffle=shuffle,
+            sampler=BatchSampler(sampler, self.rc.dl_conf.get("bs", 2**12), drop_last=False),
+            batch_size=None,
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=num_workers > 0,
