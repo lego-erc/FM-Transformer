@@ -121,6 +121,14 @@ class LEGOLtng(ltng.LightningModule):
         if getattr(self, "_opt_is_sf", False):
             self.opt.eval()
 
+    def on_validation_model_eval(self) -> None:
+        super().on_validation_model_eval()
+        self._opt_eval()
+
+    def on_validation_model_train(self) -> None:
+        super().on_validation_model_train()
+        self._opt_train()
+
     @torch.no_grad()
     def on_fit_start(self) -> None:
         if self.rc.ot_coupling and slap is None:
@@ -209,6 +217,8 @@ class LEGOLtng(ltng.LightningModule):
                 t = torch.where(torch.rand_like(u) < 0.5, t_grid, t_sd3)
             elif self.rc.t_dist == "uniform":
                 t = torch.rand_like(ds_t.f.d)
+            else:
+                raise ValueError(f"unknown t_dist: {self.rc.t_dist!r}")
             ps_ = self.ps.sample(base, ds_t.f.model_in, t)
         v_out = self.model(
             ps_.x_t, ps_.t,
@@ -346,7 +356,7 @@ class LEGOLtng(ltng.LightningModule):
         def _sample(x_init, mask, attn_mask, pdgids_idx):
             if method == "midpoint":
                 return self._midpoint_steps(
-                    x_init, time_grid,
+                    x_init, time_grid, return_intermediates=return_intermediates,
                     mask=mask, attn_mask=attn_mask,
                     types=self.types_embd, pdgids=pdgids_idx,
                 )
@@ -361,13 +371,17 @@ class LEGOLtng(ltng.LightningModule):
             split_size=split_size, cat_dim=-3,
         )
 
-    def _midpoint_steps(self, x: Tensor, time_grid: Tensor, **extras) -> Tensor:
+    def _midpoint_steps(
+        self, x: Tensor, time_grid: Tensor, return_intermediates: bool = False, **extras,
+    ) -> Tensor:
+        xs = [x]
         for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
             dt = t_b - t_a
             v1 = self.model(x, t_a, **extras)
             v2 = self.model(x + dt / 2 * v1, t_a + dt / 2, **extras)
             x = x + dt * v2
-        return x
+            xs.append(x)
+        return torch.stack(xs) if return_intermediates else x
 
     @torch.no_grad()
     def forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None) -> tuple:

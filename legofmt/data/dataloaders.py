@@ -67,14 +67,16 @@ class GetLEGOData:
             dim=-1
         )
         data_pp = dataset_valid[idx_rel_events]
+        data_add = {k: v[idx_rel_events] for k, v in data_add.items()}
         if n_events is not None:
             rd_idx = torch.randperm(data_pp.shape[0], device="cpu")[:n_events]
             data_pp = data_pp[rd_idx]
+            data_add = {k: v[rd_idx] for k, v in data_add.items()}
         particle_nan = ~data_pp.isnan().any(dim=-1)
         attn_mask = particle_nan.to(torch.int64)
         mask = attn_mask.clone()
         mask[:, 0] = 0
-        data_add = {k: v[idx_rel_events].to(self.dev) for k, v in data_add.items()}
+        data_add = {k: v.to(self.dev) for k, v in data_add.items()}
         return data_pp.to(self.dev), mask.to(self.dev), attn_mask.to(self.dev).bool(), data_add
 
     def get_filtered(
