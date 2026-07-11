@@ -217,6 +217,8 @@ class LEGOLtng(ltng.LightningModule):
                 t = torch.where(torch.rand_like(u) < 0.5, t_grid, t_sd3)
             elif self.rc.t_dist == "uniform":
                 t = torch.rand_like(ds_t.f.d)
+            else:
+                raise ValueError(f"unknown t_dist: {self.rc.t_dist!r}")
             ps_ = self.ps.sample(base, ds_t.f.model_in, t)
         v_out = self.model(
             ps_.x_t, ps_.t,
