@@ -33,9 +33,6 @@ class ProductManifold(Manifold):
     def proju(self, x, u):
         return self._batch_map("proju", x, u)
 
-    def dist(self, x, y, keepdim=False):
-        return self._batch_map("dist", x, y, keepdim=keepdim)
-
 
 class ProductPath:
     def __init__(self, paths, view_as_: tuple):

@@ -7,7 +7,7 @@ platforms = [
     { name = "linux-64-cuda", platform = "linux-64", cuda = "13.0" },
     "osx-arm64",
 ]
-version = "0.1.0"
+version = "0.1.1"
 exclude-newer = "14d"
 
 [feature.base.dependencies]
