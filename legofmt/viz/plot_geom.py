@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
 import torch
-from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
+from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
 plt.rcParams.update(
     {
