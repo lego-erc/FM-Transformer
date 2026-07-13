@@ -1,6 +1,8 @@
 import torch
 from torch import Tensor, nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import (
+    BatchSampler, DataLoader, RandomSampler, SequentialSampler, random_split,
+)
 
 import lightning as ltng
 
@@ -171,6 +173,14 @@ class LEGOLtng(ltng.LightningModule):
         if getattr(self, "_opt_is_sf", False):
             self.opt.eval()
 
+    def on_validation_model_eval(self) -> None:
+        super().on_validation_model_eval()
+        self._opt_eval()
+
+    def on_validation_model_train(self) -> None:
+        super().on_validation_model_train()
+        self._opt_train()
+
     @torch.no_grad()
     def on_fit_start(self) -> None:
         """Initialises the loss, path sampler, and train-mode optimizer."""
@@ -324,6 +334,8 @@ class LEGOLtng(ltng.LightningModule):
                 t = torch.where(torch.rand_like(u) < 0.5, t_grid, t_sd3)
             elif self.rc.t_dist == "uniform":
                 t = torch.rand_like(ds_t.f.d)
+            else:
+                raise ValueError(f"unknown t_dist: {self.rc.t_dist!r}")
             ps_ = self.ps.sample(base, ds_t.f.model_in, t)
         v_out = self.model(
             ps_.x_t, ps_.t,
@@ -404,10 +416,11 @@ class LEGOLtng(ltng.LightningModule):
     def _make_loader(self, dataset, *, shuffle: bool) -> DataLoader:
         """Builds a :class:`~torch.utils.data.DataLoader` over ``dataset``."""
         num_workers = self.rc.dl_conf.get("num_workers", 4)
+        sampler = (RandomSampler if shuffle else SequentialSampler)(dataset)
         return DataLoader(
             dataset,
-            batch_size=self.rc.dl_conf.get("bs", 2**12),
-            shuffle=shuffle,
+            sampler=BatchSampler(sampler, self.rc.dl_conf.get("bs", 2**12), drop_last=False),
+            batch_size=None,
             num_workers=num_workers,
             pin_memory=True,
             persistent_workers=num_workers > 0,
@@ -536,7 +549,9 @@ class LEGOLtng(ltng.LightningModule):
         def _sample(x_init, mask, attn_mask, pdgids_idx):
             extras = dict(mask=mask, attn_mask=attn_mask, types=self.types_embd, pdgids=pdgids_idx)
             if method == "midpoint":
-                return self._midpoint_steps(x_init, time_grid, **extras)
+                return self._midpoint_steps(
+                    x_init, time_grid, return_intermediates=return_intermediates, **extras,
+                )
             if method == "euler":
                 return self._euler_steps(
                     x_init, time_grid, return_intermediates=return_intermediates, **extras,

@@ -3,7 +3,7 @@ authors = ["rdebrand <richard.hildebrandt@tum.de>"]
 channels = ["conda-forge"]
 name = "legofmt"
 platforms = ["linux-64", "osx-arm64"]
-version = "0.1.0"
+version = "0.1.1"
 exclude-newer = "14d"
 
 [feature.base.dependencies]

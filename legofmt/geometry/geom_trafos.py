@@ -27,7 +27,7 @@ class GeomTrafos:
 
     def to_cube(self, p_and_x, d=1.0):
         p, x_ = p_and_x.split(3, -1)
-        x = x_ / x_.abs().max(-1, keepdim=True).values * d
+        x = x_ / x_.abs().max(-1, keepdim=True).values.clamp_min(1e-8) * d
         return torch.cat((p, x), dim=-1)
 
     def rotate(self, sph, alpha, beta):
@@ -45,7 +45,8 @@ class GeomTrafos:
             loc = loc.clone()
         loc_theta, loc_phi = loc.split(1, -1)
         if bs_frac > 0.0:
-            loc_theta[: round(bs_frac * n[0])] = loc_theta[0] + torch.pi
+            k = round(bs_frac * n[0])
+            loc_theta[:k] = loc_theta[:k] + torch.pi
         if not tanh_theta:
             samples_theta = ((
                 2 / kappa * torch.randn(n, device=loc_cc.device) + torch.pi
