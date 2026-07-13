@@ -77,8 +77,14 @@ def _median_heuristic(X, Y, max_samples=2000):
     return D[off].median().clamp(min=1e-8)
 
 
-def compute_mmd(X, Y):
-    """Unbiased MMD (Gaussian RBF, median-heuristic bandwidth). Returns a scalar tensor."""
+def compute_mmd(X, Y, max_samples=2000):
+    """Unbiased MMD (Gaussian RBF, median-heuristic bandwidth). Returns a
+    scalar tensor. Both sets are subsampled to ``max_samples`` — the
+    bandwidth budget — keeping the three N^2 kernels bounded."""
+    if X.shape[0] > max_samples:
+        X = X[torch.randperm(X.shape[0], device=X.device)[:max_samples]]
+    if Y.shape[0] > max_samples:
+        Y = Y[torch.randperm(Y.shape[0], device=Y.device)[:max_samples]]
     bw = _median_heuristic(X, Y)
     Kxx = torch.exp(-torch.cdist(X, X).square() / bw)
     Kyy = torch.exp(-torch.cdist(Y, Y).square() / bw)

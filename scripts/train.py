@@ -97,7 +97,7 @@ trainer = ltng.Trainer(
 )
 
 train_model = run["train_model"]
-compile_mode = run["compile"]  # false | model
+compile_mode = run["compile"]  # false | model | forward_fused
 if train_model == "fm":
     model = LEGOLtng(config)
 else:
@@ -112,6 +112,8 @@ if resume_from:
 
 if train_model == "fm" and compile_mode == "model":
     model.model = torch.compile(model.model, dynamic=False)
+elif train_model == "fm" and compile_mode == "forward_fused":
+    model.model.forward_fused = torch.compile(model.model.forward_fused, dynamic=False)
 
 trainer.fit(
     model=model
@@ -131,6 +133,7 @@ ckpt_dir = os.path.join(ckpt_base, "flow" if train_model == "fm" else "mult")
 ckpt_path = os.path.join(ckpt_dir, f"{name}.pt")
 os.makedirs(ckpt_dir, exist_ok=True)
 
+model._opt_eval()
 if train_model == "fm":
     vf = model.model._orig_mod.vf if compile_mode == "model" else model.model.vf
     state_dict = vf.state_dict()
