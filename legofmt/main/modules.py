@@ -155,7 +155,7 @@ class LEGOLtng(ltng.LightningModule):
             bc = rc.config.get("base_conf") or {}
             self._bh_full_cond = bool(bc.get("base_head_full_cond", False))
             self.base_head = nn.Linear(
-                2 + len(rc.pdgids_template) + len(rc.cond_scalars)
+                3 + len(rc.pdgids_template) + len(rc.cond_scalars)
                 if self._bh_full_cond else 3, 1,
             )
             with torch.no_grad():
@@ -265,8 +265,17 @@ class LEGOLtng(ltng.LightningModule):
                         species = nn.functional.one_hot(
                             idx.long().clamp(0, len(self.pdgids_template)),
                             len(self.pdgids_template) + 1).float()
+                        inc = ds_t.f.in_cc[..., 0, 1:7].nan_to_num(1.0)
+                        u, pos = inc[..., :3], inc[..., 3:]
+                        p = pos / pos.abs().amax(-1, keepdim=True).clamp_min(1e-8)
+                        # full chord through the cube along the ray, in edge lengths;
+                        # fwd+bwd makes it independent of entry-vs-exit storage
+                        ok_u = u.abs() > 1e-6
+                        tf = torch.where(ok_u, (u.sign() - p) / u, torch.full_like(u, 4.0))
+                        tb = torch.where(ok_u, (p + u.sign()) / u, torch.full_like(u, 4.0))
+                        chord = ((tf.amin(-1) + tb.amin(-1)).clamp(0.0, 3.5) / 2).unsqueeze(-1)
                         x = torch.cat((
-                            ds_t.f.in_cc[..., 0], species,
+                            ds_t.f.in_cc[..., 0], species, chord,
                             *(ds_t.f.cond(n).unsqueeze(-1).log1p()
                               for n in self.rc.cond_scalars)), dim=-1)
                     else:
