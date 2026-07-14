@@ -225,7 +225,8 @@ class LEGOLtng(ltng.LightningModule):
             Integer index tensor of the same shape.
         """
         cond = torch.isnan(pdgids) | (pdgids == 0) | (pdgids >= 1e8)
-        pdgid_idx = torch.searchsorted(self.pdgids_template, pdgids.contiguous()) + 1
+        pdgid_idx = torch.searchsorted(
+            self.pdgids_template.to(pdgids.device), pdgids.contiguous()) + 1
         return pdgid_idx.masked_fill_(cond, 0)
 
     def _canon_dirs(self, x: Tensor, face: Tensor, fwd: Tensor, inverse: bool = False) -> Tensor:
