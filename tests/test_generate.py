@@ -8,7 +8,7 @@ import pytest
 import torch
 from huggingface_hub import hf_hub_download
 
-from legofmt.main.generate import GenerateOut
+from legofmt.main.generate import GenerateIn, GenerateOut
 
 
 HF_REPO = os.environ.get("HF_REPO", "lego-erc/legofmt")
@@ -91,3 +91,20 @@ def test_g4_style_api(generator: GenerateOut) -> None:
     assert set(out) == {"per_event", "per_particle", "per_voxel"}
     assert out["per_particle"]["Incoming"].shape[-1] == 8   # E, mom(3), pdgid, pos(3)
     assert out["per_particle"]["Outgoing"].shape[-1] == 8
+
+
+@pytest.fixture(scope="module")
+def in_generator(ckpt_paths: tuple[Path, Path]) -> GenerateIn:
+    flow, mult = ckpt_paths
+    return GenerateIn(str(flow), str(mult), device=DEVICE)
+
+
+@torch.no_grad()
+def test_generate_in_shapes(generator: GenerateOut, in_generator: GenerateIn) -> None:
+    """Forward-generate a shower, then infer the incoming particle from it."""
+    sols, mask, attn_mask = generator(_dummy_cond(generator, batch=2))
+    in_p = in_generator((sols.nan_to_num(), mask, attn_mask))
+    assert in_p.shape == (2, 1, 8)
+    assert torch.isfinite(in_p).all(), "non-finite incoming features"
+    raw_ids = in_p[..., -1].flatten()
+    assert all(i in generator.pdgids for i in raw_ids.long()), raw_ids

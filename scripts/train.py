@@ -41,7 +41,8 @@ name = run["name"]
 
 # Coerce the YAML-native values into what the models expect.
 config["dl_conf"]["dtype"] = d_dtype
-config["base_conf"]["kappa"] = torch.tensor(config["base_conf"]["kappa"])
+if "base_conf" in config:  # FM only; the mult config carries no base distribution
+    config["base_conf"]["kappa"] = torch.tensor(config["base_conf"]["kappa"])
 if "adamw_betas" in config["opt_conf"]:
     config["opt_conf"]["adamw_betas"] = tuple(config["opt_conf"]["adamw_betas"])
 
@@ -81,6 +82,7 @@ config["additional"]["git_rev"] = git_rev
 
 if logger:
     logger.log_hyperparams(config)
+    logger.experiment.log_asset(str(cfg_path), file_name=cfg_path.name)
 
 trainer = ltng.Trainer(
     max_epochs=epochs,

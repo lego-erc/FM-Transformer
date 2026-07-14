@@ -5,7 +5,3 @@
 *.egg-info
 .env
 **/.env
-
-
-legofmt/multiplicity/model_are.py
-legofmt/testing
