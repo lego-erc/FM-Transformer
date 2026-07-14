@@ -152,13 +152,17 @@ class LEGOLtng(ltng.LightningModule):
         self._base_dist_loss = None
         params = list(self.model.parameters())
         if rc.base_dist_loss > 0 and self.gen_base.scale_dist == "sm_norm":
-            self.base_head = nn.Linear(3, 1)
             bc = rc.config.get("base_conf") or {}
+            self._bh_full_cond = bool(bc.get("base_head_full_cond", False))
+            self.base_head = nn.Linear(
+                1 + len(rc.cond_scalars) if self._bh_full_cond else 3, 1,
+            )
             with torch.no_grad():
                 self.base_head.weight.zero_()
                 self.base_head.bias.copy_(torch.tensor(
                     [float(self.gen_base.sm_scale)]).log())
-                if (hs := bc.get("base_head")) is not None:
+                hs = bc.get("base_head")
+                if hs is not None and hs["weight"].shape == self.base_head.weight.shape:
                     self.base_head.load_state_dict(hs)
                     self.base_head.requires_grad_(not bc.get("base_head_frozen", False))
             params += [p for p in self.base_head.parameters() if p.requires_grad]
@@ -253,10 +257,16 @@ class LEGOLtng(ltng.LightningModule):
             if hasattr(self, "base_head"):
                 learn = self.model.training and self.base_head.weight.requires_grad
                 with torch.set_grad_enabled(learn):
-                    s = self.base_head(torch.cat((
-                        ds_t.f.in_cc[..., 0],
-                        ds_t.am.out_p.sum(-1, keepdim=True) / ds_t.am.out_p.shape[-1],
-                        ds_t.f.d.unsqueeze(-1)), dim=-1)).exp()
+                    if self._bh_full_cond:
+                        x = torch.cat((ds_t.f.in_cc[..., 0], *(
+                            ds_t.f.cond(n).unsqueeze(-1).log1p()
+                            for n in self.rc.cond_scalars)), dim=-1)
+                    else:
+                        x = torch.cat((
+                            ds_t.f.in_cc[..., 0],
+                            ds_t.am.out_p.sum(-1, keepdim=True) / ds_t.am.out_p.shape[-1],
+                            ds_t.f.d.unsqueeze(-1)), dim=-1)
+                    s = self.base_head(x).exp()
                     if learn:
                         z = 2 ** 0.5 * torch.erfinv(torch.linspace(
                             -0.995, 0.995, 100, device=s.device))  # N(0,1) quantile nodes
