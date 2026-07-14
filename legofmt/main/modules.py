@@ -155,7 +155,8 @@ class LEGOLtng(ltng.LightningModule):
             bc = rc.config.get("base_conf") or {}
             self._bh_full_cond = bool(bc.get("base_head_full_cond", False))
             self.base_head = nn.Linear(
-                1 + len(rc.cond_scalars) if self._bh_full_cond else 3, 1,
+                2 + len(rc.pdgids_template) + len(rc.cond_scalars)
+                if self._bh_full_cond else 3, 1,
             )
             with torch.no_grad():
                 self.base_head.weight.zero_()
@@ -258,9 +259,15 @@ class LEGOLtng(ltng.LightningModule):
                 learn = self.model.training and self.base_head.weight.requires_grad
                 with torch.set_grad_enabled(learn):
                     if self._bh_full_cond:
-                        x = torch.cat((ds_t.f.in_cc[..., 0], *(
-                            ds_t.f.cond(n).unsqueeze(-1).log1p()
-                            for n in self.rc.cond_scalars)), dim=-1)
+                        pid = ds_t.f.in_p[..., 0, -1]
+                        idx = pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)
+                        species = nn.functional.one_hot(
+                            idx.long().clamp(0, len(self.pdgids_template)),
+                            len(self.pdgids_template) + 1).float()
+                        x = torch.cat((
+                            ds_t.f.in_cc[..., 0], species,
+                            *(ds_t.f.cond(n).unsqueeze(-1).log1p()
+                              for n in self.rc.cond_scalars)), dim=-1)
                     else:
                         x = torch.cat((
                             ds_t.f.in_cc[..., 0],
