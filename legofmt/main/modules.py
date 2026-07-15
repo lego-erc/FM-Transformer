@@ -7,7 +7,6 @@ from torch.utils.data import (
 import lightning as ltng
 
 from flow_matching.solver import ODESolver
-from flow_matching.utils import ModelWrapper
 from flow_matching.utils.manifolds import Sphere
 
 try:
@@ -20,21 +19,26 @@ _OT_COUPLING_REQUIRES_LAP = (
     "Install it or set model_conf.ot_coupling=False."
 )
 
+from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
+
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.data.struct import DataStruct, _F
+
 from legofmt.geometry.geom_trafos import GeomTrafos
-from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt.geometry.gen_base import GenerateBase
 from legofmt.geometry.path_sample_mult import ProductPathSampler, ProductManifold
 from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.geometry.symmetry_projections import CubeSymmetry
+
 from legofmt.mod_comps.config import resolve_legoltng_config
 from legofmt.mod_comps.optimizers import build_optimizer
+
 from legofmt.log_metrics.val_metrics import ShowerValMetrics
 
 
-class ProjectModel(ModelWrapper, nn.Module):
-    """Projection Wrapper for Riemannian FM Model."""
+class ProjectModel(nn.Module):
+    """Projection Wrapper for Riemannian FM Model. 
+    Connects the ltng module to the CFM transformer."""
 
     def __init__(
         self,
@@ -50,7 +54,7 @@ class ProjectModel(ModelWrapper, nn.Module):
             **kwargs: reads ``cond_cube`` and ``no_detach``; the rest are
                 retained on :attr:`kwargs`.
         """
-        nn.Module.__init__(self)
+        super().__init__()
         self.vf = vf
         self.manifold = manifold
         self.kwargs = kwargs
@@ -72,11 +76,12 @@ class ProjectModel(ModelWrapper, nn.Module):
         x_proj_full = self.manifold.projx(x)
         x_attended = torch.where(attn_mask.unsqueeze(-1), x_proj_full, x)
         if not self.no_detach:
-            x_attended = x_attended.detach()
+            x_attended.detach_()
         if self.cond_cube:
             x_surr = x_attended.clone()
             in_p = _F(x_surr).in_p
-            in_p.copy_(self.geom_trafos.to_cube(in_p))
+            in_p_c = self.geom_trafos.to_cube(in_p) # Dataclass attr overwrite
+            in_p.copy_(in_p_c)
         else:
             x_surr = x_attended
         return x_proj_full, x_attended, x_surr
@@ -107,10 +112,10 @@ class ProjectModel(ModelWrapper, nn.Module):
             Tangent velocity ``(B, L, in_dim)``.
         """
         x_proj_dense, _, x_surr = self._prep_x(x, attn_mask)
-        pm = attn_mask.unsqueeze(-1)
+        pm = attn_mask.unsqueeze(-1) # same n-dims as features
         t = torch.atleast_2d(t).expand_as(attn_mask)
-        t = torch.where(mask == 1, t, 1.)
-        v = self.vf(x_surr, mask, attn_mask, types, pdgids, t=t)
+        t = torch.where(mask == 1, t, 1.) # conditions get t=1
+        v = self.vf(x_surr, mask, attn_mask, types, pdgids, t=t) # model call
         v_proj_dense = self.manifold.proju(x_proj_dense, v)
         return torch.where(pm, v_proj_dense, v)
 
@@ -133,31 +138,23 @@ class LEGOLtng(ltng.LightningModule):
                 non-strictly for backward compatibility.
         """
         super().__init__()
-        rc = resolve_legoltng_config(full_config)
-        self.rc = rc
+        self.rc = resolve_legoltng_config(full_config)
 
-        self.register_buffer("pdgids_template", rc.pdgids_template)
-        self.register_buffer(
-            "types_embd",
-            torch.arange(rc.max_seq_l, dtype=torch.int64)
-            .clamp_max(rc.n_prefix + 1).view(1, -1),
-        )
+        types_embd = torch.arange(self.rc.max_seq_l, dtype=torch.int64).clamp_max(self.rc.n_prefix + 1).view(1, -1)
 
-        self.model = self._build_model(rc)
-        self.gen_base = GenerateBase(rc.config)
-        self.ppa = CubeTrace()
-        self.sym = CubeSymmetry() if rc.canon_sym else None
+        self.register_buffer("pdgids_template", self.rc.pdgids_template)
+        self.register_buffer("types_embd", types_embd)
+
+        self.model = self._build_model(self.rc)
+        self.gen_base = GenerateBase(self.rc.config)
+        self.sym = CubeSymmetry() if self.rc.canon_sym else None
         self.val_metrics = ShowerValMetrics()
 
         self._base_dist_loss = None
         params = list(self.model.parameters())
-        if rc.base_dist_loss > 0 and self.gen_base.scale_dist == "sm_norm":
-            bc = rc.config.get("base_conf") or {}
-            self._bh_full_cond = bool(bc.get("base_head_full_cond", False))
-            self.base_head = nn.Linear(
-                3 + len(rc.pdgids_template) + len(rc.cond_scalars)
-                if self._bh_full_cond else 3, 1,
-            )
+        if self.rc.base_dist_loss > 0 and self.gen_base.scale_dist == "sm_norm":
+            bc = self.rc.config.get("base_conf") or {}
+            self.base_head = nn.Linear(3 + len(self.rc.pdgids_template) + len(self.rc.cond_scalars), 1)
             with torch.no_grad():
                 nn.init.xavier_normal_(self.base_head.weight)
                 self.base_head.bias.copy_(torch.tensor(
@@ -167,13 +164,13 @@ class LEGOLtng(ltng.LightningModule):
                     self.base_head.load_state_dict(hs)
                     self.base_head.requires_grad_(not bc.get("base_head_frozen", False))
             params += [p for p in self.base_head.parameters() if p.requires_grad]
-        self.opt, self._lr_sched = build_optimizer(params, rc.opt_conf)
+        self.opt, self._lr_sched = build_optimizer(params, self.rc.opt_conf)
         self._opt_is_sf = hasattr(self.opt, "train") and callable(
             getattr(self.opt, "train", None),
         )
 
-        if rc.state_dict is not None:
-            self.model.vf.load_state_dict(rc.state_dict, strict=False)
+        if self.rc.state_dict is not None:
+            self.model.vf.load_state_dict(self.rc.state_dict, strict=False)
 
     def _build_model(self, rc) -> nn.Module:
         """Constructs the wrapped velocity field; overridden by subclasses."""
@@ -259,30 +256,24 @@ class LEGOLtng(ltng.LightningModule):
             if hasattr(self, "base_head"):
                 learn = self.model.training and self.base_head.weight.requires_grad
                 with torch.set_grad_enabled(learn):
-                    if self._bh_full_cond:
-                        pid = ds_t.f.in_p[..., 0, -1]
-                        idx = pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)
-                        species = nn.functional.one_hot(
-                            idx.long().clamp(0, len(self.pdgids_template)),
-                            len(self.pdgids_template) + 1).float()
-                        inc = ds_t.f.in_cc[..., 0, 1:7].nan_to_num(1.0)
-                        u, pos = inc[..., :3], inc[..., 3:]
-                        p = pos / pos.abs().amax(-1, keepdim=True).clamp_min(1e-8)
-                        # full chord through the cube along the ray, in edge lengths;
-                        # fwd+bwd makes it independent of entry-vs-exit storage
-                        ok_u = u.abs() > 1e-6
-                        tf = torch.where(ok_u, (u.sign() - p) / u, torch.full_like(u, 4.0))
-                        tb = torch.where(ok_u, (p + u.sign()) / u, torch.full_like(u, 4.0))
-                        chord = ((tf.amin(-1) + tb.amin(-1)).clamp(0.0, 3.5) / 2).unsqueeze(-1)
-                        x = torch.cat((
-                            ds_t.f.in_cc[..., 0], species, chord,
-                            *(ds_t.f.cond(n).unsqueeze(-1).log1p()
-                              for n in self.rc.cond_scalars)), dim=-1)
-                    else:
-                        x = torch.cat((
-                            ds_t.f.in_cc[..., 0],
-                            ds_t.am.out_p.sum(-1, keepdim=True) / ds_t.am.out_p.shape[-1],
-                            ds_t.f.d.unsqueeze(-1)), dim=-1)
+                    pid = ds_t.f.in_p[..., 0, -1]
+                    idx = pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)
+                    species = nn.functional.one_hot(
+                        idx.long().clamp(0, len(self.pdgids_template)),
+                        len(self.pdgids_template) + 1).float()
+                    inc = ds_t.f.in_cc[..., 0, 1:7].nan_to_num(1.0)
+                    u, pos = inc[..., :3], inc[..., 3:]
+                    p = pos / pos.abs().amax(-1, keepdim=True).clamp_min(1e-8)
+                    # full chord through the cube along the ray, in edge lengths;
+                    # fwd+bwd makes it independent of entry-vs-exit storage
+                    ok_u = u.abs() > 1e-6
+                    tf = torch.where(ok_u, (u.sign() - p) / u, torch.full_like(u, 4.0))
+                    tb = torch.where(ok_u, (p + u.sign()) / u, torch.full_like(u, 4.0))
+                    chord = ((tf.amin(-1) + tb.amin(-1)).clamp(0.0, 3.5) / 2).unsqueeze(-1)
+                    x = torch.cat((
+                        ds_t.f.in_cc[..., 0], species, chord,
+                        *(ds_t.f.cond(n).unsqueeze(-1).log1p()
+                            for n in self.rc.cond_scalars)), dim=-1)
                     s = self.base_head(x).exp()
                     if learn:
                         z = 2 ** 0.5 * torch.erfinv(torch.linspace(
