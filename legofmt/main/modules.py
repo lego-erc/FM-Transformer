@@ -262,17 +262,8 @@ class LEGOLtng(ltng.LightningModule):
                     species = nn.functional.one_hot(
                         idx.long().clamp(0, len(self.pdgids_template)),
                         len(self.pdgids_template) + 1).float()
-                    inc     = ds_t.f.in_cc[..., 0, 1:7].nan_to_num(1.0)
-                    u, pos  = inc[..., :3], inc[..., 3:]
-                    p       = pos / pos.abs().amax(-1, keepdim=True).clamp_min(1e-8)
-                    # full chord through the cube along the ray, in edge lengths;
-                    # fwd+bwd makes it independent of entry-vs-exit storage
-                    ok_u    = u.abs() > 1e-6
-                    tf      = torch.where(ok_u, (u.sign() - p) / u, torch.full_like(u, 4.0))
-                    tb      = torch.where(ok_u, (p + u.sign()) / u, torch.full_like(u, 4.0))
-                    chord   = ((tf.amin(-1) + tb.amin(-1)).clamp(0.0, 3.5) / 2).unsqueeze(-1)
                     x       = torch.cat((
-                        ds_t.f.in_cc[..., 0], species, chord,
+                        ds_t.f.in_cc[..., 0], species,
                         *(ds_t.f.cond(n).unsqueeze(-1).log1p()
                             for n in self.rc.cond_scalars)), dim=-1)
                     s       = self.base_head(x).exp()
@@ -395,14 +386,6 @@ class LEGOLtng(ltng.LightningModule):
             elif self.rc.t_dist == "sd3":
                 u = torch.rand_like(ds_t.f.d)
                 t = 1 - u + self.rc.t_dist_scale / 3 * ((torch.pi / 2 * u).sin() ** 2 - u)
-            elif self.rc.t_dist == "sd3_grid":
-                u      = torch.rand_like(ds_t.f.d)
-                t_sd3  = 1 - u + self.rc.t_dist_scale / 3 * ((torch.pi / 2 * u).sin() ** 2 - u)
-                idx    = torch.multinomial(u.new_tensor([0.1, 0.2, 0.3, 0.4]), u.numel(), replacement=True).view_as(u)
-                t_grid = (u.new_tensor([0.0, 0.4, 0.8, 0.9])[idx] + 0.02 * torch.randn_like(u)).clamp(0, 1)
-                t      = torch.where(torch.rand_like(u) < 0.5, t_grid, t_sd3)
-            elif self.rc.t_dist == "uniform":
-                t = torch.rand_like(ds_t.f.d)
             else:
                 raise ValueError(f"unknown t_dist: {self.rc.t_dist!r}")
             ps_ = self.ps.sample(base, ds_t.f.model_in, t)
