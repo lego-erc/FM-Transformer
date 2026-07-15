@@ -37,7 +37,7 @@ from legofmt.log_metrics.val_metrics import ShowerValMetrics
 
 
 class ProjectModel(nn.Module):
-    """Projection Wrapper for Riemannian FM Model. 
+    """Projection Wrapper for Riemannian FM Model.
     Connects the ltng module to the CFM transformer."""
 
     def __init__(
@@ -55,12 +55,12 @@ class ProjectModel(nn.Module):
                 retained on :attr:`kwargs`.
         """
         super().__init__()
-        self.vf = vf
-        self.manifold = manifold
-        self.kwargs = kwargs
+        self.vf          = vf
+        self.manifold    = manifold
+        self.kwargs      = kwargs
         self.geom_trafos = GeomTrafos()
-        self.cond_cube = kwargs.get("cond_cube", False)
-        self.no_detach = kwargs.get("no_detach", False)
+        self.cond_cube   = kwargs.get("cond_cube", False)
+        self.no_detach   = kwargs.get("no_detach", False)
 
     def _prep_x(
         self, x: torch.Tensor, attn_mask: torch.Tensor,
@@ -74,13 +74,13 @@ class ProjectModel(nn.Module):
             (cube-projected position when :attr:`cond_cube`).
         """
         x_proj_full = self.manifold.projx(x)
-        x_attended = torch.where(attn_mask.unsqueeze(-1), x_proj_full, x)
+        x_attended  = torch.where(attn_mask.unsqueeze(-1), x_proj_full, x)
         if not self.no_detach:
             x_attended.detach_()
         if self.cond_cube:
             x_surr = x_attended.clone()
             in_p = _F(x_surr).in_p
-            in_p_c = self.geom_trafos.to_cube(in_p) # Dataclass attr overwrite
+            in_p_c = self.geom_trafos.to_cube(in_p)  # Dataclass attr overwrite
             in_p.copy_(in_p_c)
         else:
             x_surr = x_attended
@@ -112,12 +112,13 @@ class ProjectModel(nn.Module):
             Tangent velocity ``(B, L, in_dim)``.
         """
         x_proj_dense, _, x_surr = self._prep_x(x, attn_mask)
-        pm = attn_mask.unsqueeze(-1) # same n-dims as features
-        t = torch.atleast_2d(t).expand_as(attn_mask)
-        t = torch.where(mask == 1, t, 1.) # conditions get t=1
-        v = self.vf(x_surr, mask, attn_mask, types, pdgids, t=t) # model call
+        pm = attn_mask.unsqueeze(-1)  # same n-dims as features
+        t  = torch.atleast_2d(t).expand_as(attn_mask)
+        t  = torch.where(mask == 1, t, 1.0)  # conditions get t=1
+        v  = self.vf(x_surr, mask, attn_mask, types, pdgids, t=t)  # model call
         v_proj_dense = self.manifold.proju(x_proj_dense, v)
         return torch.where(pm, v_proj_dense, v)
+
 
 class LEGOLtng(ltng.LightningModule):
     """Riemannian flow-matching model over padded particle sequences.
@@ -145,9 +146,9 @@ class LEGOLtng(ltng.LightningModule):
         self.register_buffer("pdgids_template", self.rc.pdgids_template)
         self.register_buffer("types_embd", types_embd)
 
-        self.model = self._build_model(self.rc)
-        self.gen_base = GenerateBase(self.rc.config)
-        self.sym = CubeSymmetry() if self.rc.canon_sym else None
+        self.model       = self._build_model(self.rc)
+        self.gen_base    = GenerateBase(self.rc.config)
+        self.sym         = CubeSymmetry() if self.rc.canon_sym else None
         self.val_metrics = ShowerValMetrics()
 
         self._base_dist_loss = None
@@ -204,7 +205,7 @@ class LEGOLtng(ltng.LightningModule):
         if self.rc.ot_coupling and slap is None:
             raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
         self.loss_fn = nn.MSELoss()
-        self.ps = ProductPathSampler(self.rc.manifold)
+        self.ps      = ProductPathSampler(self.rc.manifold)
         self.model.train()
         self._opt_train()
 
@@ -227,9 +228,9 @@ class LEGOLtng(ltng.LightningModule):
         return pdgid_idx.masked_fill_(cond, 0)
 
     def _canon_dirs(self, x: Tensor, face: Tensor, fwd: Tensor, inverse: bool = False) -> Tensor:
-        rot = self.sym.uncanonicalize if inverse else self.sym.canonicalize
+        rot  = self.sym.uncanonicalize if inverse else self.sym.canonicalize
         dirs = rot(torch.stack((x[..., 1:4], x[..., 4:7]), dim=-2), face)
-        new = torch.cat((x[..., 0:1], dirs[..., 0, :], dirs[..., 1, :], x[..., 7:]), dim=-1)
+        new  = torch.cat((x[..., 0:1], dirs[..., 0, :], dirs[..., 1, :], x[..., 7:]), dim=-1)
         return torch.where(fwd[:, None, None], new, x)
 
     @torch.no_grad()
@@ -248,41 +249,41 @@ class LEGOLtng(ltng.LightningModule):
         if not isinstance(ds_t, DataStruct):
             ds_t = DataStruct(*ds_t)
         self._base_dist_loss = None
-        data = ds_t.f.model_in
-        m = ds_t.m.full
-        fwd = m[:, self.rc.n_prefix] == 0  # incoming slot conditions => forward event
+        data  = ds_t.f.model_in
+        m     = ds_t.m.full
+        fwd   = m[:, self.rc.n_prefix] == 0  # incoming slot conditions => forward event
         noise = None if fwd.all() else self.gen_base.iso(m.shape, data.device)
         if fwd.any():
             if hasattr(self, "base_head"):
                 learn = self.model.training and self.base_head.weight.requires_grad
                 with torch.set_grad_enabled(learn):
-                    pid = ds_t.f.in_p[..., 0, -1]
-                    idx = pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)
+                    pid     = ds_t.f.in_p[..., 0, -1]
+                    idx     = pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)
                     species = nn.functional.one_hot(
                         idx.long().clamp(0, len(self.pdgids_template)),
                         len(self.pdgids_template) + 1).float()
-                    inc = ds_t.f.in_cc[..., 0, 1:7].nan_to_num(1.0)
-                    u, pos = inc[..., :3], inc[..., 3:]
-                    p = pos / pos.abs().amax(-1, keepdim=True).clamp_min(1e-8)
+                    inc     = ds_t.f.in_cc[..., 0, 1:7].nan_to_num(1.0)
+                    u, pos  = inc[..., :3], inc[..., 3:]
+                    p       = pos / pos.abs().amax(-1, keepdim=True).clamp_min(1e-8)
                     # full chord through the cube along the ray, in edge lengths;
                     # fwd+bwd makes it independent of entry-vs-exit storage
-                    ok_u = u.abs() > 1e-6
-                    tf = torch.where(ok_u, (u.sign() - p) / u, torch.full_like(u, 4.0))
-                    tb = torch.where(ok_u, (p + u.sign()) / u, torch.full_like(u, 4.0))
-                    chord = ((tf.amin(-1) + tb.amin(-1)).clamp(0.0, 3.5) / 2).unsqueeze(-1)
-                    x = torch.cat((
+                    ok_u    = u.abs() > 1e-6
+                    tf      = torch.where(ok_u, (u.sign() - p) / u, torch.full_like(u, 4.0))
+                    tb      = torch.where(ok_u, (p + u.sign()) / u, torch.full_like(u, 4.0))
+                    chord   = ((tf.amin(-1) + tb.amin(-1)).clamp(0.0, 3.5) / 2).unsqueeze(-1)
+                    x       = torch.cat((
                         ds_t.f.in_cc[..., 0], species, chord,
                         *(ds_t.f.cond(n).unsqueeze(-1).log1p()
                             for n in self.rc.cond_scalars)), dim=-1)
-                    s = self.base_head(x).exp()
+                    s       = self.base_head(x).exp()
                     if learn:
-                        z = 2 ** 0.5 * torch.erfinv(torch.linspace(
+                        z   = 2 ** 0.5 * torch.erfinv(torch.linspace(
                             -0.995, 0.995, 100, device=s.device))  # N(0,1) quantile nodes
                         u_b = 1 - (z.abs() * s).tanh().mean(-1)
-                        v = (ds_t.am.out_p & fwd.unsqueeze(-1)).float()
-                        n = v.sum(-1).clamp(min=1)
+                        v   = (ds_t.am.out_p & fwd.unsqueeze(-1)).float()
+                        n   = v.sum(-1).clamp(min=1)
                         u_t = (ds_t.f.out_cc[..., 0] * v).sum(-1) / n
-                        ev = (v.sum(-1) > 0).float()
+                        ev  = (v.sum(-1) > 0).float()
                         self._base_dist_loss = ((u_b - u_t) ** 2 * ev).sum() / ev.sum().clamp(min=1)
                 self.gen_base.sm_scale = s.detach().unsqueeze(-1)
             base = torch.cat(
@@ -334,12 +335,12 @@ class LEGOLtng(ltng.LightningModule):
         Returns:
             Scalar training loss.
         """
-        g = ((ds_t.m.full == 1) & (ds_t.am.full == 1)).unsqueeze(-1)
-        denom = g.sum().clamp(min=1)
-        out = sq * g
-        loss_e = out[..., 0:1].sum() / denom
+        g        = ((ds_t.m.full == 1) & (ds_t.am.full == 1)).unsqueeze(-1)
+        denom    = g.sum().clamp(min=1)
+        out      = sq * g
+        loss_e   = out[..., 0:1].sum() / denom
         loss_dir = out[..., 1:4].sum() / (denom * 3)
-        loss_x = out[..., 4:7].sum() / (denom * 3)
+        loss_x   = out[..., 4:7].sum() / (denom * 3)
         if self.training:
             log_sc = loss_sc.detach() if torch.is_tensor(loss_sc) else loss_sc
             self.log_dict(
@@ -384,22 +385,22 @@ class LEGOLtng(ltng.LightningModule):
         with torch.no_grad():
             ds_t = DataStruct(ds_t.f.full, self._sample_mask(ds_t), ds_t.am.full)
             if self.sym is not None:
-                fwd = ds_t.m.full[:, self.rc.n_prefix] == 0
+                fwd  = ds_t.m.full[:, self.rc.n_prefix] == 0
                 face = self.sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
                 ds_t = DataStruct(self._canon_dirs(ds_t.f.full, face, fwd), ds_t.m.full, ds_t.am.full)
-            base = self.gen_base_wrapper(ds_t)
+            base      = self.gen_base_wrapper(ds_t)
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
             if self.rc.t_dist == "sm_norm":
                 t = torch.sigmoid(self.rc.t_dist_scale * torch.randn_like(ds_t.f.d))
             elif self.rc.t_dist == "sd3":
                 u = torch.rand_like(ds_t.f.d)
-                t = 1 - u + self.rc.t_dist_scale / 3 * ((torch.pi / 2 * u).sin()**2 - u)
+                t = 1 - u + self.rc.t_dist_scale / 3 * ((torch.pi / 2 * u).sin() ** 2 - u)
             elif self.rc.t_dist == "sd3_grid":
-                u = torch.rand_like(ds_t.f.d)
-                t_sd3 = 1 - u + self.rc.t_dist_scale / 3 * ((torch.pi / 2 * u).sin()**2 - u)
-                idx = torch.multinomial(u.new_tensor([.1, .2, .3, .4]), u.numel(), replacement=True).view_as(u)
-                t_grid = (u.new_tensor([0., 0.4, 0.8, 0.9])[idx] + 0.02 * torch.randn_like(u)).clamp(0, 1)
-                t = torch.where(torch.rand_like(u) < 0.5, t_grid, t_sd3)
+                u      = torch.rand_like(ds_t.f.d)
+                t_sd3  = 1 - u + self.rc.t_dist_scale / 3 * ((torch.pi / 2 * u).sin() ** 2 - u)
+                idx    = torch.multinomial(u.new_tensor([0.1, 0.2, 0.3, 0.4]), u.numel(), replacement=True).view_as(u)
+                t_grid = (u.new_tensor([0.0, 0.4, 0.8, 0.9])[idx] + 0.02 * torch.randn_like(u)).clamp(0, 1)
+                t      = torch.where(torch.rand_like(u) < 0.5, t_grid, t_sd3)
             elif self.rc.t_dist == "uniform":
                 t = torch.rand_like(ds_t.f.d)
             else:
@@ -437,21 +438,21 @@ class LEGOLtng(ltng.LightningModule):
     ) -> Tensor:
         mask, am = ds_t.m.full, ds_t.am.full
         gen = (mask == 1).unsqueeze(-1)
-        g = gen & am.unsqueeze(-1)
+        g   = gen & am.unsqueeze(-1)
         ckw = dict(mask=mask, attn_mask=am, types=self.types_embd, pdgids=pdgid_idx)
         man = self.model.manifold
 
         with torch.no_grad():
-            i = torch.randint(1, self.rc.one_step_euler_sections + 1, (base.shape[0], 1), device=base.device)
-            step = 2.0 ** -(i - 1).to(base.dtype)             # queried step D, (B, 1)
-            half = step / 2
-            t0 = (torch.rand_like(step) * (1.0 / step).round()).floor() * step  # grid-aligned start
-            x0 = self.ps.sample(base, ds_t.f.model_in, t0.squeeze(-1)).x_t
+            i      = torch.randint(1, self.rc.one_step_euler_sections + 1, (base.shape[0], 1), device=base.device)
+            step   = 2.0 ** -(i - 1).to(base.dtype)  # queried step D, (B, 1)
+            half   = step / 2
+            t0     = (torch.rand_like(step) * (1.0 / step).round()).floor() * step  # grid-aligned start
+            x0     = self.ps.sample(base, ds_t.f.model_in, t0.squeeze(-1)).x_t
             s_half = self.model(x0, t0, **ckw)
-            x_mid = torch.where(gen, man.expmap(x0, half.unsqueeze(-1) * s_half), x0)
-            s_mid = self.model(x_mid, t0 + half, **ckw)
-            x_end = torch.where(gen, man.expmap(x_mid, half.unsqueeze(-1) * s_mid), x0)
-            tgt = man.logmap(x0, x_end) / step.unsqueeze(-1)
+            x_mid  = torch.where(gen, man.expmap(x0, half.unsqueeze(-1) * s_half), x0)
+            s_mid  = self.model(x_mid, t0 + half, **ckw)
+            x_end  = torch.where(gen, man.expmap(x_mid, half.unsqueeze(-1) * s_mid), x0)
+            tgt    = man.logmap(x0, x_end) / step.unsqueeze(-1)
         s_pred = self.model(x0, t0, **ckw)
         sc = ((s_pred - tgt) ** 2 * g).sum() / (g.sum().clamp(min=1) * s_pred.shape[-1])
         if self.training:
@@ -463,7 +464,7 @@ class LEGOLtng(ltng.LightningModule):
         automatically via :meth:`setup`. Returns the last loss value."""
         if slap is None:
             raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
-        opt = torch.optim.Adam(self.base_head.parameters(), lr=lr)
+        opt          = torch.optim.Adam(self.base_head.parameters(), lr=lr)
         was_training = self.model.training
         self.model.train()
         ot = float("nan")
@@ -505,9 +506,9 @@ class LEGOLtng(ltng.LightningModule):
         """Load the dataset once and carve off a held-out validation split."""
         if getattr(self, "_val_ds", None) is not None:
             return
-        full = LEGODataset(**self.rc.dl_conf["lds_args"])
+        full  = LEGODataset(**self.rc.dl_conf["lds_args"])
         n_val = max(1, int(len(full) * self.rc.val_conf.get("val_frac", 0.01)))
-        gen = torch.Generator().manual_seed(self.rc.val_conf.get("seed", 0))
+        gen   = torch.Generator().manual_seed(self.rc.val_conf.get("seed", 0))
         self._train_ds, self._val_ds = random_split(
             full, [len(full) - n_val, n_val], generator=gen,
         )
@@ -563,7 +564,6 @@ class LEGOLtng(ltng.LightningModule):
         the outputs along ``cat_dim`` (defaulting to ``dim``). Bounds peak
         memory during sampling.
         """
-
         if split_size is None or split_size >= tensors[0].shape[dim]:
             return fn(*tensors)
         if cat_dim is None:
@@ -586,7 +586,7 @@ class LEGOLtng(ltng.LightningModule):
         if self.model.training:
             self.model.eval()
             self._opt_eval()
-        pdgids = ds_t.f.pdgids
+        pdgids     = ds_t.f.pdgids
         pdgids_idx = pdgids.int() if self.rc.pdgid_is_idx else self.convert_pdgids(pdgids)
         return ds_t, pdgids_idx
 
@@ -657,14 +657,14 @@ class LEGOLtng(ltng.LightningModule):
         if time_grid is None:
             if method == "euler":
                 n = max(round(1.0 / step_size), 1)
-                time_grid = torch.linspace(0., 1., n + 1, device=x_init.device, dtype=x_init.dtype)
+                time_grid = torch.linspace(0.0, 1.0, n + 1, device=x_init.device, dtype=x_init.dtype)
                 if reverse:
                     time_grid = time_grid.flip(0)
             else:
                 time_grid = x_init.new_tensor([1.0, 0.0] if reverse else [0.0, 1.0])
 
         if method == "midpoint" and not explicit_grid:
-            time_grid = x_init.new_tensor([1., 0.5, 0.] if reverse else [0., 0.5, 1.])
+            time_grid = x_init.new_tensor([1.0, 0.5, 0.0] if reverse else [0.0, 0.5, 1.0])
 
         def _sample(x_init, mask, attn_mask, pdgids_idx):
             extras = dict(mask=mask, attn_mask=attn_mask, types=self.types_embd, pdgids=pdgids_idx)
@@ -702,11 +702,11 @@ class LEGOLtng(ltng.LightningModule):
             xs = [x]
         man = self.model.manifold
         for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
-            dt = t_b - t_a
-            v1 = self.model(x, t_a, **extras)
+            dt     = t_b - t_a
+            v1     = self.model(x, t_a, **extras)
             x_half = man.expmap(x, dt / 2 * v1)
-            v2 = self.model(x_half, t_a + dt / 2, **extras)
-            x = man.expmap(x, dt * man.proju(x, v2))
+            v2     = self.model(x_half, t_a + dt / 2, **extras)
+            x      = man.expmap(x, dt * man.proju(x, v2))
             if return_intermediates:
                 xs.append(x)
         return torch.stack(xs) if return_intermediates else x
@@ -720,8 +720,8 @@ class LEGOLtng(ltng.LightningModule):
             xs = [x]
         for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
             dt = t_b - t_a
-            s = self.model(x, t_a, **extras)
-            x = torch.where(gen, self.model.manifold.expmap(x, dt * s), x)
+            s  = self.model(x, t_a, **extras)
+            x  = torch.where(gen, self.model.manifold.expmap(x, dt * s), x)
             if return_intermediates:
                 xs.append(x)
         return torch.stack(xs) if return_intermediates else x
@@ -746,20 +746,20 @@ class LEGOLtng(ltng.LightningModule):
             self._opt_eval()
 
         cfg = self.rc.odeint_conf
-        if (cfg.get("fwd_compile", False)
-        and not (hasattr(self.model, "_orig_mod")
-        or hasattr(self.model.vf, "_orig_mod"))):
+        if cfg.get("fwd_compile", False) and not (
+            hasattr(self.model, "_orig_mod") or hasattr(self.model.vf, "_orig_mod")
+        ):
             self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=False)
 
         ds_t = DataStruct(*batch) if isinstance(batch, tuple) else batch
         if self.sym is not None:
-            fwd = ds_t.m.full[:, self.rc.n_prefix] == 0
+            fwd  = ds_t.m.full[:, self.rc.n_prefix] == 0
             face = self.sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
             ds_t = DataStruct(self._canon_dirs(ds_t.f.full, face, fwd), ds_t.m.full, ds_t.am.full)
         base = self.gen_base_wrapper(ds_t)
 
         pdgids = ds_t.f.pdgids
-        am = ds_t.am.full.unsqueeze(-1)
+        am     = ds_t.am.full.unsqueeze(-1)
 
         if cfg.get("return_base", False):
             sols = base.masked_fill(~am, torch.nan)
