@@ -159,7 +159,7 @@ class LEGOLtng(ltng.LightningModule):
                 if self._bh_full_cond else 3, 1,
             )
             with torch.no_grad():
-                self.base_head.weight.zero_()
+                nn.init.xavier_normal_(self.base_head.weight)
                 self.base_head.bias.copy_(torch.tensor(
                     [float(self.gen_base.sm_scale)]).log())
                 hs = bc.get("base_head")
