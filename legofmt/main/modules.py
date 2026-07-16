@@ -156,7 +156,7 @@ class LEGOLtng(ltng.LightningModule):
         if self.rc.base_dist_loss > 0 and self.gen_base.scale_dist == "sm_norm":
             bc = self.rc.config.get("base_conf") or {}
             self.base_head = nn.Sequential(
-                nn.Linear(3 + len(self.rc.pdgids_template), 16), nn.SiLU(),
+                nn.Linear(3 + len(self.rc.pdgids_template), 16), nn.Mish(),
                 nn.Linear(16, 1))
             with torch.no_grad():
                 self.base_head[-1].weight.zero_()
