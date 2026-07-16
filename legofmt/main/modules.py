@@ -155,7 +155,7 @@ class LEGOLtng(ltng.LightningModule):
         params = list(self.model.parameters())
         if self.rc.base_dist_loss > 0 and self.gen_base.scale_dist == "sm_norm":
             bc = self.rc.config.get("base_conf") or {}
-            self.base_head = nn.Linear(3 + len(self.rc.pdgids_template) + len(self.rc.cond_scalars), 1)
+            self.base_head = nn.Linear(3 + len(self.rc.pdgids_template), 1)
             with torch.no_grad():
                 nn.init.xavier_normal_(self.base_head.weight)
                 self.base_head.bias.copy_(torch.tensor(
@@ -262,10 +262,11 @@ class LEGOLtng(ltng.LightningModule):
                     species = nn.functional.one_hot(
                         idx.long().clamp(0, len(self.pdgids_template)),
                         len(self.pdgids_template) + 1).float()
-                    x       = torch.cat((
-                        ds_t.f.in_cc[..., 0], species,
-                        *(ds_t.f.cond(n).unsqueeze(-1).log1p()
-                            for n in self.rc.cond_scalars)), dim=-1)
+                    Z, A    = ds_t.f.cond("Z"), ds_t.f.cond("A")
+                    x0      = 716.4 * A / (Z * (Z + 1) * (287.0 / Z.sqrt()).log())
+                    t       = ds_t.f.cond("Size") * ds_t.f.cond("Density") / x0
+                    x       = torch.cat((ds_t.f.in_cc[..., 0], species,
+                                         t.log().unsqueeze(-1)), dim=-1)
                     s       = self.base_head(x).exp()
                     if learn:
                         z   = 2 ** 0.5 * torch.erfinv(torch.linspace(
