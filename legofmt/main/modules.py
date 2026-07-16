@@ -155,13 +155,15 @@ class LEGOLtng(ltng.LightningModule):
         params = list(self.model.parameters())
         if self.rc.base_dist_loss > 0 and self.gen_base.scale_dist == "sm_norm":
             bc = self.rc.config.get("base_conf") or {}
-            self.base_head = nn.Linear(3 + len(self.rc.pdgids_template), 1)
+            self.base_head = nn.Sequential(
+                nn.Linear(3 + len(self.rc.pdgids_template), 16), nn.SiLU(),
+                nn.Linear(16, 1))
             with torch.no_grad():
-                nn.init.xavier_normal_(self.base_head.weight)
-                self.base_head.bias.copy_(torch.tensor(
+                self.base_head[-1].weight.zero_()
+                self.base_head[-1].bias.copy_(torch.tensor(
                     [float(self.gen_base.sm_scale)]).log())
                 hs = bc.get("base_head")
-                if hs is not None and hs["weight"].shape == self.base_head.weight.shape:
+                if hs is not None and hs.keys() == self.base_head.state_dict().keys():
                     self.base_head.load_state_dict(hs)
                     self.base_head.requires_grad_(not bc.get("base_head_frozen", False))
             params += [p for p in self.base_head.parameters() if p.requires_grad]
@@ -255,7 +257,7 @@ class LEGOLtng(ltng.LightningModule):
         noise = None if fwd.all() else self.gen_base.iso(m.shape, data.device)
         if fwd.any():
             if hasattr(self, "base_head"):
-                learn = self.model.training and self.base_head.weight.requires_grad
+                learn = self.model.training and self.base_head[-1].weight.requires_grad
                 with torch.set_grad_enabled(learn):
                     pid     = ds_t.f.in_p[..., 0, -1]
                     idx     = pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)
@@ -497,7 +499,7 @@ class LEGOLtng(ltng.LightningModule):
             full, [len(full) - n_val, n_val], generator=gen,
         )
         if (self.rc.base_pretrain_batches and getattr(self, "_trainer", None)
-                and hasattr(self, "base_head") and self.base_head.weight.requires_grad):
+                and hasattr(self, "base_head") and self.base_head[-1].weight.requires_grad):
             if self.trainer.is_global_zero:
                 dev = self.trainer.strategy.root_device
                 self.base_head.to(dev)
