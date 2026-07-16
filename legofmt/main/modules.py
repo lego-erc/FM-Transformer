@@ -574,13 +574,43 @@ class LEGOLtng(ltng.LightningModule):
         return ds_t, pdgids_idx
 
     @torch.no_grad()
+    def log_likelihood(
+        self,
+        ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]",
+        log_p0,
+        step_size: float = 0.04,
+        method: str = "midpoint",
+    ) -> Tensor:
+
+        ds_t, pdgids_idx = self._prep_solve(ds_t)
+        am = ds_t.am.full.unsqueeze(-1)
+        cc = ds_t.f.model_in.where(am, ds_t.f.in_cc)
+
+        if method == "rk4":
+            def vm(*args, **kwargs):
+                return self.model(*args, **kwargs).clone()
+        else:
+            vm = self.model
+        solver = ODESolver(velocity_model=vm)
+
+        self.model.no_detach = True
+        try:
+            _, log_ll = solver.compute_likelihood(
+                x_1=cc, log_p0=log_p0,
+                mask=ds_t.m.full, attn_mask=ds_t.am.full,
+                pdgids=pdgids_idx, types=self.types_embd,
+                step_size=step_size, method=method,
+            )
+        finally:
+            self.model.no_detach = False
+        return log_ll
+
+    @torch.no_grad()
     def solve(
         self,
         ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]",
         x_init: Tensor | None = None,
         reverse: bool = False,
-        compute_ll: bool = False,
-        log_p0=None,
         split_size: int | None = None,
         step_size: float = 0.04,
         method: str = "midpoint",
@@ -589,23 +619,20 @@ class LEGOLtng(ltng.LightningModule):
     ) -> Tensor:
         """Integrates the ODE from the base prior to particles (or its inverse).
 
-        Wraps :class:`~flow_matching.solver.ODESolver`. With ``compute_ll``
-        it returns the log-likelihood under the flow instead of samples;
-        with ``reverse`` it integrates data->base. Conditioning slots stay
-        pinned to their data value throughout.
+        Wraps :class:`~flow_matching.solver.ODESolver`. With ``reverse`` it
+        integrates data->base. Conditioning slots stay pinned to their data
+        value throughout. For likelihoods use :meth:`log_likelihood`.
 
         Args:
             ds_t: data struct (or ``(f, m, am)`` tuple) carrying the mask.
             x_init: starting features; defaults to the base prior.
             reverse: integrate ``t: 1->0`` instead of ``0->1``.
-            compute_ll: return the log-likelihood rather than samples.
-            log_p0: base log-density for the likelihood path.
             split_size: row-chunk size for bounded memory.
             step_size, method, time_grid: ODE-solver controls.
             return_intermediates: also return every solver step.
 
         Returns:
-            Sampled features, log-likelihood, or the step stack per the flags.
+            Sampled features, or the step stack when ``return_intermediates``.
         """
         ds_t, pdgids_idx = self._prep_solve(ds_t)
         am = ds_t.am.full.unsqueeze(-1)
@@ -620,18 +647,6 @@ class LEGOLtng(ltng.LightningModule):
             vm = self.model
         solver = ODESolver(velocity_model=vm)
         common = dict(step_size=step_size, method=method, types=self.types_embd)
-
-        if compute_ll:
-            self.model.no_detach = True
-            try:
-                _, log_ll = solver.compute_likelihood(
-                    x_1=cc, log_p0=log_p0,
-                    mask=ds_t.m.full, attn_mask=ds_t.am.full,
-                    pdgids=pdgids_idx, **common,
-                )
-            finally:
-                self.model.no_detach = False
-            return log_ll
 
         if x_init is None:
             x_init = self.gen_base_wrapper(ds_t)
