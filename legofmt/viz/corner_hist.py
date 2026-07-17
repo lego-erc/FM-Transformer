@@ -112,7 +112,7 @@ class CornerHist:
             return self.plot_tensors(batch, truth)
 
         if self.anim_intermediates:
-            sols, mask, attn_mask = self.model(batch)
+            sols, _, _ = self.model(batch)
 
             def anim_wrapper_(i):
                 for axis in axes_fig.get_axes():
@@ -136,16 +136,12 @@ class CornerHist:
 
     def plot_tensors(self, sols, truth=None):
         is_8d = sols.shape[-1] == 8
-        if truth is not None:
-            is_8d_truth = truth.shape[-1] == 8
-        else:
-            is_8d_truth = False
+        is_8d_truth = truth is not None and truth.shape[-1] == 8
 
+        truth_e_dep = None
         if truth is not None:
             truth_e_dep = _F(truth).edep if is_8d_truth else truth[:, 1, 0]
             sols = sols[:, :truth.shape[1]]
-        else:
-            truth_e_dep = None
 
         e_dep = _F(sols).edep if is_8d else sols[:, 1, 0]
 
@@ -205,25 +201,17 @@ class CornerHist:
         fig_sup.suptitle(title, fontsize=20)
 
         if cube:
+            fig_t = fig_b = fig
             if corner_:
                 fig_t, fig_b = fig.subfigures(2, 1, height_ratios=[0.5, 0.4])
-                ax_l = fig_b.add_subplot(121, projection="3d")
-                ax_r = fig_b.add_subplot(122, projection="3d")
-                return fig_sup, (
-                    fig,
-                    fig_t,
-                    PlotGeom(figure=fig_b, ax=ax_l),
-                    PlotGeom(figure=fig_b, ax=ax_r),
-                )
-            else:
-                ax_l = fig.add_subplot(121, projection="3d")
-                ax_r = fig.add_subplot(122, projection="3d")
-                return fig_sup, (
-                    fig,
-                    fig,
-                    PlotGeom(figure=fig, ax=ax_l),
-                    PlotGeom(figure=fig, ax=ax_r),
-                )
+            ax_l = fig_b.add_subplot(121, projection="3d")
+            ax_r = fig_b.add_subplot(122, projection="3d")
+            return fig_sup, (
+                fig,
+                fig_t,
+                PlotGeom(figure=fig_b, ax=ax_l),
+                PlotGeom(figure=fig_b, ax=ax_r),
+            )
 
         return fig_sup, fig
 
@@ -243,12 +231,12 @@ class CornerHist:
         ]
         range_ = [(0.0, np.pi), (-np.pi, np.pi)] * 2
 
-        if self.plot_en is not False:
+        if self.plot_en:
             labels += [r"$\hat{E}$"]
             data_en = proj[:, 0:1].clamp(0.0, 1.0)
             range_ += [(-0.2, 1.2)]
             data = np.concatenate([data, data_en.cpu().numpy()], axis=-1)
-        if self.plot_edep is not False:
+        if self.plot_edep:
             labels += [r"$E_\mathrm{dep}$"]
             data_add = data_add.repeat_interleave((data.shape[0] // data_add.shape[0])).unsqueeze(
                 -1
