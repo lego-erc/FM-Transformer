@@ -2,7 +2,6 @@ import torch
 
 
 class GeomTrafos:
-    """Utility geometry and coordinate transformations."""
 
     def _batched(self, coords, c_dims, f_name):
         out = getattr(self, f_name)(coords.unfold(-1, c_dims, c_dims))

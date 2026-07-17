@@ -25,8 +25,6 @@ class EnergyProjections:
         return dir_ * norm
 
     def to_mev(self, e_model: Tensor, e_in: Tensor) -> Tensor:
-        """Converts the log-scale model space energy back to MeV scale.
-        Assumes the model space energy to lie between 0 and 1."""
         s_out = (1 - e_model.clamp(0.0, 1.0)) * e_in.clamp(0.0, 1.0)
         return self.cutoff * (self.max_energy / self.cutoff) ** s_out
 

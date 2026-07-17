@@ -67,15 +67,7 @@ class MultLoader(torch.utils.data.Dataset):
 
 
 class InvModel(nn.Module):
-    """Inverse-direction predictor: outgoing shower (set) -> incoming PID.
-
-    A bidirectional :class:`x_transformers.Encoder` over the (padded,
-    order-invariant) set of outgoing particles plus a prepended CLS/query
-    token; the query position's output is projected to logits over the
-    incoming-particle vocabulary. The scalar deposited energy conditions the
-    adaptive norms. Fully self-contained -- it shares NO parameters with the
-    count model, so co-training cannot corrupt the count task.
-    """
+    """Inverse-direction predictor: outgoing shower (set) -> incoming PID."""
 
     def __init__(self, rc):
         super().__init__()

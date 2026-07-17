@@ -31,24 +31,7 @@ class GetLEGOData:
         self,
         data: dict,
         n_events: (int | None) = None,
-    ) -> tuple[Tensor, Tensor, Tensor, torch.distributions.Categorical]:
-        """Load a dataset from the given path and preprocesses it to give particles above an energy threshold.
-
-        Parameters
-        ----------
-        path : str
-            The path to the dataset.
-
-        Returns
-        -------
-        dataset : Tensor
-            The preprocessed dataset with shape (bs, particles, features).
-        mask : Tensor
-            Inference type mask for the particles, 1 is RV to be flown, 0 is condition.
-        attn_mask : Tensor
-            Attention mask for the transformer.
-
-        """
+    ) -> tuple[Tensor, Tensor, Tensor, dict]:
         dataset, data_add = self.dataset_compact(data)
         mask_valid = dataset[..., 1:4].norm(dim=-1) >= self.cutoff_mev
         max_valid = mask_valid.sum(dim=-1).max()

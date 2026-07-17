@@ -1,22 +1,3 @@
-r"""Configuration resolution for :class:`~legofmt.main.modules.LEGOLtng`.
-
-This module owns three pieces of construction logic that previously lived
-inline in :meth:`~legofmt.main.modules.LEGOLtng.__init__`:
-
-* Manifold construction (a small registry; replaces ``eval()`` of string
-  manifold specs in both :mod:`legofmt.main.modules` and
-  :mod:`legofmt.data.prep`).
-* Dispatch between the two construction paths -- fresh training (driven by
-  ``meta.json`` on disk) and checkpoint restore (driven by a serialized
-  ``state_dict`` and config).
-* Back-compatibility shims for older checkpoint formats.
-
-The public entry point is :func:`resolve_legoltng_config`. It performs a
-deep copy of its input, so callers may rely on their ``full_config`` dict
-being untouched after the call. The returned :class:`ResolvedLEGOConfig`
-exposes :attr:`~ResolvedLEGOConfig.serializable`, a snapshot of the
-post-resolution config suitable for :func:`torch.save`.
-"""
 from __future__ import annotations
 
 import copy
@@ -33,14 +14,12 @@ from ..data.struct import set_layout
 
 from legofmt.geometry.path_sample_mult import ProductManifold
 
-# Registry of factor manifolds available to the structured spec form.
 _MANIFOLDS: dict[str, type] = {
     "euclidean": Euclidean,
     "sphere": Sphere,
 }
 
-# Allow-list for the legacy string-based spec form. The eval namespace is
-# restricted to these names; ``__builtins__`` is cleared at the call site.
+# Restricted eval namespace for the legacy string spec form.
 _MANIFOLD_EVAL_NS: dict[str, Any] = {
     "ProductManifold": ProductManifold,
     "Euclidean": Euclidean,
@@ -49,44 +28,6 @@ _MANIFOLD_EVAL_NS: dict[str, Any] = {
 
 
 def build_manifold(spec: str | list) -> ProductManifold:
-    r"""Constructs a :class:`ProductManifold` from a structured spec.
-
-    Two input forms are accepted for :attr:`spec`:
-
-    * **List of factor dicts** (preferred). Each dict has a ``"name"`` key
-      (looked up case-insensitively in the manifold registry) and a
-      ``"dim"`` key (the factor's ambient dimension passed to
-      :class:`ProductManifold`).
-    * **Legacy string**. A Python expression evaluated in a restricted
-      namespace exposing only :class:`ProductManifold`, :class:`Euclidean`,
-      and :class:`Sphere`. Retained so historical checkpoints continue to
-      load.
-
-    Args:
-        spec (list or str): either a list of ``{"name": str, "dim": int}``
-            factor descriptions, or a legacy Python-expression string of
-            the form ``"ProductManifold([Euclidean(), Sphere()], (3, 3))"``.
-
-    Returns:
-        ProductManifold: the constructed product manifold.
-
-    Raises:
-        ValueError: if :attr:`spec` is neither a list nor a string.
-        KeyError: if a factor's ``"name"`` is not in the manifold registry.
-
-    .. warning::
-        The legacy string form emits :class:`DeprecationWarning`. New
-        configs should use the list form.
-
-    Example::
-
-        >>> m = build_manifold([
-        ...     {"name": "euclidean", "dim": 3},
-        ...     {"name": "sphere",    "dim": 3},
-        ... ])
-        >>> m.ambient_dims
-        (3, 3)
-    """
     if isinstance(spec, str):
         warnings.warn(
             "String manifold specs are deprecated; use a list of factor dicts "
@@ -106,75 +47,6 @@ def build_manifold(spec: str | list) -> ProductManifold:
 
 @dataclass(frozen=True)
 class ResolvedLEGOConfig:
-    r"""Fully-resolved configuration consumed by :class:`LEGOLtng`.
-
-    Every attribute :meth:`LEGOLtng.__init__` sets on the module is derived
-    from one of the fields below. The class is frozen; callers must not
-    mutate it after construction. Build via :func:`resolve_legoltng_config`.
-
-    Attributes:
-        max_seq_l (int): maximum sequence length, including conditioning slots.
-        pdgids_template (Tensor): sorted ``int64`` tensor of known PDG ids;
-            registered as a buffer by :class:`LEGOLtng`.
-        manifold (ProductManifold): product manifold over momentum and
-            position factors.
-        model_args (dict): keyword arguments to splat into
-            :class:`~legofmt.cfm.cfm_trafo_x.CFMTrafo_x`.
-        t_dist (str): name of the time-sampling distribution
-            (e.g. ``"uniform"``, ``"sd3"``, ``"sd3_grid"``).
-        t_dist_scale (float): scale parameter for the time distribution.
-        ot_coupling (bool): if ``True``, use optimal-transport coupling
-            for the forward base during training. Requires
-            ``torch_lap_cuda_lib`` to be importable; :class:`LEGOLtng`
-            validates this at fit start.
-        ot_e_only (bool): if ``True``, the LAP cost uses pairwise energy
-            differences rather than 6-D ``cdist``. Gives strict
-            energy-ordered pairing. Ignored when :attr:`ot_coupling` is
-            ``False``.
-        pdgid_is_idx (bool): if ``True``, treat the PDG-id field of inputs
-            as an integer index rather than a raw PDG id.
-        loss_sc_fac (float): scalar multiplier for the auxiliary loss term.
-        one_step_euler_fac (float): weight of the one-step-Euler self-consistency
-            term. ``> 0`` enables the straight-path distillation: a dyadic ladder
-            of expmap steps trains the single velocity field so that one full step
-            matches two chained half steps, making one Euler step (``t=0->1``)
-            solve at inference. ``0`` (default) is the plain velocity model.
-        one_step_euler_sections (int): ``K`` -- number of dyadic step-size
-            levels for the consistency ladder; the queried step is drawn from
-            ``{1, 1/2, ..., 2**-(K-1)}``. The ladder grounds every rung in the
-            FM field (the instantaneous, zero-length step); too few levels leaves
-            the intermediate steps unanchored and the term diverges. Default ``8``.
-        cond_cube (bool): if ``True``, project the conditioning position
-            onto the cube before each forward pass.
-        canon_sym (bool): if ``True``, canonicalize forward events by the
-            cube-symmetry rotation that maps the incoming face to ``+x``
-            (:class:`~legofmt.geometry.symmetry_projections.CubeSymmetry`),
-            un-rotating generated outputs. Off by default (no-op).
-        mask_conf (dict): training-mask mixture; ``p_forward`` is the
-            probability of keeping the dataset's forward mask, otherwise the
-            event trains on the inverse (complement) mask. Empty keeps the
-            dataset mask (forward-only, the default).
-        max_energy (float): maximum particle energy (MeV) the model was
-            trained on; the upper bound of the energy normalisation.
-        cutoff_mev (float): low-energy cutoff (MeV); the lower bound of the
-            energy normalisation. Together with :attr:`max_energy` it maps
-            physical ``|p|`` to and from the bounded ``[0, 1]`` energy scalar.
-        dl_conf (dict): dataloader sub-config, passed through to the
-            dataset constructor.
-        opt_conf (dict): optimizer sub-config, consumed by
-            :func:`~legofmt.mod_comps.optimizers.build_optimizer`.
-        odeint_conf (dict): ODE-solver sub-config used during sampling.
-        val_conf (dict): validation sub-config consumed by
-            :meth:`LEGOLtng.setup` (held-out split ``val_frac`` and ``seed``).
-        config (dict): snapshot of the post-resolution inner config
-            (including any field migrations applied during resolution).
-            Handed to :class:`~legofmt.geometry.gen_base.GenerateBase`
-            (which expects a dict rather than a structured object) and
-            safe to :func:`torch.save` for later round-trip via
-            :func:`resolve_legoltng_config`.
-        state_dict (dict or None): ``None`` for fresh training; otherwise
-            the model state dict to load into ``LEGOLtng.model.vf``.
-    """
 
     max_seq_l: int
     pdgids_template: torch.Tensor
@@ -212,40 +84,6 @@ class ResolvedLEGOConfig:
 
 
 def resolve_legoltng_config(full_config: dict) -> ResolvedLEGOConfig:
-    r"""Resolves a raw :class:`LEGOLtng` config into a typed form.
-
-    Dispatches on the presence of a ``"state_dict"`` key in
-    :attr:`full_config`:
-
-    * If absent, the **fresh-training** path runs. It reads ``meta.json``
-      from the dataset directory referenced by
-      ``full_config["dl_conf"]["lds_args"]["data"]`` and populates
-      ``npdgids``, ``max_seq_l``, and ``pdgids`` on the resolved copy.
-    * If present, the **checkpoint-restore** path runs. It reads those
-      fields back from ``full_config["config"]`` and applies any field
-      migrations required by older checkpoint formats.
-
-    Args:
-        full_config (dict): either a flat dict (fresh-training form, no
-            ``"state_dict"`` key) or a checkpoint dict of the shape
-            ``{"state_dict": ..., "config": {...}}``.
-
-    Returns:
-        ResolvedLEGOConfig: the fully-resolved configuration.
-
-    Raises:
-        ValueError: if the fresh-training path receives a ``.pt`` file
-            where it expected a dataset directory, or if the manifold spec
-            cannot be parsed.
-        FileNotFoundError: if the fresh-training path cannot locate
-            ``meta.json`` under the configured dataset directory.
-        KeyError: if a required config key is missing.
-
-    .. note::
-        :attr:`full_config` is deep-copied up front and is not mutated by
-        this function. The mutated copy is exposed on the returned
-        :class:`ResolvedLEGOConfig` as :attr:`~ResolvedLEGOConfig.config`.
-    """
     full = copy.deepcopy(full_config)
     state_dict = full.get("state_dict")
     config = full.get("config", full)
@@ -256,27 +94,6 @@ def resolve_legoltng_config(full_config: dict) -> ResolvedLEGOConfig:
 
 
 def _resolve_fresh(config: dict) -> ResolvedLEGOConfig:
-    r"""Resolves a fresh-training config by reading dataset metadata.
-
-    Reads ``meta.json`` under the dataset directory and writes the derived
-    ``npdgids``, ``max_seq_l``, ``ntypes``, ``pdgids``, and ``data_path``
-    onto the local config copy. Existing values for ``max_seq_l`` and
-    ``ntypes`` are preserved (``setdefault`` semantics).
-
-    Args:
-        config (dict): the deep-copied inner config dict produced by
-            :func:`resolve_legoltng_config`.
-
-    Returns:
-        ResolvedLEGOConfig: the resolved config with
-            :attr:`~ResolvedLEGOConfig.state_dict` set to ``None``.
-
-    Raises:
-        ValueError: if ``dl_conf.lds_args.data`` points at a ``.pt`` file
-            rather than a directory containing ``meta.json``.
-        FileNotFoundError: if ``meta.json`` does not exist under the
-            dataset directory.
-    """
     model_conf = config["model_conf"]
     model_args = model_conf["model_args"]
     dpath = config["dl_conf"]["lds_args"]["data"]
@@ -331,24 +148,6 @@ def _resolve_fresh(config: dict) -> ResolvedLEGOConfig:
 
 
 def _resolve_from_checkpoint(config: dict, state_dict: dict) -> ResolvedLEGOConfig:
-    r"""Resolves a config loaded from a saved checkpoint.
-
-    Reads ``max_seq_l`` and ``pdgids`` from the serialized config and
-    applies any field migrations required by older checkpoint formats
-    (see :func:`_apply_legacy_projection_in_out` and the
-    ``ntokens`` -> ``max_seq_l`` rename below).
-
-    Args:
-        config (dict): the deep-copied inner config dict produced by
-            :func:`resolve_legoltng_config`.
-        state_dict (dict): the model state dict from the checkpoint. Used
-            both to detect legacy layouts and to be loaded into
-            ``LEGOLtng.model.vf`` after construction.
-
-    Returns:
-        ResolvedLEGOConfig: the resolved config with
-            :attr:`~ResolvedLEGOConfig.state_dict` populated.
-    """
     model_conf = config["model_conf"]
     model_args = model_conf["model_args"]
 
@@ -372,22 +171,8 @@ def _resolve_from_checkpoint(config: dict, state_dict: dict) -> ResolvedLEGOConf
 
 
 def _apply_legacy_projection_in_out(model_args: dict, state_dict: dict) -> None:
-    r"""Re-enables ``project_in`` / ``project_out`` layers for legacy checkpoints.
-
-    Older checkpoints were saved with ``vf.project_in.*`` and
-    ``vf.project_out.*`` linear layers in the state dict. The current
-    :class:`~legofmt.cfm.cfm_trafo_x.CFMTrafo_x` only constructs those
-    layers when its :attr:`dim_in_out` argument is non-``None``. When such
-    keys are detected in the incoming :attr:`state_dict`, this function
-    forces ``model_args["dim_in_out"] = model_args["h_dim"]`` so that
-    :class:`CFMTrafo_x` rebuilds matching layers and the subsequent
-    :meth:`~torch.nn.Module.load_state_dict` succeeds.
-
-    Args:
-        model_args (dict): the ``model_args`` sub-dict on the local config
-            copy. Modified in place if legacy keys are detected.
-        state_dict (dict): the model state dict from the checkpoint.
-    """
+    # Legacy checkpoints carry vf.project_in/out linears; rebuild them by
+    # setting dim_in_out so load_state_dict finds matching layers.
     if any(k.startswith("vf.project_in.") for k in state_dict):
         model_args["dim_in_out"] = model_args["h_dim"]
 
@@ -400,27 +185,6 @@ def _build_resolved(
     pdgids: torch.Tensor,
     state_dict: dict | None,
 ) -> ResolvedLEGOConfig:
-    r"""Assembles a :class:`ResolvedLEGOConfig` from the resolved inputs.
-
-    Pulled out of the two path-specific resolvers so the field mapping
-    lives in one place. Applies default values for all optional
-    ``model_conf`` keys via :meth:`dict.get` so the defaulting policy is
-    consistent across construction paths.
-
-    Args:
-        config (dict): the (mutated) local inner config dict.
-        model_conf (dict): ``config["model_conf"]``, passed explicitly to
-            avoid re-indexing.
-        model_args (dict): ``config["model_conf"]["model_args"]``, ditto.
-        max_seq_l (int): maximum sequence length.
-        pdgids (Tensor): sorted ``int64`` tensor of known PDG ids.
-        state_dict (dict or None): the state dict for checkpoint restore,
-            or ``None`` for fresh training.
-
-    Returns:
-        ResolvedLEGOConfig: the assembled, frozen configuration.
-    """
-    one_step_euler_fac = model_conf.get("one_step_euler_fac", 0.0)
     cond_scalars = tuple(model_conf.get("cond_scalars", ("Density",)))
     n_prefix = len(cond_scalars) + 1  # + edep slot (generated)
     set_layout(cond_scalars)
@@ -458,67 +222,6 @@ def _build_resolved(
 
 @dataclass(frozen=True)
 class ResolvedMultConfig:
-    r"""Fully-resolved configuration consumed by
-    :class:`~legofmt.multiplicity.model.MultModel`.
-
-    Mirrors :class:`ResolvedLEGOConfig` for the multiplicity transformer.
-    Built via :func:`resolve_mult_config`.
-
-    Attributes:
-        max_seq_len (int): number of output-particle prediction positions
-            (``= ptypes.shape[0]``).
-        max_particles (int): per-position vocabulary size (max count + 1).
-        n_ptypes_in (int): number of distinct incoming-particle PDG ids.
-        ptypes (Tensor): int64 sorted tensor of outgoing PDG ids; registered
-            as a buffer on :class:`MultModel`.
-        ptypes_in (Tensor): int64 sorted tensor of incoming PDG ids;
-            registered as a buffer on :class:`MultModel`.
-        h_dim (int): transformer hidden dim.
-        in_dim (int): input feature dim (depends on ``use_density``).
-        n_layers (int): transformer depth.
-        n_heads (int): attention heads.
-        dropout (float): attn / ff / emb dropout. ``layer_dropout`` is
-            intentionally NOT plumbed through (stochastic depth breaks
-            DDP's reducer when ``find_unused_parameters=False``).
-        use_abs_pos_emb (bool): forwarded to
-            :class:`x_transformers.ContinuousTransformerWrapper`.
-        post_emb_norm (bool): forwarded to
-            :class:`x_transformers.ContinuousTransformerWrapper`.
-        pos_scale (float): scale applied to the position triplet inside
-            :meth:`MultModel.proj_in`.
-        canon_sym (bool): if ``True``, canonicalize the incoming particle by
-            the cube-symmetry rotation that maps its face to ``+x`` inside
-            :meth:`MultModel.proj_in` (counts are rotation-invariant, so
-            there is no output to un-rotate). Off by default (no-op).
-        model_args (dict): keyword arguments splatted into the count
-            model's :class:`x_transformers.Decoder`.
-        dl_conf (dict): dataloader sub-config; consumed by
-            :class:`MultLoader` and read for ``num_workers``.
-        mm_conf (dict): multiplicity sub-config snapshot; still consumed
-            by :class:`MultLoader` (``ptypes``, ``ptypes_in``,
-            ``max_out_particles``) and read for ``bs``.
-        opt_conf (dict or None): optimizer sub-config. Looked up at
-            top-level ``config["opt_conf"]`` first (matches
-            :class:`ResolvedLEGOConfig`'s convention), then
-            ``mm_conf["opt_conf"]`` for back-compat with existing
-            multiplicity checkpoints.
-        config (dict): snapshot of the post-resolution outer config;
-            handed to :class:`MultLoader` and safe to :func:`torch.save`
-            for round-trip via :func:`resolve_mult_config`.
-        state_dict (dict or None): ``None`` for fresh training; otherwise
-            the module state dict to load into :class:`MultModel`.
-        train_inverse (bool): when ``True``, :class:`MultModel` also builds
-            and co-trains a separate inverse-PID model
-            (:class:`~legofmt.multiplicity.model.InvModel`). Baked into the
-            saved config so inference reconstruction rebuilds it.
-        inv_model_args (dict): keyword arguments splatted into the inverse
-            model's :class:`x_transformers.Encoder` (defaults to
-            ``model_args``).
-        inv_h_dim (int): inverse-model hidden dim (defaults to ``h_dim``).
-        inv_n_layers (int): inverse-model depth (defaults to ``n_layers``).
-        inv_n_heads (int): inverse-model attention heads (defaults to
-            ``n_heads``).
-    """
 
     max_seq_len: int
     max_particles: int
@@ -552,25 +255,6 @@ class ResolvedMultConfig:
 
 
 def resolve_mult_config(full_config: dict) -> ResolvedMultConfig:
-    r"""Resolves a raw :class:`MultModel` config into a typed form.
-
-    Same dispatch shape as :func:`resolve_legoltng_config`: presence of a
-    top-level ``"state_dict"`` key selects the checkpoint-restore path.
-
-    Args:
-        full_config (dict): either a flat dict (fresh-training form) or a
-            checkpoint dict ``{"state_dict": ..., "config": {...}}``.
-
-    Returns:
-        ResolvedMultConfig: the fully-resolved configuration.
-
-    .. note::
-        Deep-copies :attr:`full_config`; the input is not mutated. The
-        fresh-training path reads ``meta.json`` from the dataset directory
-        AND scans the dataset once to discover ``max_count`` -- the same
-        heavy work the pre-refactor :meth:`MultModel.__init__` did, just
-        localized here.
-    """
     full = copy.deepcopy(full_config)
     state_dict = full.get("state_dict")
     config = full.get("config", full)
@@ -580,14 +264,6 @@ def resolve_mult_config(full_config: dict) -> ResolvedMultConfig:
 
 
 def _resolve_fresh_mult(config: dict) -> ResolvedMultConfig:
-    r"""Resolves a fresh-training mult config by reading dataset metadata.
-
-    Reads ``meta.json`` for ``ptypes`` / ``ptypes_in`` / ``max_out_particles``
-    and (only if ``max_count`` is absent) instantiates a one-shot
-    :class:`MultLoader` to discover the empirical max count. All discovered
-    values are written back onto the local ``mm_conf`` copy so the saved
-    config round-trips cleanly through :func:`_resolve_from_checkpoint_mult`.
-    """
     from legofmt.multiplicity.model import MultLoader
 
     mm_conf = config.setdefault("mm_conf", {})
@@ -621,14 +297,6 @@ def _resolve_fresh_mult(config: dict) -> ResolvedMultConfig:
 def _resolve_from_checkpoint_mult(
     config: dict, state_dict: dict
 ) -> ResolvedMultConfig:
-    r"""Resolves a mult config loaded from a saved checkpoint.
-
-    Reads ``max_count`` / ``ptypes`` / ``ptypes_in`` from the saved
-    ``mm_conf``. Falls back to ``max_out_particles`` for ``max_count`` to
-    match the pre-refactor :meth:`MultModel.__init__` behavior. Also
-    migrates pre-fusion head layouts via
-    :func:`_migrate_legacy_mult_heads`.
-    """
     mm_conf = config.setdefault("mm_conf", {})
     dl_conf = config.setdefault("dl_conf", {})
     mm_conf.setdefault("max_count", mm_conf.get("max_out_particles"))
@@ -649,30 +317,8 @@ def _resolve_from_checkpoint_mult(
 def _migrate_legacy_mult_heads(
     state_dict: dict, max_seq_len: int, max_particles: int
 ) -> dict:
-    r"""Remaps a pre-fusion :class:`MultModel` state_dict to the fused layout.
-
-    Pre-fusion checkpoints stored ``embd_in_`` as a :class:`ModuleList` of
-    ``max_seq_len - 1`` separate :class:`~torch.nn.Embedding` tables, and
-    ``proj_out_`` as a :class:`ModuleList` of ``max_seq_len`` separate
-    :class:`~torch.nn.Linear` layers. The fused layout uses a single
-    embedding table of ``(max_seq_len - 1) * max_particles`` rows plus two
-    stacked parameters ``proj_out_w`` (shape ``(L, H, P)``) and
-    ``proj_out_b`` (shape ``(L, P)``).
-
-    Migration is detected by the presence of any ``proj_out_.{i}.weight``
-    or ``embd_in_.{i}.weight`` key. If detected, the legacy keys are
-    removed and replaced with the fused equivalents. The original dict is
-    not mutated -- a new dict is returned.
-
-    Args:
-        state_dict (dict): the raw state dict from disk.
-        max_seq_len (int): ``L`` (= ``ptypes.shape[0]``).
-        max_particles (int): ``P`` (= ``mm_conf["max_count"]``).
-
-    Returns:
-        dict: the migrated state dict (or the input unchanged if no legacy
-        keys were found).
-    """
+    # Pre-fusion checkpoints stored per-position ModuleLists (embd_in_.{i},
+    # proj_out_.{i}); remap them onto the fused single-table layout.
     has_legacy_proj = "proj_out_.0.weight" in state_dict
     has_legacy_embd = "embd_in_.0.weight" in state_dict
     if not (has_legacy_proj or has_legacy_embd):
@@ -704,13 +350,6 @@ def _build_resolved_mult(
     dl_conf: dict,
     state_dict: dict | None,
 ) -> ResolvedMultConfig:
-    r"""Assembles a :class:`ResolvedMultConfig` from the resolved inputs.
-
-    All defaulting policy for optional ``mm_conf`` keys lives here, so the
-    two construction paths agree on defaults. ``opt_conf`` is read from
-    top-level ``config["opt_conf"]`` first (matching the LEGOLtng
-    convention), then ``mm_conf["opt_conf"]`` for back-compat.
-    """
     ptypes = mm_conf["ptypes"]
     ptypes_in = mm_conf["ptypes_in"]
     if not torch.is_tensor(ptypes):
