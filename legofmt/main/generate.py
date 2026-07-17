@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import torch
 import torch.nn.functional as F
 
@@ -16,7 +18,7 @@ class GenerateOut(torch.nn.Module):
         super().__init__()
         flow_conf = torch.load(flow_conf_path, map_location=device, weights_only=False)
         self.model = self.flow_cls(flow_conf).to(device)
-        object.__setattr__(self.model.rc, "pdgid_is_idx", True)
+        self.model.rc = replace(self.model.rc, pdgid_is_idx=True)
         self.cond_names = tuple(self.model.rc.cond_scalars)
         self.n_prefix = self.model.rc.n_prefix
         self.n_cond = len(self.cond_names)  # = n_prefix - 1 (edep excluded)
@@ -62,7 +64,6 @@ class GenerateOut(torch.nn.Module):
         Z = Z.to(device) if Z is not None else None
         A = A.to(device) if A is not None else None
 
-        # Map conditioning-scalar names to the provided per-event arrays.
         scalar_src = {"Density": density, "Z": Z, "A": A, "Size": size}
         missing = [k for k in self.cond_names if scalar_src.get(k) is None]
         if missing:
@@ -85,26 +86,20 @@ class GenerateOut(torch.nn.Module):
             )
 
         mom = F.normalize(mom, dim=-1)
-        all_B = all(s == B for s in shapes.values())
 
         def _scalar_col(x):
-            x = x.reshape(-1, 1)
-            return x.repeat_interleave(n, 0) if all_B else x.expand(B, 1).repeat_interleave(n, 0)
+            return x.reshape(-1, 1).expand(B, 1).repeat_interleave(n, 0)
 
-        if all_B:
-            cc = torch.cat((mom.view(-1, 3) * energy.view(-1, 1), pos.view(-1, 3)), dim=-1)
-            cc = cc.repeat_interleave(n, dim=0)
-        else:
-            e = energy.view(-1, 1).expand(B, 1)
-            mom_b = mom.view(-1, 3).expand(B, 3)
-            pos_b = pos.view(-1, 3).expand(B, 3)
-            cc = torch.cat((mom_b * e, pos_b), dim=-1).repeat_interleave(n, dim=0)
+        e = energy.view(-1, 1).expand(B, 1)
+        mom_b = mom.view(-1, 3).expand(B, 3)
+        pos_b = pos.view(-1, 3).expand(B, 3)
+        cc = torch.cat((mom_b * e, pos_b), dim=-1).repeat_interleave(n, dim=0)
 
         conds_b = torch.cat([_scalar_col(scalar_src[k]) for k in self.cond_names], dim=-1)
         pdgids_b = _scalar_col(pdgids).to(cc.dtype)
         cond = torch.cat((conds_b, cc, pdgids_b), dim=-1)
 
-        sols, _, _ = self.proj_ray_pass_to_model(cond, prepped=False)
+        sols, _, _ = self(cond)
         s = _F(sols)
         per_event = {"E_dep": s.edep}
         per_event.update({k: s.cond(k) for k in self.cond_names})
@@ -131,22 +126,23 @@ class GenerateOut(torch.nn.Module):
         mult.scatter_add_(-1, dist, valid)
 
         idx = torch.arange(max_particles, device=mult.device)
-        attn_mask = idx < mult.sum(-1, keepdim=True)
-        pdgid_pad = torch.zeros_like(attn_mask, dtype=torch.long)
+        occupied = idx < mult.sum(-1, keepdim=True)
+        pdgid_pad = torch.zeros_like(occupied, dtype=torch.long)
         cumsum_idx = mult.cumsum(-1)[..., :-1].clamp(max=max_particles - 1)
         pdgid_pad.scatter_add_(-1, cumsum_idx, torch.ones_like(pdgid_pad)).cumsum_(-1)
+
         conds = cond[:, :self.n_cond]          # per-event conditioning scalars
-        token = cond[:, self.n_cond:]          # [e, dir(3), pos(3), pdgid] (8 cols)
-        token[..., -1] = torch.searchsorted(self.pdgids, pdgid_in) + 1
-        token = token[:, None, :]
-        cond_pad_r = token.repeat(1, self.max_seq_l - (self.n_prefix + 1), 1)
-        cond_pad_r[..., -1] = attn_mask * (pdgid_pad + 1)
+        in_tok = cond[:, self.n_cond:]         # [e, dir(3), pos(3), pdgid] (8 cols)
+        in_tok[..., -1] = torch.searchsorted(self.pdgids, pdgid_in) + 1
+        in_tok = in_tok[:, None, :]
+        out_tok = in_tok.repeat(1, max_particles, 1)
+        out_tok[..., -1] = occupied * (pdgid_pad + 1)
         cond_fm = torch.cat(
-            (torch.zeros_like(token).expand(-1, self.n_prefix, -1), token, cond_pad_r), dim=1
+            (torch.zeros_like(in_tok).expand(-1, self.n_prefix, -1), in_tok, out_tok), dim=1
         )
 
         attn_mask = torch.cat(
-            (torch.ones_like(attn_mask[:, :1]).repeat(1, self.n_prefix + 1), attn_mask), dim=1
+            (torch.ones_like(occupied[:, :1]).repeat(1, self.n_prefix + 1), occupied), dim=1
         )
         mask = attn_mask.clone().long()
         cond_idx = [0, *range(2, self.n_prefix), self.n_prefix]  # cond scalars + incoming; edep stays 1
