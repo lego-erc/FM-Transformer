@@ -131,19 +131,13 @@ def _resolve_fresh(config: dict) -> ResolvedLEGOConfig:
     model_args["npdgids"] = pdgids.shape[0] + 1
     model_args.setdefault("max_seq_l", max_seq_l)
     model_conf.setdefault("cond_scalars", tuple(meta.get("cond_scalars", ("Density",))))
-    _n_prefix = len(model_conf["cond_scalars"]) + 1
-    model_args.setdefault("ntypes", _n_prefix + 2)
+    model_args.setdefault("ntypes", len(model_conf["cond_scalars"]) + 3)
     # ``pdgids`` lives at model_conf scope (one level above model_args) so
     # it is preserved by the manual torch.save round-trip in scripts/train.py.
     model_conf["pdgids"] = pdgids
 
     return _build_resolved(
-        config,
-        model_conf,
-        model_args,
-        max_seq_l,
-        pdgids,
-        state_dict=None,
+        config, model_conf, model_args, max_seq_l, pdgids, state_dict=None,
     )
 
 
@@ -151,21 +145,15 @@ def _resolve_from_checkpoint(config: dict, state_dict: dict) -> ResolvedLEGOConf
     model_conf = config["model_conf"]
     model_args = model_conf["model_args"]
 
-    # Legacy field rename: pre-refactor checkpoints used "ntokens" for what
-    # is now called "max_seq_l".
+    # Legacy field rename: pre-refactor checkpoints used "ntokens".
     if "ntokens" in model_args:
         model_args["max_seq_l"] = model_args.pop("ntokens")
 
     _apply_legacy_projection_in_out(model_args, state_dict)
 
-    max_seq_l = model_args["max_seq_l"]
-    pdgids = model_conf["pdgids"]
     return _build_resolved(
-        config,
-        model_conf,
-        model_args,
-        max_seq_l,
-        pdgids,
+        config, model_conf, model_args,
+        model_args["max_seq_l"], model_conf["pdgids"],
         state_dict=state_dict,
     )
 
@@ -193,7 +181,7 @@ def _build_resolved(
         pdgids_template=pdgids.contiguous(),
         manifold=build_manifold(model_conf["manifold"]),
         model_args=model_args,
-        t_dist=model_conf.get("t_dist", "uniform"),
+        t_dist=model_conf.get("t_dist", "sd3"),
         t_dist_scale=model_conf.get("t_dist_scale", 1.4),
         ot_coupling=model_conf.get("ot_coupling", False),
         ot_e_only=model_conf.get("ot_e_only", False),
@@ -202,7 +190,7 @@ def _build_resolved(
         base_pretrain_bs=model_conf.get("base_pretrain_bs"),
         pdgid_is_idx=model_conf.get("pdgid_is_idx", False),
         loss_sc_fac=model_conf.get("loss_sc", 0.0),
-        one_step_euler_fac=one_step_euler_fac,
+        one_step_euler_fac=model_conf.get("one_step_euler_fac", 0.0),
         one_step_euler_sections=model_conf.get("one_step_euler_sections", 8),
         cond_cube=model_conf.get("cond_cube", False),
         canon_sym=model_conf.get("canon_sym", False),
@@ -233,7 +221,7 @@ class ResolvedMultConfig:
     in_dim: int
     n_layers: int
     n_heads: int
-    dropout: float
+    dropout: float  # layer_dropout is deliberately not plumbed through: stochastic depth breaks DDP's reducer
     use_abs_pos_emb: bool
     post_emb_norm: bool
     pos_scale: float
@@ -279,17 +267,11 @@ def _resolve_fresh_mult(config: dict) -> ResolvedMultConfig:
     set_layout(cond_scalars)  # before MultLoader, which reads layout-dependent accessors
     n_prefix = len(cond_scalars) + 1
     mm_conf.setdefault("max_out_particles", meta["ntokens"] - (n_prefix + 1))
-    mm_conf.setdefault(
-        "ptypes", torch.tensor(meta["particles"]).sort().values
-    )
-    mm_conf.setdefault(
-        "ptypes_in", torch.tensor(meta["particles_in"]).sort().values
-    )
+    mm_conf.setdefault("ptypes", torch.tensor(meta["particles"]).sort().values)
+    mm_conf.setdefault("ptypes_in", torch.tensor(meta["particles_in"]).sort().values)
 
     if "max_count" not in mm_conf:
-        _tmp_loader = MultLoader(config)
-        mm_conf["max_count"] = int(_tmp_loader.counts.max().item()) + 1
-        del _tmp_loader
+        mm_conf["max_count"] = int(MultLoader(config).counts.max().item()) + 1
 
     return _build_resolved_mult(config, mm_conf, dl_conf, state_dict=None)
 
@@ -357,9 +339,8 @@ def _build_resolved_mult(
     if not torch.is_tensor(ptypes_in):
         ptypes_in = torch.tensor(ptypes_in)
 
-    _cond_scalars = tuple(mm_conf.get("cond_scalars", ("Density",)))
-    set_layout(_cond_scalars)
-    in_dim = len(_cond_scalars) + 7
+    cond_scalars = tuple(mm_conf.get("cond_scalars", ("Density",)))
+    set_layout(cond_scalars)
 
     return ResolvedMultConfig(
         max_seq_len=ptypes.shape[0],
@@ -368,7 +349,7 @@ def _build_resolved_mult(
         ptypes=ptypes.contiguous(),
         ptypes_in=ptypes_in.contiguous(),
         h_dim=mm_conf.get("h_dim", 512),
-        in_dim=in_dim,
+        in_dim=len(cond_scalars) + 7,
         n_layers=mm_conf.get("n_layers", 6),
         n_heads=mm_conf.get("n_heads", 8),
         dropout=mm_conf.get("dropout", 0.1),
@@ -379,7 +360,7 @@ def _build_resolved_mult(
         model_args=mm_conf.get("model_args", {}),
         dl_conf=dl_conf,
         mm_conf=mm_conf,
-        opt_conf=config.get("opt_conf", mm_conf.get("opt_conf")),
+        opt_conf=config.get("opt_conf", mm_conf.get("opt_conf")),  # top-level first, mm_conf for back-compat
         config=config,
         state_dict=state_dict,
         train_inverse=mm_conf.get("train_inverse", False),
