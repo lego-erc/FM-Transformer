@@ -16,12 +16,10 @@ from legofmt.mod_comps.optimizers import build_optimizer, schedulefree_adamw
 
 
 class MultLoader(torch.utils.data.Dataset):
-    def __init__(self, config: dict, device: str = "cpu", path: str = None):
+    def __init__(self, config: dict, device: str = "cpu"):
         self.device = device
         mm_conf = config.get("mm_conf")
         lds_conf = config.get("dl_conf").get("lds_args").copy()
-        if path is not None:
-            lds_conf["path"] = path
         max_particles = mm_conf.get("max_out_particles")
         ptypes = mm_conf.get("ptypes", torch.tensor([11, 22]))
         ptypes_in = mm_conf.get("ptypes_in", torch.tensor([11, 22]))
