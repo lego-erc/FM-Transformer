@@ -97,7 +97,7 @@ trainer = ltng.Trainer(
 )
 
 train_model = run["train_model"]
-compile_mode = run["compile"]  # false | model | forward_fused
+compile_mode = run["compile"]  # false | model
 if train_model == "fm":
     model = LEGOLtng(config)
 else:
@@ -112,12 +112,8 @@ if resume_from:
 
 if train_model == "fm" and compile_mode == "model":
     model.model = torch.compile(model.model, dynamic=False)
-elif train_model == "fm" and compile_mode == "forward_fused":
-    model.model.forward_fused = torch.compile(model.model.forward_fused, dynamic=False)
 
-trainer.fit(
-    model=model
-)
+trainer.fit(model=model)
 
 model.rc.config["dl_conf"]["lds_args"]["data"] = "<dataset_path>"
 model.rc.config["dl_conf"]["data_path"] = None
