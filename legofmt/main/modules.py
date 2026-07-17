@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import torch
 from torch import Tensor, nn
 from torch.utils.data import (
@@ -43,7 +45,6 @@ class ProjectModel(nn.Module):
         super().__init__()
         self.vf          = vf
         self.manifold    = manifold
-        self.kwargs      = kwargs
         self.geom_trafos = GeomTrafos()
         self.cond_cube   = kwargs.get("cond_cube", False)
         self.no_detach   = kwargs.get("no_detach", False)
@@ -52,15 +53,12 @@ class ProjectModel(nn.Module):
         x_proj = self.manifold.projx(x)
         x_att  = torch.where(attn_mask.unsqueeze(-1), x_proj, x)
         if not self.no_detach:
-            x_attended.detach_()
+            x_att.detach_()
         if self.cond_cube:
-            x_surr = x_attended.clone()
-            in_p = _F(x_surr).in_p
-            in_p_c = self.geom_trafos.to_cube(in_p)  # Dataclass attr overwrite
-            in_p.copy_(in_p_c)
-        else:
-            x_surr = x_attended
-        return x_proj_full, x_attended, x_surr
+            x_att = x_att.clone()
+            in_p  = _F(x_att).in_p
+            in_p.copy_(self.geom_trafos.to_cube(in_p))
+        return x_proj, x_att
 
     def forward(
         self,
@@ -94,6 +92,8 @@ class LEGOLtng(ltng.LightningModule):
         self.gen_base    = GenerateBase(self.rc.config)
         self.sym         = CubeSymmetry() if self.rc.canon_sym else None
         self.val_metrics = ShowerValMetrics()
+        self.loss_fn     = nn.MSELoss()
+        self.ps          = ProductPathSampler(self.rc.manifold)
 
         self._base_dist_loss = None
         params = list(self.model.parameters())
@@ -112,15 +112,12 @@ class LEGOLtng(ltng.LightningModule):
                     self.base_head.requires_grad_(not bc.get("base_head_frozen", False))
             params += [p for p in self.base_head.parameters() if p.requires_grad]
         self.opt, self._lr_sched = build_optimizer(params, self.rc.opt_conf)
-        self._opt_is_sf = hasattr(self.opt, "train") and callable(
-            getattr(self.opt, "train", None),
-        )
+        self._opt_is_sf = callable(getattr(self.opt, "train", None))
 
         if self.rc.state_dict is not None:
             self.model.vf.load_state_dict(self.rc.state_dict, strict=False)
 
     def _build_model(self, rc) -> nn.Module:
-        """Constructs the wrapped velocity field; overridden by subclasses."""
         return ProjectModel(
             CFMTrafo_x(**rc.model_args),
             rc.manifold,
@@ -128,12 +125,10 @@ class LEGOLtng(ltng.LightningModule):
         )
 
     def _opt_train(self) -> None:
-        """No-op unless the optimizer has a schedule-free .train() method."""
         if getattr(self, "_opt_is_sf", False):
             self.opt.train()
 
     def _opt_eval(self) -> None:
-        """No-op unless the optimizer has a schedule-free .eval() method."""
         if getattr(self, "_opt_is_sf", False):
             self.opt.eval()
 
@@ -149,8 +144,6 @@ class LEGOLtng(ltng.LightningModule):
     def on_fit_start(self) -> None:
         if self.rc.ot_coupling and slap is None:
             raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
-        self.loss_fn = nn.MSELoss()
-        self.ps      = ProductPathSampler(self.rc.manifold)
         self.model.train()
         self._opt_train()
 
@@ -313,17 +306,17 @@ class LEGOLtng(ltng.LightningModule):
         man = self.model.manifold
 
         with torch.no_grad():
-            i      = torch.randint(1, self.rc.one_step_euler_sections + 1, (base.shape[0], 1), device=base.device)
-            step   = 2.0 ** -(i - 1).to(base.dtype)  # queried step D, (B, 1)
-            half   = step / 2
-            t0     = (torch.rand_like(step) * (1.0 / step).round()).floor() * step  # grid-aligned start
-            x0     = self.ps.sample(base, ds_t.f.model_in, t0.squeeze(-1)).x_t
-            s_half = self.model(x0, t0, **ckw)
-            x_mid  = torch.where(gen, man.expmap(x0, half.unsqueeze(-1) * s_half), x0)
-            s_mid  = self.model(x_mid, t0 + half, **ckw)
-            x_end  = torch.where(gen, man.expmap(x_mid, half.unsqueeze(-1) * s_mid), x0)
-            tgt    = man.logmap(x0, x_end) / step.unsqueeze(-1)
+            i    = torch.randint(1, self.rc.one_step_euler_sections + 1, (base.shape[0], 1), device=base.device)
+            step = 2.0 ** -(i - 1).to(base.dtype)  # queried step D, (B, 1)
+            half = step / 2
+            t0   = (torch.rand_like(step) * (1.0 / step).round()).floor() * step  # grid-aligned start
+            x0   = self.ps.sample(base, ds_t.f.model_in, t0.squeeze(-1)).x_t
         s_pred = self.model(x0, t0, **ckw)
+        with torch.no_grad():
+            x_mid = torch.where(gen, man.expmap(x0, half.unsqueeze(-1) * s_pred), x0)
+            s_mid = self.model(x_mid, t0 + half, **ckw)
+            x_end = torch.where(gen, man.expmap(x_mid, half.unsqueeze(-1) * s_mid), x0)
+            tgt   = man.logmap(x0, x_end) / step.unsqueeze(-1)
         sc = ((s_pred - tgt) ** 2 * g).sum() / (g.sum().clamp(min=1) * s_pred.shape[-1])
         if self.training:
             self.log("loss/one_step_euler", sc.detach(), on_step=True, on_epoch=False, logger=True, sync_dist=False)
@@ -332,6 +325,8 @@ class LEGOLtng(ltng.LightningModule):
     def pretrain_base(self, batches, lr: float = 1e-2) -> float:
         opt          = torch.optim.Adam(self.base_head.parameters(), lr=lr)
         was_training = self.model.training
+        rc           = self.rc
+        self.rc      = replace(rc, ot_coupling=False)
         self.model.train()
         ot = float("nan")
         for ds_t in batches:
@@ -343,14 +338,13 @@ class LEGOLtng(ltng.LightningModule):
             opt.step()
             ot = self._base_dist_loss.item()
         self.model.train(was_training)
+        self.rc = rc
         self.base_head.requires_grad_(False)
         self._base_dist_loss = None
         return ot
 
     def training_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
-        """Lightning training hook; delegates to :meth:`_step`."""
-        loss = self._step(batch, _batch_idx)
-        return loss
+        return self._step(batch, _batch_idx)
 
     @torch.no_grad()
     def validation_step(self, batch: DataStruct, _batch_idx: int | Tensor) -> Tensor:
@@ -394,7 +388,6 @@ class LEGOLtng(ltng.LightningModule):
             self.base_head.requires_grad_(False)
 
     def _make_loader(self, dataset, *, shuffle: bool, bs: int | None = None) -> DataLoader:
-        """Builds a :class:`~torch.utils.data.DataLoader` over ``dataset``."""
         num_workers = self.rc.dl_conf.get("num_workers", 4)
         sampler = (RandomSampler if shuffle else SequentialSampler)(dataset)
         return DataLoader(
@@ -422,9 +415,7 @@ class LEGOLtng(ltng.LightningModule):
             return fn(*tensors)
         if cat_dim is None:
             cat_dim = dim
-        out = []
-        for chunk in zip(*(t.split(split_size, dim) for t in tensors)):
-            out.append(fn(*chunk))
+        out = [fn(*chunk) for chunk in zip(*(t.split(split_size, dim) for t in tensors))]
         return torch.cat(out, dim=cat_dim)
 
     def _prep_solve(
@@ -487,6 +478,17 @@ class LEGOLtng(ltng.LightningModule):
         cc = ds_t.f.model_in.where(am, ds_t.f.in_cc)
         if x_init is not None and x_init.shape == cc.shape:
             x_init = x_init.where(am, _F(x_init).in_p)
+        if x_init is None:
+            x_init = self.gen_base_wrapper(ds_t)
+
+        if time_grid is None:
+            if method in ("euler", "midpoint"):
+                n = max(round(1.0 / step_size), 1)
+                time_grid = torch.linspace(0.0, 1.0, n + 1, device=x_init.device, dtype=x_init.dtype)
+            else:
+                time_grid = x_init.new_tensor([0.0, 1.0])
+            if reverse:
+                time_grid = time_grid.flip(0)
 
         if method == "rk4":
             def vm(*args, **kwargs):
@@ -494,23 +496,6 @@ class LEGOLtng(ltng.LightningModule):
         else:
             vm = self.model
         solver = ODESolver(velocity_model=vm)
-        common = dict(step_size=step_size, method=method, types=self.types_embd)
-
-        if x_init is None:
-            x_init = self.gen_base_wrapper(ds_t)
-
-        explicit_grid = time_grid is not None
-        if time_grid is None:
-            if method == "euler":
-                n = max(round(1.0 / step_size), 1)
-                time_grid = torch.linspace(0.0, 1.0, n + 1, device=x_init.device, dtype=x_init.dtype)
-                if reverse:
-                    time_grid = time_grid.flip(0)
-            else:
-                time_grid = x_init.new_tensor([1.0, 0.0] if reverse else [0.0, 1.0])
-
-        if method == "midpoint" and not explicit_grid:
-            time_grid = x_init.new_tensor([1.0, 0.5, 0.0] if reverse else [0.0, 0.5, 1.0])
 
         def _sample(x_init, mask, attn_mask, pdgids_idx):
             extras = dict(mask=mask, attn_mask=attn_mask, types=self.types_embd, pdgids=pdgids_idx)
@@ -524,15 +509,14 @@ class LEGOLtng(ltng.LightningModule):
                 )
             return solver.sample(
                 x_init=x_init, time_grid=time_grid,
-                mask=mask, attn_mask=attn_mask, pdgids=pdgids_idx,
-                return_intermediates=return_intermediates, **common,
+                step_size=step_size, method=method,
+                return_intermediates=return_intermediates, **extras,
             )
 
-        out = self.chunked(
+        return self.chunked(
             _sample, x_init, ds_t.m.full, ds_t.am.full, pdgids_idx,
             split_size=split_size, cat_dim=-3,
         )
-        return out
 
     def _midpoint_steps(
         self, x: Tensor, time_grid: Tensor,
@@ -554,9 +538,8 @@ class LEGOLtng(ltng.LightningModule):
         self, x: Tensor, time_grid: Tensor,
         return_intermediates: bool = False, **extras,
     ) -> Tensor:
+        xs  = [x]
         gen = (extras["mask"] == 1).unsqueeze(-1)
-        if return_intermediates:
-            xs = [x]
         for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
             dt = t_b - t_a
             s  = self.model(x, t_a, **extras)
@@ -619,6 +602,5 @@ class LEGOLtng(ltng.LightningModule):
                 sols = self._canon_dirs(sols, face, fwd, inverse=True)
 
         if sols.dim() == 4:
-            T = sols.shape[0]
-            pdgids = pdgids.unsqueeze(0).expand(T, -1, -1, -1)
+            pdgids = pdgids.unsqueeze(0).expand(sols.shape[0], -1, -1, -1)
         return torch.cat((sols, pdgids), dim=-1), ds_t.m.full, ds_t.am.full
