@@ -35,16 +35,12 @@ class GetLEGOData:
         dataset, data_add = self.dataset_compact(data)
         mask_valid = dataset[..., 1:4].norm(dim=-1) >= self.cutoff_mev
         max_valid = mask_valid.sum(dim=-1).max()
-        mask_valid_sorted = mask_valid.sort(dim=-1, descending=True).values[
-            :, :max_valid
-        ]
+        mask_valid_sorted = mask_valid.sort(dim=-1, descending=True).values[:, :max_valid]
         dataset_valid = torch.full_like(dataset[:, :max_valid], torch.nan)
         dataset_valid[mask_valid_sorted] = dataset[mask_valid]
-        idx_rel_events = ~dataset_valid[:, : self.min_particles + 1, 0].isnan().any(
-            dim=-1
-        )
-        data_pp = dataset_valid[idx_rel_events]
-        data_add = {k: v[idx_rel_events] for k, v in data_add.items()}
+        keep = ~dataset_valid[:, : self.min_particles + 1, 0].isnan().any(dim=-1)
+        data_pp = dataset_valid[keep]
+        data_add = {k: v[keep] for k, v in data_add.items()}
         if n_events is not None:
             rd_idx = torch.randperm(data_pp.shape[0], device="cpu")[:n_events]
             data_pp = data_pp[rd_idx]
@@ -62,21 +58,21 @@ class LEGODataset(Dataset):
         super().__init__()
         self.device = kwargs.get("device", "cpu")
         if isinstance(data, str):
-            path = data + "/data_prepped.pt" if data[-3:] != ".pt" else data
+            path = data if data.endswith(".pt") else data + "/data_prepped.pt"
             data = torch.load(path, map_location="cpu", weights_only=False)
-        elif isinstance(data, dict):
+        if isinstance(data, dict):
             if prep is None:
                 raise ValueError(
                     "LEGODataset(dict, ...) requires `prep` (e.g. DataPrep(config)); "
                     "GetLEGOData yields pre-format_add layout that DataStruct misaligns."
                 )
-            self.data = DataStruct(*prep(GetLEGOData(**kwargs)(data)))
-        if isinstance(data, tuple):
-            self.data = DataStruct(*data)
+            data = prep(GetLEGOData(**kwargs)(data))
+        self.data = DataStruct(*data)
 
-        if kwargs.get("frac", False):
-            self.length = int(len(self.data) * kwargs.get("frac"))
-            idxs = torch.randperm(len(self.data), device=self.device)[:self.length]
+        frac = kwargs.get("frac")
+        if frac:
+            n = int(len(self.data) * frac)
+            idxs = torch.randperm(len(self.data), device=self.device)[:n]
             self.data = self.data[idxs]
 
     def __len__(self) -> int:
