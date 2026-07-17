@@ -47,8 +47,7 @@ class GenerateBase:
         x = self.geom_trafos.sample(shape, loc_cc, self.kappa, self.bs_frac, self.tanh_theta)
         p_ = self.geom_trafos.sample(shape, p_cc, self.kappa, 0.0, self.tanh_theta)
         base = torch.cat((e_sc, p_, x), dim=-1)
-        base = torch.cat((incoming_rt, base), dim=1)
-        return base
+        return torch.cat((incoming_rt, base), dim=1)
 
     @torch.no_grad()
     def iso(self, shape, device):
