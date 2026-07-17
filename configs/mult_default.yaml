@@ -63,7 +63,6 @@ config:
       use_adaptive_rmsnorm: true
       use_adaptive_layerscale: true
       residual_attn: true
-      rotary_pos_emb: true
 
   opt_conf:
     opt: muon
