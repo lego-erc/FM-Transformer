@@ -352,7 +352,37 @@ class LEGOLtng(ltng.LightningModule):
         else:
             loss_sc = 0.0
         sq = (v_out - ps_.dx_t) ** 2
-        return self._reduce_and_log(sq, ds_t, loss_sc)
+        loss = self._reduce_and_log(sq, ds_t, loss_sc)
+
+        if self.rc.one_step_euler_fac > 0:
+            loss = loss + self.rc.one_step_euler_fac * self._one_step_euler_loss(base, ds_t, pdgid_idx, ps_)
+        return loss
+
+    def _one_step_euler_loss(
+        self, base: Tensor, ds_t: DataStruct, pdgid_idx: Tensor, ps_,
+    ) -> Tensor:
+        mask, am = ds_t.m.full, ds_t.am.full
+        gen = (mask == 1).unsqueeze(-1)
+        g = gen & am.unsqueeze(-1)
+        ckw = dict(mask=mask, attn_mask=am, types=self.types_embd, pdgids=pdgid_idx)
+        man = self.model.manifold
+
+        with torch.no_grad():
+            i = torch.randint(1, self.rc.one_step_euler_sections + 1, (base.shape[0], 1), device=base.device)
+            step = 2.0 ** -(i - 1).to(base.dtype)             # queried step D, (B, 1)
+            half = step / 2
+            t0 = (torch.rand_like(step) * (1.0 / step).round()).floor() * step  # grid-aligned start
+            x0 = self.ps.sample(base, ds_t.f.model_in, t0.squeeze(-1)).x_t
+            s_half = self.model(x0, t0, **ckw)
+            x_mid = torch.where(gen, man.expmap(x0, half.unsqueeze(-1) * s_half), x0)
+            s_mid = self.model(x_mid, t0 + half, **ckw)
+            x_end = torch.where(gen, man.expmap(x_mid, half.unsqueeze(-1) * s_mid), x0)
+            tgt = man.logmap(x0, x_end) / step.unsqueeze(-1)
+        s_pred = self.model(x0, t0, **ckw)
+        sc = ((s_pred - tgt) ** 2 * g).sum() / (g.sum().clamp(min=1) * s_pred.shape[-1])
+        if self.training:
+            self.log("loss/one_step_euler", sc.detach(), on_step=True, on_epoch=False, logger=True, sync_dist=False)
+        return sc
 
     def training_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
         """Lightning training hook; delegates to :meth:`_step`."""
@@ -505,19 +535,29 @@ class LEGOLtng(ltng.LightningModule):
 
         if x_init is None:
             x_init = self.gen_base_wrapper(ds_t)
+
         explicit_grid = time_grid is not None
         if time_grid is None:
-            time_grid = x_init.new_tensor([1.0, 0.0] if reverse else [0.0, 1.0])
+            if method == "euler":
+                n = max(round(1.0 / step_size), 1)
+                time_grid = torch.linspace(0., 1., n + 1, device=x_init.device, dtype=x_init.dtype)
+                if reverse:
+                    time_grid = time_grid.flip(0)
+            else:
+                time_grid = x_init.new_tensor([1.0, 0.0] if reverse else [0.0, 1.0])
 
         if method == "midpoint" and not explicit_grid:
             time_grid = x_init.new_tensor([1., 0.5, 0.] if reverse else [0., 0.5, 1.])
 
         def _sample(x_init, mask, attn_mask, pdgids_idx):
+            extras = dict(mask=mask, attn_mask=attn_mask, types=self.types_embd, pdgids=pdgids_idx)
             if method == "midpoint":
                 return self._midpoint_steps(
-                    x_init, time_grid, return_intermediates=return_intermediates,
-                    mask=mask, attn_mask=attn_mask,
-                    types=self.types_embd, pdgids=pdgids_idx,
+                    x_init, time_grid, return_intermediates=return_intermediates, **extras,
+                )
+            if method == "euler":
+                return self._euler_steps(
+                    x_init, time_grid, return_intermediates=return_intermediates, **extras,
                 )
             return solver.sample(
                 x_init=x_init, time_grid=time_grid,
@@ -525,10 +565,11 @@ class LEGOLtng(ltng.LightningModule):
                 return_intermediates=return_intermediates, **common,
             )
 
-        return self.chunked(
+        out = self.chunked(
             _sample, x_init, ds_t.m.full, ds_t.am.full, pdgids_idx,
             split_size=split_size, cat_dim=-3,
         )
+        return out
 
     def _midpoint_steps(
         self, x: Tensor, time_grid: Tensor,
@@ -542,11 +583,28 @@ class LEGOLtng(ltng.LightningModule):
         """
         if return_intermediates:
             xs = [x]
+        man = self.model.manifold
         for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
             dt = t_b - t_a
             v1 = self.model(x, t_a, **extras)
-            v2 = self.model(x + dt / 2 * v1, t_a + dt / 2, **extras)
-            x = x + dt * v2
+            x_half = man.expmap(x, dt / 2 * v1)
+            v2 = self.model(x_half, t_a + dt / 2, **extras)
+            x = man.expmap(x, dt * man.proju(x, v2))
+            if return_intermediates:
+                xs.append(x)
+        return torch.stack(xs) if return_intermediates else x
+
+    def _euler_steps(
+        self, x: Tensor, time_grid: Tensor,
+        return_intermediates: bool = False, **extras,
+    ) -> Tensor:
+        gen = (extras["mask"] == 1).unsqueeze(-1)
+        if return_intermediates:
+            xs = [x]
+        for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
+            dt = t_b - t_a
+            s = self.model(x, t_a, **extras)
+            x = torch.where(gen, self.model.manifold.expmap(x, dt * s), x)
             if return_intermediates:
                 xs.append(x)
         return torch.stack(xs) if return_intermediates else x
