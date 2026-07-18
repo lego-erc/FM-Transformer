@@ -170,6 +170,11 @@ class ResolvedLEGOConfig:
             :func:`resolve_legoltng_config`.
         state_dict (dict or None): ``None`` for fresh training; otherwise
             the model state dict to load into ``LEGOLtng.model.vf``.
+        reflow_path (str or None): checkpoint of a velocity teacher used to
+            build a fixed base->target coupling for the direct model;
+            ``None`` falls back to the data target.
+        reflow_kwargs (dict): solver kwargs passed to the teacher's
+            :meth:`solve` when building that coupling.
     """
 
     max_seq_l: int
@@ -201,6 +206,9 @@ class ResolvedLEGOConfig:
     config: dict
 
     state_dict: dict | None
+
+    reflow_path: str | None
+    reflow_kwargs: dict
 
 
 def resolve_legoltng_config(full_config: dict) -> ResolvedLEGOConfig:
@@ -441,6 +449,8 @@ def _build_resolved(
         val_conf=config.get("val_conf", {}),
         config=config,
         state_dict=state_dict,
+        reflow_path=model_conf.get("reflow_path"),
+        reflow_kwargs=model_conf.get("reflow_kwargs", {}),
     )
 
 

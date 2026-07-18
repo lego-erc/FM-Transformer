@@ -1,3 +1,6 @@
+import warnings
+from pathlib import Path
+
 import torch
 from torch import Tensor, nn
 from torch.utils.data import (
@@ -667,3 +670,147 @@ class LEGOLtng(ltng.LightningModule):
             T = sols.shape[0]
             pdgids = pdgids.unsqueeze(0).expand(T, -1, -1, -1)
         return torch.cat((sols, pdgids), dim=-1), ds_t.m.full, ds_t.am.full
+
+
+def _build_reflow_teacher(reflow_path: str | None) -> nn.Module | None:
+    """Frozen, ``torch.compile``'d velocity teacher for reflow; ``None`` if path unset/missing."""
+    if reflow_path is None:
+        return None
+    if not Path(reflow_path).is_file():
+        warnings.warn(f"reflow_path={reflow_path!r} not found; reflow disabled.", stacklevel=2)
+        return None
+    teacher = LEGOLtng(torch.load(reflow_path, map_location="cpu", weights_only=False))
+    teacher.eval().requires_grad_(False)
+    teacher.model = torch.compile(teacher.model, dynamic=False)
+    return teacher
+
+
+class ProjectModelDirect(ProjectModel):
+    """Residual-prediction wrapper for the no-time direct model. Mirror
+    of :class:`ProjectModel`; only the forward differs (no time argument,
+    residual instead of velocity, single Euler step + safe sphere snap)."""
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: torch.Tensor,
+        attn_mask: torch.Tensor,
+        types: torch.Tensor,
+        pdgids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Residual step ``base + vf(base)`` with a manifold snap at generated slots.
+
+        Returns:
+            Final features ``(B, L, in_dim)``.
+        """
+        _, x_attended, x_surr = self._prep_x(x, attn_mask)
+        residual = self.vf(x_surr, mask, attn_mask, types, pdgids)
+        out_raw = x_attended + residual
+        gen = (mask == 1).unsqueeze(-1)
+        ref = torch.zeros_like(out_raw)
+        ref[..., 1] = 1.0
+        ref[..., 4] = 1.0
+        safe = torch.where(gen, out_raw, ref)
+        out_proj = self.manifold.projx(safe)
+        return torch.where(gen, out_proj, out_raw)
+
+
+class LEGOLtngDirect(LEGOLtng):
+    """Direct (residual-prediction) variant of :class:`LEGOLtng`.
+
+    The transformer predicts the residual ``target - base`` at the
+    generated slots; the wrapper applies one Euler step
+    ``final = base + residual`` (plus a manifold snap on the sphere half)
+    and the loss is MSE between predicted and target.
+
+    When ``model_conf.reflow_path`` is set to a velocity-model checkpoint,
+    that model is loaded as a frozen teacher and ``teacher.solve(base)``
+    replaces the data target — giving the direct student a fixed
+    ``base -> target`` coupling per batch (the prerequisite for one-step
+    Euler to reach the target). When the path is unset or missing,
+    training falls back to MSE against the data target.
+    """
+
+    def __init__(self, full_config: dict) -> None:
+        """Builds the direct model and, if configured, the frozen reflow teacher."""
+        super().__init__(full_config)
+        object.__setattr__(
+            self, "reflow_teacher", _build_reflow_teacher(self.rc.reflow_path),
+        )
+
+    def _build_model(self, rc) -> nn.Module:
+        """Constructs the no-time residual-prediction wrapper."""
+        return ProjectModelDirect(
+            CFMTrafo_x(**rc.model_args, time_cond=False),
+            rc.manifold,
+            cond_cube=rc.cond_cube,
+        )
+
+    @torch.no_grad()
+    def on_fit_start(self) -> None:
+        """Initialises base state and moves the reflow teacher to the device."""
+        super().on_fit_start()
+        if self.reflow_teacher is not None:
+            self.reflow_teacher.to(self.device)
+
+    def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
+        """One direct-model step: residual MSE to the target (data, or the
+        reflow teacher's solved coupling).
+
+        Returns:
+            Scalar loss.
+        """
+        with torch.no_grad():
+            ds_t = DataStruct(ds_t.f.full, self._sample_mask(ds_t), ds_t.am.full)
+            base = self.gen_base_wrapper(ds_t)
+            pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
+            if self.reflow_teacher is not None:
+                solve_kwargs = dict(self.rc.reflow_kwargs)
+                if (
+                    "time_grid" not in solve_kwargs
+                    and solve_kwargs.get("method", "midpoint") == "midpoint"
+                ):
+                    solve_kwargs["time_grid"] = base.new_tensor([0.0, 1.0])
+                target = self.reflow_teacher.solve(
+                    ds_t, x_init=base, **solve_kwargs,
+                )
+            else:
+                target = ds_t.f.model_in
+        pred = self.model(
+            base,
+            mask=ds_t.m.full, attn_mask=ds_t.am.full,
+            types=self.types_embd, pdgids=pdgid_idx,
+        )
+        if self.rc.loss_sc_fac > 0:
+            m_gen = (ds_t.m.full == 1).to(pred.dtype)
+            loss_sc = self.loss_fn(
+                pred[..., 0] * m_gen,
+                target[..., 0] * m_gen,
+            )
+        else:
+            loss_sc = 0.0
+        sq = (pred - target) ** 2
+        return self._reduce_and_log(sq, ds_t, loss_sc)
+
+    @torch.no_grad()
+    def solve(
+        self,
+        ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]",
+        x_init: Tensor | None = None,
+        split_size: int | None = None,
+        **_kw,
+    ) -> Tensor:
+        """Single-pass residual prediction from the base prior (no ODE)."""
+        ds_t, pdgids_idx = self._prep_solve(ds_t)
+        if x_init is None:
+            x_init = self.gen_base_wrapper(ds_t)
+
+        def _fwd(x, m, a, pi):
+            return self.model(
+                x, mask=m, attn_mask=a, types=self.types_embd, pdgids=pi,
+            )
+
+        return self.chunked(
+            _fwd, x_init, ds_t.m.full, ds_t.am.full, pdgids_idx,
+            split_size=split_size,
+        )
