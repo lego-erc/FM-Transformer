@@ -1,4 +1,4 @@
-"""Smoke test for :class:`legofmt.main.modules.LEGOLtngDirect`.
+"""Smoke test for :class:`legofmt.distill.reflow.LEGOLtngDirect`.
 
 Builds a tiny model from an in-memory config (no HF download, no
 ``meta.json``), constructs a synthetic batch matching the padded sequence
@@ -13,7 +13,8 @@ import pytest
 import torch
 
 from legofmt.data.struct import DataStruct, _F
-from legofmt.main.modules import LEGOLtng as LEGOLtngVelocity, LEGOLtngDirect as LEGOLtng
+from legofmt.distill.reflow import LEGOLtngDirect as LEGOLtng
+from legofmt.main.modules import LEGOLtng as LEGOLtngVelocity
 
 
 def _has_nonzero_grad(params) -> bool:
