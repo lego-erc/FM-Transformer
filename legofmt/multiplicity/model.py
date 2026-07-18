@@ -10,17 +10,16 @@ from x_transformers import ContinuousTransformerWrapper, Decoder, Encoder
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.data.struct import cond_scalars
 from legofmt.geometry.geom_trafos import GeomTrafos
+from legofmt.geometry.symmetry_projections import CubeSymmetry
 from legofmt.mod_comps.config import resolve_mult_config
 from legofmt.mod_comps.optimizers import build_optimizer, schedulefree_adamw
 
 
 class MultLoader(torch.utils.data.Dataset):
-    def __init__(self, config: dict, device: str = "cpu", path: str = None):
+    def __init__(self, config: dict, device: str = "cpu"):
         self.device = device
         mm_conf = config.get("mm_conf")
         lds_conf = config.get("dl_conf").get("lds_args").copy()
-        if path is not None:
-            lds_conf["path"] = path
         max_particles = mm_conf.get("max_out_particles")
         ptypes = mm_conf.get("ptypes", torch.tensor([11, 22]))
         ptypes_in = mm_conf.get("ptypes_in", torch.tensor([11, 22]))
@@ -66,15 +65,7 @@ class MultLoader(torch.utils.data.Dataset):
 
 
 class InvModel(nn.Module):
-    """Inverse-direction predictor: outgoing shower (set) -> incoming PID.
-
-    A bidirectional :class:`x_transformers.Encoder` over the (padded,
-    order-invariant) set of outgoing particles plus a prepended CLS/query
-    token; the query position's output is projected to logits over the
-    incoming-particle vocabulary. The scalar deposited energy conditions the
-    adaptive norms. Fully self-contained -- it shares NO parameters with the
-    count model, so co-training cannot corrupt the count task.
-    """
+    """Inverse-direction predictor: outgoing shower (set) -> incoming PID."""
 
     def __init__(self, rc):
         super().__init__()
@@ -127,6 +118,7 @@ class MultModel(LightningModule):
         self.register_buffer("ptypes", rc.ptypes)
         self.register_buffer("ptypes_in", rc.ptypes_in)
         self.geom_trafos = GeomTrafos()
+        self.sym = CubeSymmetry() if rc.canon_sym else None
 
         self.model = ContinuousTransformerWrapper(
             max_seq_len=rc.max_seq_len,
@@ -183,6 +175,10 @@ class MultModel(LightningModule):
 
     def proj_in(self, x):
         x = x.clone()
+        if self.sym is not None:
+            face = self.sym.face_of(x[..., -3:])
+            dirs = self.sym.canonicalize(torch.stack((x[..., -6:-3], x[..., -3:]), dim=-2), face)
+            x[..., -6:-3], x[..., -3:] = dirs[..., 0, :], dirs[..., 1, :]
         x[..., -6:] = self.geom_trafos.to_cube(x[..., -6:], d=self.rc.pos_scale)
         return self.proj_in_(x)
 

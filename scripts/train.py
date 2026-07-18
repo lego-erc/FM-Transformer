@@ -97,7 +97,7 @@ trainer = ltng.Trainer(
 )
 
 train_model = run["train_model"]
-compile_mode = run["compile"]  # false | model | forward_fused
+compile_mode = run["compile"]  # false | model
 if train_model == "fm":
     model = LEGOLtng(config)
 else:
@@ -112,16 +112,17 @@ if resume_from:
 
 if train_model == "fm" and compile_mode == "model":
     model.model = torch.compile(model.model, dynamic=False)
-elif train_model == "fm" and compile_mode == "forward_fused":
-    model.model.forward_fused = torch.compile(model.model.forward_fused, dynamic=False)
 
-trainer.fit(
-    model=model
-)
+trainer.fit(model=model)
 
 model.rc.config["dl_conf"]["lds_args"]["data"] = "<dataset_path>"
 model.rc.config["dl_conf"]["data_path"] = None
 model.rc.config["additional"]["comet_exp_key"] = None
+if hasattr(model, "base_head"):
+    model.rc.config["base_conf"]["base_head"] = {
+        k: v.cpu() for k, v in model.base_head.state_dict().items()
+    }
+    model.rc.config["base_conf"]["base_head_frozen"] = not model.base_head[-1].weight.requires_grad
 
 ckpt_base = run.get("ckpt_dir") or os.environ.get("LEGO_CKPT_DIR", "./checkpoints/")
 ckpt_dir = os.path.join(ckpt_base, "flow" if train_model == "fm" else "mult")

@@ -5,7 +5,6 @@ from mpl_toolkits.mplot3d.art3d import Line3DCollection
 plt.rcParams.update(
     {
         "axes.labelpad": 8,
-        "text.usetex": True,
         "font.serif": "Computer Modern",
         "axes.labelsize": 14,
         "axes.titlesize": 16,

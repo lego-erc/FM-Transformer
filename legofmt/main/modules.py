@@ -1,5 +1,4 @@
-import warnings
-from pathlib import Path
+from dataclasses import replace
 
 import torch
 from torch import Tensor, nn
@@ -10,7 +9,7 @@ from torch.utils.data import (
 import lightning as ltng
 
 from flow_matching.solver import ODESolver
-from flow_matching.utils import ModelWrapper
+from flow_matching.utils.manifolds import Sphere
 
 try:
     from torch_lap_cuda_lib import solve_lap as slap
@@ -22,145 +21,105 @@ _OT_COUPLING_REQUIRES_LAP = (
     "Install it or set model_conf.ot_coupling=False."
 )
 
+from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
+
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.data.struct import DataStruct, _F
+
+from legofmt.distill.distill import one_step_euler_loss
+
 from legofmt.geometry.geom_trafos import GeomTrafos
-from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt.geometry.gen_base import GenerateBase
 from legofmt.geometry.path_sample_mult import ProductPathSampler, ProductManifold
 from legofmt.geometry.raytracing_proj import CubeTrace
+from legofmt.geometry.symmetry_projections import CubeSymmetry
+
 from legofmt.mod_comps.config import resolve_legoltng_config
 from legofmt.mod_comps.optimizers import build_optimizer
+
 from legofmt.log_metrics.val_metrics import ShowerValMetrics
 
 
-class ProjectModel(ModelWrapper, nn.Module):
+class ProjectModel(nn.Module):
     """Projection Wrapper for Riemannian FM Model."""
 
-    def __init__(
-        self,
-        vf: nn.Module,
-        manifold: ProductManifold,
-        **kwargs: dict,
-    ) -> None:
-        """Wraps a velocity field with manifold projection.
-
-        Args:
-            vf: the factorized transformer (:class:`CFMTrafo_x`).
-            manifold: product manifold the features live on.
-            **kwargs: reads ``cond_cube`` and ``no_detach``; the rest are
-                retained on :attr:`kwargs`.
-        """
-        nn.Module.__init__(self)
-        self.vf = vf
-        self.manifold = manifold
-        self.kwargs = kwargs
+    def __init__(self, vf: nn.Module, manifold: ProductManifold, **kwargs) -> None:
+        super().__init__()
+        self.vf          = vf
+        self.manifold    = manifold
         self.geom_trafos = GeomTrafos()
-        self.cond_cube = kwargs.get("cond_cube", False)
-        self.no_detach = kwargs.get("no_detach", False)
+        self.cond_cube   = kwargs.get("cond_cube", False)
+        self.no_detach   = kwargs.get("no_detach", False)
 
-    def _prep_x(
-        self, x: torch.Tensor, attn_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Projects ``x`` onto the manifold at attended slots.
-
-        Returns:
-            tuple: ``(x_proj_full, x_attended, x_surr)`` -- the fully
-            projected features, the attend-gated (optionally detached)
-            features, and the surrogate fed to the transformer
-            (cube-projected position when :attr:`cond_cube`).
-        """
-        x_proj_full = self.manifold.projx(x)
-        x_attended = torch.where(attn_mask.unsqueeze(-1), x_proj_full, x)
+    def _prep_x(self, x: Tensor, attn_mask: Tensor) -> tuple[Tensor, Tensor]:
+        x_proj = self.manifold.projx(x)
+        x_att  = torch.where(attn_mask.unsqueeze(-1), x_proj, x)
         if not self.no_detach:
-            x_attended = x_attended.detach()
+            x_att.detach_()
         if self.cond_cube:
-            x_surr = x_attended.clone()
-            in_p = _F(x_surr).in_p
+            x_att = x_att.clone()
+            in_p  = _F(x_att).in_p
             in_p.copy_(self.geom_trafos.to_cube(in_p))
-        else:
-            x_surr = x_attended
-        return x_proj_full, x_attended, x_surr
+        return x_proj, x_att
 
     def forward(
         self,
-        x: torch.Tensor,
-        t: torch.Tensor,
-        mask: torch.Tensor,
-        attn_mask: torch.Tensor,
-        types: torch.Tensor,
-        pdgids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Velocity at every slot, projected to the manifold tangent.
-
-        Holds conditioning slots at ``t=1`` (zero path velocity) and
-        projects the field onto the tangent space at attended slots.
-
-        Args:
-            x: features ``(B, L, in_dim)``.
-            t: flow time, broadcastable to ``(B, L)``.
-            mask: token roles ``(B, L)``; ``1`` = generated.
-            attn_mask: real-token mask ``(B, L)``.
-            types: slot-type ids ``(B, L)``.
-            pdgids: species indices ``(B, L)``.
-
-        Returns:
-            Tangent velocity ``(B, L, in_dim)``.
-        """
-        x_proj_dense, _, x_surr = self._prep_x(x, attn_mask)
-        pm = attn_mask.unsqueeze(-1)
+        x: Tensor,
+        t: Tensor,
+        mask: Tensor,
+        attn_mask: Tensor,
+        types: Tensor,
+        pdgids: Tensor | None = None,
+    ) -> Tensor:
+        x_proj, x_att = self._prep_x(x, attn_mask)
         t = torch.atleast_2d(t).expand_as(attn_mask)
-        t = torch.where(mask == 1, t, 1.)
-        v = self.vf(x_surr, mask, attn_mask, types, pdgids, t=t)
-        v_proj_dense = self.manifold.proju(x_proj_dense, v)
-        return torch.where(pm, v_proj_dense, v)
+        t = torch.where(mask == 1, t, 1.0)  # conditions get t=1
+        v = self.vf(x_att, mask, attn_mask, types, pdgids, t=t)
+        v_proj = self.manifold.proju(x_proj, v)
+        return torch.where(attn_mask.unsqueeze(-1), v_proj, v)
+
 
 class LEGOLtng(ltng.LightningModule):
-    """Riemannian flow-matching model over padded particle sequences.
-
-    Pairs a :class:`ProjectModel` velocity field with a manifold path
-    sampler. Generation is mask-driven: slots with ``mask==0`` are held at
-    their conditioning value, slots with ``mask==1`` are flowed from the
-    base prior.
-    """
 
     def __init__(self, full_config: dict) -> None:
-        """Builds the model, base sampler, optimizer, and buffers.
-
-        Args:
-            full_config: raw config dict, resolved via
-                :func:`~legofmt.mod_comps.config.resolve_legoltng_config`. A
-                ``"state_dict"`` key triggers checkpoint restore, loaded
-                non-strictly for backward compatibility.
-        """
         super().__init__()
-        rc = resolve_legoltng_config(full_config)
-        self.rc = rc
+        self.rc = resolve_legoltng_config(full_config)
 
-        self.register_buffer("pdgids_template", rc.pdgids_template)
-        self.register_buffer(
-            "types_embd",
-            torch.arange(rc.max_seq_l, dtype=torch.int64)
-            .clamp_max(rc.n_prefix + 1).view(1, -1),
-        )
+        types_embd = torch.arange(self.rc.max_seq_l, dtype=torch.int64).clamp_max(self.rc.n_prefix + 1).view(1, -1)
 
-        self.model = self._build_model(rc)
-        self.gen_base = GenerateBase(rc.config)
-        self.ppa = CubeTrace()
+        self.register_buffer("pdgids_template", self.rc.pdgids_template)
+        self.register_buffer("types_embd", types_embd)
+
+        self.model       = self._build_model(self.rc)
+        self.gen_base    = GenerateBase(self.rc.config)
+        self.sym         = CubeSymmetry() if self.rc.canon_sym else None
         self.val_metrics = ShowerValMetrics()
+        self.loss_fn     = nn.MSELoss()
+        self.ps          = ProductPathSampler(self.rc.manifold)
 
-        self.opt, self._lr_sched = build_optimizer(
-            self.model.parameters(), rc.opt_conf,
-        )
-        self._opt_is_sf = hasattr(self.opt, "train") and callable(
-            getattr(self.opt, "train", None),
-        )
+        self._base_dist_loss = None
+        params = list(self.model.parameters())
+        if self.rc.base_dist_loss > 0 and self.gen_base.scale_dist == "sm_norm":
+            bc = self.rc.config.get("base_conf") or {}
+            self.base_head = nn.Sequential(
+                nn.Linear(3 + len(self.rc.pdgids_template), 16), nn.Mish(),
+                nn.Linear(16, 1))
+            with torch.no_grad():
+                self.base_head[-1].weight.zero_()
+                self.base_head[-1].bias.copy_(torch.tensor(
+                    [float(self.gen_base.sm_scale)]).log())
+                hs = bc.get("base_head")
+                if hs is not None and hs.keys() == self.base_head.state_dict().keys():
+                    self.base_head.load_state_dict(hs)
+                    self.base_head.requires_grad_(not bc.get("base_head_frozen", False))
+            params += [p for p in self.base_head.parameters() if p.requires_grad]
+        self.opt, self._lr_sched = build_optimizer(params, self.rc.opt_conf)
+        self._opt_is_sf = callable(getattr(self.opt, "train", None))
 
-        if rc.state_dict is not None:
-            self.model.vf.load_state_dict(rc.state_dict, strict=False)
+        if self.rc.state_dict is not None:
+            self.model.vf.load_state_dict(self.rc.state_dict, strict=False)
 
     def _build_model(self, rc) -> nn.Module:
-        """Constructs the wrapped velocity field; overridden by subclasses."""
         return ProjectModel(
             CFMTrafo_x(**rc.model_args),
             rc.manifold,
@@ -168,12 +127,10 @@ class LEGOLtng(ltng.LightningModule):
         )
 
     def _opt_train(self) -> None:
-        """No-op unless the optimizer has a schedule-free .train() method."""
         if getattr(self, "_opt_is_sf", False):
             self.opt.train()
 
     def _opt_eval(self) -> None:
-        """No-op unless the optimizer has a schedule-free .eval() method."""
         if getattr(self, "_opt_is_sf", False):
             self.opt.eval()
 
@@ -187,51 +144,58 @@ class LEGOLtng(ltng.LightningModule):
 
     @torch.no_grad()
     def on_fit_start(self) -> None:
-        """Initialises the loss, path sampler, and train-mode optimizer."""
         if self.rc.ot_coupling and slap is None:
             raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
-        self.loss_fn = nn.MSELoss()
-        self.ps = ProductPathSampler(self.rc.manifold)
         self.model.train()
         self._opt_train()
 
     @torch.no_grad()
     def convert_pdgids(self, pdgids: Tensor) -> Tensor:
-        """Maps raw PDG ids to compact indices into :attr:`pdgids_template`.
-
-        Unknown, zero, or sentinel ids collapse to index ``0`` (the
-        reserved empty/unknown class).
-
-        Args:
-            pdgids: raw PDG id tensor.
-
-        Returns:
-            Integer index tensor of the same shape.
-        """
         cond = torch.isnan(pdgids) | (pdgids == 0) | (pdgids >= 1e8)
-        pdgid_idx = torch.searchsorted(self.pdgids_template, pdgids.contiguous()) + 1
+        pdgid_idx = torch.searchsorted(
+            self.pdgids_template.to(pdgids.device), pdgids.contiguous()) + 1
         return pdgid_idx.masked_fill_(cond, 0)
+
+    def _canon_dirs(self, x: Tensor, face: Tensor, fwd: Tensor, inverse: bool = False) -> Tensor:
+        rot  = self.sym.uncanonicalize if inverse else self.sym.canonicalize
+        dirs = rot(torch.stack((x[..., 1:4], x[..., 4:7]), dim=-2), face)
+        new  = torch.cat((x[..., 0:1], dirs[..., 0, :], dirs[..., 1, :], x[..., 7:]), dim=-1)
+        return torch.where(fwd[:, None, None], new, x)
 
     @torch.no_grad()
     def gen_base_wrapper(self, ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]") -> Tensor:
-        """Builds the flow's starting point: noise at generated slots, data elsewhere.
-
-        Forward events (incoming slot conditions) draw the conditioning-aware
-        ``poles`` prior around the incoming ray, OT-coupled to the targets
-        during training when ``ot_coupling`` is set; inverse events draw the
-        isotropic prior. Conditioning slots (``mask==0``) keep their data
-        value, so the path interpolates base->data only where ``mask==1``.
-
-        Returns:
-            Base features ``(B, L, in_dim)``.
-        """
         if not isinstance(ds_t, DataStruct):
             ds_t = DataStruct(*ds_t)
-        data = ds_t.f.model_in
-        m = ds_t.m.full
-        fwd = m[:, self.rc.n_prefix] == 0  # incoming slot conditions => forward event
+        self._base_dist_loss = None
+        data  = ds_t.f.model_in
+        m     = ds_t.m.full
+        fwd   = m[:, self.rc.n_prefix] == 0  # incoming slot conditions => forward event
         noise = None if fwd.all() else self.gen_base.iso(m.shape, data.device)
         if fwd.any():
+            if hasattr(self, "base_head"):
+                learn = self.model.training and self.base_head[-1].weight.requires_grad
+                with torch.set_grad_enabled(learn):
+                    pid     = ds_t.f.in_p[..., 0, -1]
+                    idx     = pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)
+                    species = nn.functional.one_hot(
+                        idx.long().clamp(0, len(self.pdgids_template)),
+                        len(self.pdgids_template) + 1).float()
+                    Z, A    = ds_t.f.cond("Z"), ds_t.f.cond("A")
+                    x0      = 716.4 * A / (Z * (Z + 1) * (287.0 / Z.sqrt()).log())
+                    t       = ds_t.f.cond("Size") * ds_t.f.cond("Density") / x0
+                    x       = torch.cat((ds_t.f.in_cc[..., 0], species,
+                                         t.log().unsqueeze(-1)), dim=-1)
+                    s       = self.base_head(x).exp()
+                    if learn:
+                        z   = 2 ** 0.5 * torch.erfinv(torch.linspace(
+                            -0.995, 0.995, 100, device=s.device))  # N(0,1) quantile nodes
+                        u_b = 1 - (z.abs() * s).tanh().mean(-1)
+                        v   = (ds_t.am.out_p & fwd.unsqueeze(-1)).float()
+                        n   = v.sum(-1).clamp(min=1)
+                        u_t = (ds_t.f.out_cc[..., 0] * v).sum(-1) / n
+                        ev  = (v.sum(-1) > 0).float()
+                        self._base_dist_loss = ((u_b - u_t) ** 2 * ev).sum() / ev.sum().clamp(min=1)
+                self.gen_base.sm_scale = s.detach().unsqueeze(-1)
             base = torch.cat(
                 (ds_t.f.non_cc, self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc)), dim=1,
             )
@@ -246,40 +210,27 @@ class LEGOLtng(ltng.LightningModule):
                     nb = out[..., 0].unsqueeze(-2)
                     cost = (nt - nb).abs() + inf_cond * 1e6
                 else:
-                    cost = torch.cdist(ds_t.f.out_cc, out) + inf_cond * 1e6
+                    man = self.rc.manifold
+                    tgt = ds_t.f.out_cc.unsqueeze(-2).split(man.ambient_dims, dim=-1)
+                    ref = out.unsqueeze(-3).split(man.ambient_dims, dim=-1)
+                    cost = sum(
+                        ((a * b).sum(-1).clamp(-1 + 1e-6, 1 - 1e-6).acos()
+                         if isinstance(mf, Sphere) else (a - b).norm(dim=-1)) ** 2
+                        for mf, a, b in zip(man.manifolds, tgt, ref)
+                    ).sqrt() + inf_cond * 1e6
                 assign = slap(cost, cost.device).long()
                 out[:] = torch.take_along_dim(out, assign.unsqueeze(-1), dim=1)
             base = self.gen_base.insert_add(base)
             noise = base if noise is None else torch.where(fwd.view(-1, 1, 1), base, noise)
         return torch.where((m == 1).unsqueeze(-1), noise, data)
 
-    def _reduce_and_log(
-        self,
-        sq: Tensor,
-        ds_t: DataStruct,
-        loss_sc,
-    ) -> Tensor:
-        """Masked-mean of the per-component squared error, logged and summed.
-
-        Averages the energy, direction, and position errors over the
-        generated-and-real slots (``mask==1 & attn_mask==1``) so the scale
-        is independent of the mask fraction, then adds the scaled auxiliary
-        term.
-
-        Args:
-            sq: per-element squared error ``(B, L, in_dim)``.
-            ds_t: the masked data struct for this step.
-            loss_sc: auxiliary (energy) loss term, or ``0``.
-
-        Returns:
-            Scalar training loss.
-        """
-        g = ((ds_t.m.full == 1) & (ds_t.am.full == 1)).unsqueeze(-1)
-        denom = g.sum().clamp(min=1)
-        out = sq * g
-        loss_e = out[..., 0:1].sum() / denom
+    def _reduce_and_log(self, sq: Tensor, ds_t: DataStruct, loss_sc) -> Tensor:
+        g        = ((ds_t.m.full == 1) & (ds_t.am.full == 1)).unsqueeze(-1)
+        denom    = g.sum().clamp(min=1)
+        out      = sq * g
+        loss_e   = out[..., 0:1].sum() / denom
         loss_dir = out[..., 1:4].sum() / (denom * 3)
-        loss_x = out[..., 4:7].sum() / (denom * 3)
+        loss_x   = out[..., 4:7].sum() / (denom * 3)
         if self.training:
             log_sc = loss_sc.detach() if torch.is_tensor(loss_sc) else loss_sc
             self.log_dict(
@@ -295,17 +246,6 @@ class LEGOLtng(ltng.LightningModule):
 
     @torch.no_grad()
     def _sample_mask(self, ds_t: DataStruct) -> Tensor:
-        """Samples the per-slot generation mask for a training step.
-
-        Returns the dataset mask unchanged when no ``mask_conf`` is set
-        (forward-only, backward-compatible). Otherwise each event keeps the
-        dataset's forward mask with probability ``p_forward`` or flips to
-        the inverse mask -- the complement of the forward mask over the
-        attended slots, with the density slot always conditioning.
-
-        Returns:
-            Long mask ``(B, L)``; ``1`` = generated.
-        """
         if not self.rc.mask_conf:
             return ds_t.m.full
         fwd = ds_t.m.full
@@ -315,29 +255,19 @@ class LEGOLtng(ltng.LightningModule):
         return torch.where(pick.unsqueeze(-1), fwd, inv.long())
 
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
-        """One train/val step: the flow-matching MSE over a sampled mask
-        and flow time.
-
-        Returns:
-            Scalar loss.
-        """
         with torch.no_grad():
             ds_t = DataStruct(ds_t.f.full, self._sample_mask(ds_t), ds_t.am.full)
-            base = self.gen_base_wrapper(ds_t)
+            if self.sym is not None:
+                fwd  = ds_t.m.full[:, self.rc.n_prefix] == 0
+                face = self.sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
+                ds_t = DataStruct(self._canon_dirs(ds_t.f.full, face, fwd), ds_t.m.full, ds_t.am.full)
+            base      = self.gen_base_wrapper(ds_t)
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
             if self.rc.t_dist == "sm_norm":
                 t = torch.sigmoid(self.rc.t_dist_scale * torch.randn_like(ds_t.f.d))
             elif self.rc.t_dist == "sd3":
                 u = torch.rand_like(ds_t.f.d)
-                t = 1 - u + self.rc.t_dist_scale / 3 * ((torch.pi / 2 * u).sin()**2 - u)
-            elif self.rc.t_dist == "sd3_grid":
-                u = torch.rand_like(ds_t.f.d)
-                t_sd3 = 1 - u + self.rc.t_dist_scale / 3 * ((torch.pi / 2 * u).sin()**2 - u)
-                idx = torch.multinomial(u.new_tensor([.1, .2, .3, .4]), u.numel(), replacement=True).view_as(u)
-                t_grid = (u.new_tensor([0., 0.4, 0.8, 0.9])[idx] + 0.02 * torch.randn_like(u)).clamp(0, 1)
-                t = torch.where(torch.rand_like(u) < 0.5, t_grid, t_sd3)
-            elif self.rc.t_dist == "uniform":
-                t = torch.rand_like(ds_t.f.d)
+                t = 1 - u + self.rc.t_dist_scale / 3 * ((torch.pi / 2 * u).sin() ** 2 - u)
             else:
                 raise ValueError(f"unknown t_dist: {self.rc.t_dist!r}")
             ps_ = self.ps.sample(base, ds_t.f.model_in, t)
@@ -356,43 +286,47 @@ class LEGOLtng(ltng.LightningModule):
         loss = self._reduce_and_log(sq, ds_t, loss_sc)
 
         if self.rc.one_step_euler_fac > 0:
-            loss = loss + self.rc.one_step_euler_fac * self._one_step_euler_loss(base, ds_t, pdgid_idx, ps_)
+            sc = one_step_euler_loss(self, base, ds_t, pdgid_idx)
+            if self.training:
+                self.log("loss/one_step_euler", sc.detach(), on_step=True, on_epoch=False, logger=True, sync_dist=False)
+            loss = loss + self.rc.one_step_euler_fac * sc
+
+        if (ot := self._base_dist_loss) is not None:
+            loss = loss + self.rc.base_dist_loss * ot
+            if self.training:
+                self.log_dict(
+                    {"loss/base_dist": ot.detach(),
+                     "base/sm_scale": self.gen_base.sm_scale.detach().mean()},
+                    on_step=True, on_epoch=False, logger=True, sync_dist=False,
+                )
         return loss
 
-    def _one_step_euler_loss(
-        self, base: Tensor, ds_t: DataStruct, pdgid_idx: Tensor, ps_,
-    ) -> Tensor:
-        mask, am = ds_t.m.full, ds_t.am.full
-        gen = (mask == 1).unsqueeze(-1)
-        g = gen & am.unsqueeze(-1)
-        ckw = dict(mask=mask, attn_mask=am, types=self.types_embd, pdgids=pdgid_idx)
-        man = self.model.manifold
-
-        with torch.no_grad():
-            i = torch.randint(1, self.rc.one_step_euler_sections + 1, (base.shape[0], 1), device=base.device)
-            step = 2.0 ** -(i - 1).to(base.dtype)             # queried step D, (B, 1)
-            half = step / 2
-            t0 = (torch.rand_like(step) * (1.0 / step).round()).floor() * step  # grid-aligned start
-            x0 = self.ps.sample(base, ds_t.f.model_in, t0.squeeze(-1)).x_t
-            s_half = self.model(x0, t0, **ckw)
-            x_mid = torch.where(gen, man.expmap(x0, half.unsqueeze(-1) * s_half), x0)
-            s_mid = self.model(x_mid, t0 + half, **ckw)
-            x_end = torch.where(gen, man.expmap(x_mid, half.unsqueeze(-1) * s_mid), x0)
-            tgt = man.logmap(x0, x_end) / step.unsqueeze(-1)
-        s_pred = self.model(x0, t0, **ckw)
-        sc = ((s_pred - tgt) ** 2 * g).sum() / (g.sum().clamp(min=1) * s_pred.shape[-1])
-        if self.training:
-            self.log("loss/one_step_euler", sc.detach(), on_step=True, on_epoch=False, logger=True, sync_dist=False)
-        return sc
+    def pretrain_base(self, batches, lr: float = 1e-2) -> float:
+        opt          = torch.optim.Adam(self.base_head.parameters(), lr=lr)
+        was_training = self.model.training
+        rc           = self.rc
+        self.rc      = replace(rc, ot_coupling=False)
+        self.model.train()
+        ot = float("nan")
+        for ds_t in batches:
+            opt.zero_grad()
+            self.gen_base_wrapper(ds_t)
+            if self._base_dist_loss is None:
+                continue
+            self._base_dist_loss.backward()
+            opt.step()
+            ot = self._base_dist_loss.item()
+        self.model.train(was_training)
+        self.rc = rc
+        self.base_head.requires_grad_(False)
+        self._base_dist_loss = None
+        return ot
 
     def training_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
-        """Lightning training hook; delegates to :meth:`_step`."""
-        loss = self._step(batch, _batch_idx)
-        return loss
+        return self._step(batch, _batch_idx)
 
     @torch.no_grad()
     def validation_step(self, batch: DataStruct, _batch_idx: int | Tensor) -> Tensor:
-        """Lightning validation hook; logs the loss and shower metrics."""
         bs = len(batch)
         loss = self._step(batch, _batch_idx)
         self.log("Validation Loss", loss, on_step=True, on_epoch=True, sync_dist=True, batch_size=bs)
@@ -401,29 +335,47 @@ class LEGOLtng(ltng.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        """Returns the optimizer, with its LR scheduler when one is configured."""
         if self._lr_sched is None:
             return self.opt
         return {"optimizer": self.opt, "lr_scheduler": self._lr_sched}
 
     def setup(self, stage: str | None = None) -> None:
-        """Load the dataset once and carve off a held-out validation split."""
         if getattr(self, "_val_ds", None) is not None:
             return
-        full = LEGODataset(**self.rc.dl_conf["lds_args"])
+        full  = LEGODataset(**self.rc.dl_conf["lds_args"])
         n_val = max(1, int(len(full) * self.rc.val_conf.get("val_frac", 0.01)))
-        gen = torch.Generator().manual_seed(self.rc.val_conf.get("seed", 0))
+        gen   = torch.Generator().manual_seed(self.rc.val_conf.get("seed", 0))
         self._train_ds, self._val_ds = random_split(
             full, [len(full) - n_val, n_val], generator=gen,
         )
+        if (self.rc.base_pretrain_batches and getattr(self, "_trainer", None)
+                and hasattr(self, "base_head") and self.base_head[-1].weight.requires_grad):
+            if self.trainer.is_global_zero:
+                dev = self.trainer.strategy.root_device
+                self.base_head.to(dev)
+                loader = self._make_loader(
+                    self._train_ds, shuffle=True, bs=self.rc.base_pretrain_bs
+                )
+                final = self.pretrain_base(b.to(dev) for _, b in zip(
+                    range(self.rc.base_pretrain_batches), loader))
+                self.base_head.cpu()
+                print(f"base_head: pretrained on {self.rc.base_pretrain_batches} "
+                      f"batches (final moment loss {final:.4f}), frozen")
+            sd = self.trainer.strategy.broadcast(
+                {k: v.cpu() for k, v in self.base_head.state_dict().items()}, src=0)
+            self.base_head.load_state_dict(sd)
+            self.base_head.requires_grad_(False)
 
-    def _make_loader(self, dataset, *, shuffle: bool) -> DataLoader:
-        """Builds a :class:`~torch.utils.data.DataLoader` over ``dataset``."""
+    def _make_loader(self, dataset, *, shuffle: bool, bs: int | None = None) -> DataLoader:
         num_workers = self.rc.dl_conf.get("num_workers", 4)
         sampler = (RandomSampler if shuffle else SequentialSampler)(dataset)
         return DataLoader(
             dataset,
-            sampler=BatchSampler(sampler, self.rc.dl_conf.get("bs", 2**12), drop_last=False),
+            sampler=BatchSampler(
+                sampler,
+                bs if bs is not None else self.rc.dl_conf.get("bs", 2**12),
+                drop_last=False,
+            ),
             batch_size=None,
             num_workers=num_workers,
             pin_memory=True,
@@ -432,87 +384,42 @@ class LEGOLtng(ltng.LightningModule):
         )
 
     def train_dataloader(self) -> DataLoader:
-        """Shuffled loader over the training split."""
         return self._make_loader(self._train_ds, shuffle=True)
 
     def val_dataloader(self) -> DataLoader:
-        """Unshuffled loader over the validation split."""
         return self._make_loader(self._val_ds, shuffle=False)
 
     def chunked(self, fn, *tensors, split_size=None, dim=0, cat_dim=None):
-        """Applies ``fn`` to ``tensors`` in row chunks, concatenating results.
-
-        Runs ``fn`` once when ``split_size`` is unset or covers the whole
-        batch; otherwise splits each tensor along ``dim`` and concatenates
-        the outputs along ``cat_dim`` (defaulting to ``dim``). Bounds peak
-        memory during sampling.
-        """
-
         if split_size is None or split_size >= tensors[0].shape[dim]:
             return fn(*tensors)
         if cat_dim is None:
             cat_dim = dim
-        out = []
-        for chunk in zip(*(t.split(split_size, dim) for t in tensors)):
-            out.append(fn(*chunk))
+        out = [fn(*chunk) for chunk in zip(*(t.split(split_size, dim) for t in tensors))]
         return torch.cat(out, dim=cat_dim)
 
     def _prep_solve(
         self, ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]",
     ) -> tuple[DataStruct, Tensor]:
-        """Switches to eval mode and resolves species indices before sampling.
-
-        Returns:
-            tuple: ``(ds_t, pdgids_idx)``.
-        """
         if not isinstance(ds_t, DataStruct):
             ds_t = DataStruct(*ds_t)
         if self.model.training:
             self.model.eval()
             self._opt_eval()
-        pdgids = ds_t.f.pdgids
+        pdgids     = ds_t.f.pdgids
         pdgids_idx = pdgids.int() if self.rc.pdgid_is_idx else self.convert_pdgids(pdgids)
         return ds_t, pdgids_idx
 
     @torch.no_grad()
-    def solve(
+    def log_likelihood(
         self,
         ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]",
-        x_init: Tensor | None = None,
-        reverse: bool = False,
-        compute_ll: bool = False,
-        log_p0=None,
-        split_size: int | None = None,
+        log_p0,
         step_size: float = 0.04,
         method: str = "midpoint",
-        time_grid: Tensor | None = None,
-        return_intermediates: bool = False,
     ) -> Tensor:
-        """Integrates the ODE from the base prior to particles (or its inverse).
-
-        Wraps :class:`~flow_matching.solver.ODESolver`. With ``compute_ll``
-        it returns the log-likelihood under the flow instead of samples;
-        with ``reverse`` it integrates data->base. Conditioning slots stay
-        pinned to their data value throughout.
-
-        Args:
-            ds_t: data struct (or ``(f, m, am)`` tuple) carrying the mask.
-            x_init: starting features; defaults to the base prior.
-            reverse: integrate ``t: 1->0`` instead of ``0->1``.
-            compute_ll: return the log-likelihood rather than samples.
-            log_p0: base log-density for the likelihood path.
-            split_size: row-chunk size for bounded memory.
-            step_size, method, time_grid: ODE-solver controls.
-            return_intermediates: also return every solver step.
-
-        Returns:
-            Sampled features, log-likelihood, or the step stack per the flags.
-        """
         ds_t, pdgids_idx = self._prep_solve(ds_t)
         am = ds_t.am.full.unsqueeze(-1)
         cc = ds_t.f.model_in.where(am, ds_t.f.in_cc)
-        if x_init is not None and x_init.shape == cc.shape:
-            x_init = x_init.where(am, _F(x_init).in_p)
 
         if method == "rk4":
             def vm(*args, **kwargs):
@@ -520,35 +427,54 @@ class LEGOLtng(ltng.LightningModule):
         else:
             vm = self.model
         solver = ODESolver(velocity_model=vm)
-        common = dict(step_size=step_size, method=method, types=self.types_embd)
 
-        if compute_ll:
-            self.model.no_detach = True
-            try:
-                _, log_ll = solver.compute_likelihood(
-                    x_1=cc, log_p0=log_p0,
-                    mask=ds_t.m.full, attn_mask=ds_t.am.full,
-                    pdgids=pdgids_idx, **common,
-                )
-            finally:
-                self.model.no_detach = False
-            return log_ll
+        self.model.no_detach = True
+        try:
+            _, log_ll = solver.compute_likelihood(
+                x_1=cc, log_p0=log_p0,
+                mask=ds_t.m.full, attn_mask=ds_t.am.full,
+                pdgids=pdgids_idx, types=self.types_embd,
+                step_size=step_size, method=method,
+            )
+        finally:
+            self.model.no_detach = False
+        return log_ll
 
+    @torch.no_grad()
+    def solve(
+        self,
+        ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]",
+        x_init: Tensor | None = None,
+        reverse: bool = False,
+        split_size: int | None = None,
+        step_size: float = 0.04,
+        method: str = "midpoint",
+        time_grid: Tensor | None = None,
+        return_intermediates: bool = False,
+    ) -> Tensor:
+        ds_t, pdgids_idx = self._prep_solve(ds_t)
+        am = ds_t.am.full.unsqueeze(-1)
+        cc = ds_t.f.model_in.where(am, ds_t.f.in_cc)
+        if x_init is not None and x_init.shape == cc.shape:
+            x_init = x_init.where(am, _F(x_init).in_p)
         if x_init is None:
             x_init = self.gen_base_wrapper(ds_t)
 
-        explicit_grid = time_grid is not None
         if time_grid is None:
-            if method == "euler":
+            if method in ("euler", "midpoint"):
                 n = max(round(1.0 / step_size), 1)
-                time_grid = torch.linspace(0., 1., n + 1, device=x_init.device, dtype=x_init.dtype)
-                if reverse:
-                    time_grid = time_grid.flip(0)
+                time_grid = torch.linspace(0.0, 1.0, n + 1, device=x_init.device, dtype=x_init.dtype)
             else:
-                time_grid = x_init.new_tensor([1.0, 0.0] if reverse else [0.0, 1.0])
+                time_grid = x_init.new_tensor([0.0, 1.0])
+            if reverse:
+                time_grid = time_grid.flip(0)
 
-        if method == "midpoint" and not explicit_grid:
-            time_grid = x_init.new_tensor([1., 0.5, 0.] if reverse else [0., 0.5, 1.])
+        if method == "rk4":
+            def vm(*args, **kwargs):
+                return self.model(*args, **kwargs).clone()
+        else:
+            vm = self.model
+        solver = ODESolver(velocity_model=vm)
 
         def _sample(x_init, mask, attn_mask, pdgids_idx):
             extras = dict(mask=mask, attn_mask=attn_mask, types=self.types_embd, pdgids=pdgids_idx)
@@ -562,35 +488,27 @@ class LEGOLtng(ltng.LightningModule):
                 )
             return solver.sample(
                 x_init=x_init, time_grid=time_grid,
-                mask=mask, attn_mask=attn_mask, pdgids=pdgids_idx,
-                return_intermediates=return_intermediates, **common,
+                step_size=step_size, method=method,
+                return_intermediates=return_intermediates, **extras,
             )
 
-        out = self.chunked(
+        return self.chunked(
             _sample, x_init, ds_t.m.full, ds_t.am.full, pdgids_idx,
             split_size=split_size, cat_dim=-3,
         )
-        return out
 
     def _midpoint_steps(
         self, x: Tensor, time_grid: Tensor,
         return_intermediates: bool = False, **extras,
     ) -> Tensor:
-        """Fixed-grid midpoint (RK2) integration over ``time_grid``.
-
-        Returns the final state, or -- when ``return_intermediates`` -- the
-        stack of states at every ``time_grid`` point (``xs[0]`` is ``x_init``,
-        matching :meth:`ODESolver.sample`).
-        """
-        if return_intermediates:
-            xs = [x]
+        xs  = [x]
         man = self.model.manifold
         for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
-            dt = t_b - t_a
-            v1 = self.model(x, t_a, **extras)
+            dt     = t_b - t_a
+            v1     = self.model(x, t_a, **extras)
             x_half = man.expmap(x, dt / 2 * v1)
-            v2 = self.model(x_half, t_a + dt / 2, **extras)
-            x = man.expmap(x, dt * man.proju(x, v2))
+            v2     = self.model(x_half, t_a + dt / 2, **extras)
+            x      = man.expmap(x, dt * man.proju(x, v2))
             if return_intermediates:
                 xs.append(x)
         return torch.stack(xs) if return_intermediates else x
@@ -599,47 +517,37 @@ class LEGOLtng(ltng.LightningModule):
         self, x: Tensor, time_grid: Tensor,
         return_intermediates: bool = False, **extras,
     ) -> Tensor:
+        xs  = [x]
         gen = (extras["mask"] == 1).unsqueeze(-1)
-        if return_intermediates:
-            xs = [x]
         for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
             dt = t_b - t_a
-            s = self.model(x, t_a, **extras)
-            x = torch.where(gen, self.model.manifold.expmap(x, dt * s), x)
+            s  = self.model(x, t_a, **extras)
+            x  = torch.where(gen, self.model.manifold.expmap(x, dt * s), x)
             if return_intermediates:
                 xs.append(x)
         return torch.stack(xs) if return_intermediates else x
 
     @torch.no_grad()
     def forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None) -> tuple:
-        """Generates particles for ``batch`` end to end.
-
-        Flows the kinematics with :meth:`solve` for the slots selected by
-        the task mask. Non-attended slots are filled with ``NaN``.
-
-        Args:
-            batch: data struct (or ``(f, m, am)`` tuple) with the task mask.
-
-        Returns:
-            tuple: ``(features-with-pdgid, mask, attn_mask)``; the features
-            gain a trailing PDG-id column and lead with the solver-step axis
-            when intermediates are requested.
-        """
         if self.model.training:
             self.model.eval()
             self._opt_eval()
 
         cfg = self.rc.odeint_conf
-        if (cfg.get("fwd_compile", False)
-        and not (hasattr(self.model, "_orig_mod")
-        or hasattr(self.model.vf, "_orig_mod"))):
+        if cfg.get("fwd_compile", False) and not (
+            hasattr(self.model, "_orig_mod") or hasattr(self.model.vf, "_orig_mod")
+        ):
             self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=False)
 
         ds_t = DataStruct(*batch) if isinstance(batch, tuple) else batch
+        if self.sym is not None:
+            fwd  = ds_t.m.full[:, self.rc.n_prefix] == 0
+            face = self.sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
+            ds_t = DataStruct(self._canon_dirs(ds_t.f.full, face, fwd), ds_t.m.full, ds_t.am.full)
         base = self.gen_base_wrapper(ds_t)
 
         pdgids = ds_t.f.pdgids
-        am = ds_t.am.full.unsqueeze(-1)
+        am     = ds_t.am.full.unsqueeze(-1)
 
         if cfg.get("return_base", False):
             sols = base.masked_fill(~am, torch.nan)
@@ -666,151 +574,12 @@ class LEGOLtng(ltng.LightningModule):
                 sols.masked_fill_(~keep, torch.nan)
                 pdgids = pdgids.masked_fill(~keep, 0)
 
-        if sols.dim() == 4:
-            T = sols.shape[0]
-            pdgids = pdgids.unsqueeze(0).expand(T, -1, -1, -1)
-        return torch.cat((sols, pdgids), dim=-1), ds_t.m.full, ds_t.am.full
-
-
-def _build_reflow_teacher(reflow_path: str | None) -> nn.Module | None:
-    """Frozen, ``torch.compile``'d velocity teacher for reflow; ``None`` if path unset/missing."""
-    if reflow_path is None:
-        return None
-    if not Path(reflow_path).is_file():
-        warnings.warn(f"reflow_path={reflow_path!r} not found; reflow disabled.", stacklevel=2)
-        return None
-    teacher = LEGOLtng(torch.load(reflow_path, map_location="cpu", weights_only=False))
-    teacher.eval().requires_grad_(False)
-    teacher.model = torch.compile(teacher.model, dynamic=False)
-    return teacher
-
-
-class ProjectModelDirect(ProjectModel):
-    """Residual-prediction wrapper for the no-time direct model. Mirror
-    of :class:`ProjectModel`; only the forward differs (no time argument,
-    residual instead of velocity, single Euler step + safe sphere snap)."""
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        mask: torch.Tensor,
-        attn_mask: torch.Tensor,
-        types: torch.Tensor,
-        pdgids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Residual step ``base + vf(base)`` with a manifold snap at generated slots.
-
-        Returns:
-            Final features ``(B, L, in_dim)``.
-        """
-        _, x_attended, x_surr = self._prep_x(x, attn_mask)
-        residual = self.vf(x_surr, mask, attn_mask, types, pdgids)
-        out_raw = x_attended + residual
-        gen = (mask == 1).unsqueeze(-1)
-        ref = torch.zeros_like(out_raw)
-        ref[..., 1] = 1.0
-        ref[..., 4] = 1.0
-        safe = torch.where(gen, out_raw, ref)
-        out_proj = self.manifold.projx(safe)
-        return torch.where(gen, out_proj, out_raw)
-
-
-class LEGOLtngDirect(LEGOLtng):
-    """Direct (residual-prediction) variant of :class:`LEGOLtng`.
-
-    The transformer predicts the residual ``target - base`` at the
-    generated slots; the wrapper applies one Euler step
-    ``final = base + residual`` (plus a manifold snap on the sphere half)
-    and the loss is MSE between predicted and target.
-
-    When ``model_conf.reflow_path`` is set to a velocity-model checkpoint,
-    that model is loaded as a frozen teacher and ``teacher.solve(base)``
-    replaces the data target — giving the direct student a fixed
-    ``base -> target`` coupling per batch (the prerequisite for one-step
-    Euler to reach the target). When the path is unset or missing,
-    training falls back to MSE against the data target.
-    """
-
-    def __init__(self, full_config: dict) -> None:
-        """Builds the direct model and, if configured, the frozen reflow teacher."""
-        super().__init__(full_config)
-        object.__setattr__(
-            self, "reflow_teacher", _build_reflow_teacher(self.rc.reflow_path),
-        )
-
-    def _build_model(self, rc) -> nn.Module:
-        """Constructs the no-time residual-prediction wrapper."""
-        return ProjectModelDirect(
-            CFMTrafo_x(**rc.model_args, time_cond=False),
-            rc.manifold,
-            cond_cube=rc.cond_cube,
-        )
-
-    @torch.no_grad()
-    def on_fit_start(self) -> None:
-        """Initialises base state and moves the reflow teacher to the device."""
-        super().on_fit_start()
-        if self.reflow_teacher is not None:
-            self.reflow_teacher.to(self.device)
-
-    def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
-        """One direct-model step: residual MSE to the target (data, or the
-        reflow teacher's solved coupling).
-
-        Returns:
-            Scalar loss.
-        """
-        with torch.no_grad():
-            ds_t = DataStruct(ds_t.f.full, self._sample_mask(ds_t), ds_t.am.full)
-            base = self.gen_base_wrapper(ds_t)
-            pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
-            if self.reflow_teacher is not None:
-                solve_kwargs = dict(self.rc.reflow_kwargs)
-                if (
-                    "time_grid" not in solve_kwargs
-                    and solve_kwargs.get("method", "midpoint") == "midpoint"
-                ):
-                    solve_kwargs["time_grid"] = base.new_tensor([0.0, 1.0])
-                target = self.reflow_teacher.solve(
-                    ds_t, x_init=base, **solve_kwargs,
-                )
+        if self.sym is not None:
+            if sols.dim() == 4:
+                sols = torch.stack([self._canon_dirs(s, face, fwd, inverse=True) for s in sols])
             else:
-                target = ds_t.f.model_in
-        pred = self.model(
-            base,
-            mask=ds_t.m.full, attn_mask=ds_t.am.full,
-            types=self.types_embd, pdgids=pdgid_idx,
-        )
-        if self.rc.loss_sc_fac > 0:
-            m_gen = (ds_t.m.full == 1).to(pred.dtype)
-            loss_sc = self.loss_fn(
-                pred[..., 0] * m_gen,
-                target[..., 0] * m_gen,
-            )
-        else:
-            loss_sc = 0.0
-        sq = (pred - target) ** 2
-        return self._reduce_and_log(sq, ds_t, loss_sc)
+                sols = self._canon_dirs(sols, face, fwd, inverse=True)
 
-    @torch.no_grad()
-    def solve(
-        self,
-        ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]",
-        x_init: Tensor | None = None,
-        split_size: int | None = None,
-        **_kw,
-    ) -> Tensor:
-        """Single-pass residual prediction from the base prior (no ODE)."""
-        ds_t, pdgids_idx = self._prep_solve(ds_t)
-        if x_init is None:
-            x_init = self.gen_base_wrapper(ds_t)
-
-        def _fwd(x, m, a, pi):
-            return self.model(
-                x, mask=m, attn_mask=a, types=self.types_embd, pdgids=pi,
-            )
-
-        return self.chunked(
-            _fwd, x_init, ds_t.m.full, ds_t.am.full, pdgids_idx,
-            split_size=split_size,
-        )
+        if sols.dim() == 4:
+            pdgids = pdgids.unsqueeze(0).expand(sols.shape[0], -1, -1, -1)
+        return torch.cat((sols, pdgids), dim=-1), ds_t.m.full, ds_t.am.full

@@ -1,4 +1,4 @@
-"""Smoke test for :class:`legofmt.main.generate.GenerateOutDirect`.
+"""Smoke test for :class:`legofmt.distill.reflow.GenerateOutDirect`.
 
 Builds a tiny flow checkpoint on disk (no HF download), instantiates
 ``GenerateOut`` from it, and runs one end-to-end forward on a synthetic
@@ -13,8 +13,9 @@ import pytest
 import torch
 
 from legofmt.data.struct import _F
-from legofmt.main.generate import GenerateIn, GenerateOutDirect as GenerateOut
-from legofmt.main.modules import LEGOLtng as LEGOLtngVelocity, LEGOLtngDirect as LEGOLtng
+from legofmt.distill.reflow import GenerateOutDirect as GenerateOut, LEGOLtngDirect as LEGOLtng
+from legofmt.main.generate import GenerateIn
+from legofmt.main.modules import LEGOLtng as LEGOLtngVelocity
 
 
 def _flow_config() -> dict:

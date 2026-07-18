@@ -14,9 +14,9 @@ class ProductManifold(Manifold):
         self.ambient_dims = ambient_dims
 
     def _batch_map(self, fn_name, *tensors, **kwargs):
-        vars = [t.split(self.ambient_dims, dim=-1) for t in tensors]
+        parts = [t.split(self.ambient_dims, dim=-1) for t in tensors]
         results = [
-            getattr(man, fn_name)(*[split[i] for split in vars], **kwargs)
+            getattr(man, fn_name)(*[p[i] for p in parts], **kwargs)
             for i, man in enumerate(self.manifolds)
         ]
         return torch.cat(results, dim=-1)

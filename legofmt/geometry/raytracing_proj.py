@@ -2,7 +2,6 @@ import torch
 
 
 class CubeTrace:
-    """Utility functions for raytracing and projection onto the cube surface."""
 
     def __call__(self, *args, **kwargs):
         return self.project_particles_cc(*args, **kwargs)

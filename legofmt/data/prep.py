@@ -11,23 +11,20 @@ class DataPrep:
     def __init__(self, config):
         config = config.get("config", config)
         if "model_conf" in config:
-            model_conf = config.get("model_conf").copy()
-            self.manifold = build_manifold(model_conf.get("manifold"))
+            model_conf = config["model_conf"]
+            self.manifold = build_manifold(model_conf["manifold"])
             self.proj_ray = model_conf.get("proj_ray", True)
             cutoff_mev = config["dl_conf"]["lds_args"].get("cutoff_mev")
             max_energy = model_conf["max_energy"]
             cond = model_conf.get("cond_scalars", ("Density",))
         else:
-            self.manifold = build_manifold(config.get("manifold"))
+            self.manifold = build_manifold(config["manifold"])
             self.proj_ray = config.get("proj_ray")
             cutoff_mev = config.get("cutoff_mev")
             max_energy = config.get("max_energy")
             cond = config.get("cond_scalars", ("Density",))
         set_layout(cond)
-        self.pen = EnergyProjections(
-            cutoff_mev=cutoff_mev,
-            max_energy=max_energy,
-        )
+        self.pen = EnergyProjections(cutoff_mev=cutoff_mev, max_energy=max_energy)
         self.ppa = CubeTrace()
 
     def __call__(self, batch: tuple) -> Tensor:
@@ -58,11 +55,11 @@ class DataPrep:
     def format_add(self, batch: tuple) -> Tensor:
         cc_ext, mask, attn_mask, data_add = batch
         e_dep = torch.ones_like(cc_ext[:, :1])
-        e_dep[..., 0] = data_add.get("E_dep").view_as(e_dep[..., 0]) / self.pen.max_energy
+        e_dep[..., 0] = data_add["E_dep"].view_as(e_dep[..., 0]) / self.pen.max_energy
         cond_rows = []
         for name in cond_scalars():
             row = torch.ones_like(cc_ext[:, :1])
-            row[..., 0] = data_add.get(name).view_as(row[..., 0])
+            row[..., 0] = data_add[name].view_as(row[..., 0])
             cond_rows.append(row)
         target = torch.cat((cond_rows[0], e_dep, *cond_rows[1:], cc_ext), dim=1).nan_to_num()
         _F(target).non_p[..., -1] = 0

@@ -1,16 +1,5 @@
-"""Validation distribution metrics for the FM training loop.
-
-Vendored from ``lego-eval`` (``lego_eval/metrics.py`` + ``lego_eval/summary.py``):
-``legofmt`` cannot import ``lego_eval`` (it depends on ``legofmt`` -- circular).
-Torch + the package's :class:`~legofmt.geometry.geom_trafos.GeomTrafos` for the
-spherical conversion. ``compute_mmd`` returns an on-device scalar tensor
-(DDP-loggable); ``w1_per_feature`` is the equal-N specialisation (real/generated
-share the active mask); multiplicity counts are dropped (pdgid/multiplicity are
-conditioned).
-
-``ShowerValMetrics`` is the single entry point: it owns the generation call and
-all the slot/column conventions, so ``LEGOLtng`` only connects and logs.
-"""
+"""Vendored from lego-eval (metrics.py + summary.py); legofmt cannot import
+lego_eval (circular). w1_per_feature is the equal-N specialisation."""
 
 import torch
 
@@ -32,23 +21,16 @@ SUMMARY_FEATURE_NAMES = [
 
 
 def _spherical(mom, e, pos):
-    """``(..., 3), (..., 1), (..., 3) -> (..., 5)``: mom (theta, phi), energy, pos (theta, phi).
-
-    ``GeomTrafos.to_sph`` assumes unit vectors (``acos(z)``), so momentum and
-    position are direction-normalised first; ``e`` is the bounded energy scalar.
-    """
     mom_dir = mom / mom.norm(dim=-1, keepdim=True).clamp(min=1e-8)
     pos_dir = pos / pos.norm(dim=-1, keepdim=True).clamp(min=1e-8)
     return torch.cat([_GEOM.to_sph(mom_dir), e, _GEOM.to_sph(pos_dir)], dim=-1)
 
 
 def particle_kinematics(mom, e, pos, active):
-    """Flatten active particles to ``(N_active, 5)`` spherical kinematics."""
     return _spherical(mom, e, pos)[active]
 
 
 def event_summary(mom, e, pos, pdgid, active, e_dep):
-    """Per-event ``(B, 31)``: per-type {e-, e+, g} kinematic mean+std, then E_dep."""
     kin = _spherical(mom, e, pos)
     feats = []
     for pid in _TYPES:
@@ -61,7 +43,6 @@ def event_summary(mom, e, pos, pdgid, active, e_dep):
 
 
 def standardize(a, b):
-    """Joint μ/σ over ``cat([a, b])``; returns standardized ``(a, b)``."""
     anchor = torch.cat([a, b], dim=0)
     mu = anchor.mean(dim=0)
     sigma = anchor.std(dim=0).clamp(min=1e-8)
@@ -78,9 +59,7 @@ def _median_heuristic(X, Y, max_samples=2000):
 
 
 def compute_mmd(X, Y, max_samples=2000):
-    """Unbiased MMD (Gaussian RBF, median-heuristic bandwidth). Returns a
-    scalar tensor. Both sets are subsampled to ``max_samples`` — the
-    bandwidth budget — keeping the three N^2 kernels bounded."""
+    # unbiased MMD, Gaussian RBF with median-heuristic bandwidth; subsampled to bound the N^2 kernels
     if X.shape[0] > max_samples:
         X = X[torch.randperm(X.shape[0], device=X.device)[:max_samples]]
     if Y.shape[0] > max_samples:
@@ -99,22 +78,14 @@ def compute_mmd(X, Y, max_samples=2000):
 
 
 def w1_per_feature(X, Y):
-    """1-D Wasserstein per feature for equal-N samples. Returns ``(D,)``."""
     return (X.sort(0).values - Y.sort(0).values).abs().mean(0)
 
 
 class ShowerValMetrics:
-    """MMD + per-feature W1 between generated and real outgoing showers.
-
-    Stateless. Call with the :class:`~legofmt.main.modules.LEGOLtng` instance
-    and a validation ``DataStruct`` batch; returns a flat
-    ``{log_name: scalar_tensor}`` dict. Owns the ODE generation and every
-    slot/column convention so the module stays a thin connector.
-    """
 
     def __call__(self, lego, ds_t) -> dict:
         gen = self._generate(lego, ds_t)
-        gout = _F(gen).out_p  # layout-aware outgoing slice (handles extra cond slots)
+        gout = _F(gen).out_p
         active, pdg, rcc = ds_t.am.out_p, ds_t.f.out_p[..., -1], ds_t.f.out_cc
         reps = {
             "particle": (

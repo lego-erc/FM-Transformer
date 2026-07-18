@@ -1,7 +1,9 @@
+from dataclasses import replace
+
 import torch
 import torch.nn.functional as F
 
-from ..main.modules import LEGOLtng, LEGOLtngDirect
+from ..main.modules import LEGOLtng
 from ..multiplicity.model import MultModel
 from ..geometry.raytracing_proj import CubeTrace
 from ..geometry.energy_proj import EnergyProjections
@@ -9,34 +11,14 @@ from ..data.struct import _F, DataStruct
 
 
 class GenerateOut(torch.nn.Module):
-    """Inference entry point: turns conditioning into generated showers.
-
-    Loads a trained :class:`~legofmt.main.modules.LEGOLtng` checkpoint and a
-    trained :class:`~legofmt.multiplicity.model.MultModel` checkpoint. The
-    multiplicity model sizes the output slots (per-species counts); the flow
-    model generates the kinematics for the padded
-    ``(features, mask, attn_mask)`` batch (incoming particle -> outgoing
-    shower), projecting the entry position onto the conditioning cube along
-    the momentum ray first. See :class:`GenerateIn` for the inverse
-    direction (shower -> incoming particle).
-    """
 
     flow_cls = LEGOLtng
 
     def __init__(self, flow_conf_path: str, mult_conf_path: str, device="cpu", couple_in_out_pdgids=False):
-        """Loads both checkpoints and the geometry/energy helpers.
-
-        Args:
-            flow_conf_path: path to the saved flow checkpoint.
-            mult_conf_path: path to the saved multiplicity checkpoint.
-            device: torch device for the models and buffers.
-            couple_in_out_pdgids: restrict generated species to the
-                multiplicity model's incoming-particle vocabulary.
-        """
         super().__init__()
         flow_conf = torch.load(flow_conf_path, map_location=device, weights_only=False)
         self.model = self.flow_cls(flow_conf).to(device)
-        object.__setattr__(self.model.rc, "pdgid_is_idx", True)
+        self.model.rc = replace(self.model.rc, pdgid_is_idx=True)
         self.cond_names = tuple(self.model.rc.cond_scalars)
         self.n_prefix = self.model.rc.n_prefix
         self.n_cond = len(self.cond_names)  # = n_prefix - 1 (edep excluded)
@@ -60,27 +42,6 @@ class GenerateOut(torch.nn.Module):
         )
 
     def __call__(self, cond: torch.Tensor, prepped: bool = False):
-        """Generates a shower from conditioning; see :meth:`proj_ray_pass_to_model`."""
-        model_out = self.proj_ray_pass_to_model(cond, prepped=prepped)
-        return model_out
-
-    def proj_ray_pass_to_model(self, cond: torch.Tensor, prepped: bool = False):
-        """Projects the conditioning ray, runs the model, and restores raw PDG ids.
-
-        Unless ``prepped``, scales the momentum to the bounded energy
-        scalar and projects the entry position onto the cube along the
-        momentum ray before building the batch.
-
-        Args:
-            cond: ``(B, 8)`` rows ``[density, mom(3), pos(3), pdgid]`` with
-                energy-scaled momentum.
-            prepped: skip the ray projection / energy scaling when the input
-                is already in model space.
-
-        Returns:
-            tuple: ``(sols, mask, attn_mask)`` with raw PDG ids in the last
-            feature column.
-        """
         cond_model = cond.clone()
         if not prepped:
             nc = self.n_cond
@@ -96,24 +57,6 @@ class GenerateOut(torch.nn.Module):
         return sols, mask, attn_mask
 
     def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None):
-        """Generates ``n`` showers per incoming particle from Geant4-shaped arrays.
-
-        Broadcasts the per-event inputs (each of size 1 or batch ``B``),
-        energy-scales the unit momentum, and groups the result by
-        per-event / per-particle / per-voxel quantities.
-
-        Args:
-            n: showers to sample per incoming particle.
-            pos, mom, energy, density, pdgids: per-event conditioning arrays.
-            size: detector size; must currently be a single value.
-
-        Returns:
-            dict: ``per_event`` / ``per_particle`` / ``per_voxel`` outputs.
-
-        Raises:
-            ValueError: if multiple sizes are passed, or an argument is
-                neither size 1 nor batch ``B``.
-        """
         device = next(self.model.parameters()).device
         pos, mom, energy, density, size, pdgids = (
             t.to(device) for t in (pos, mom, energy, density, size, pdgids)
@@ -121,7 +64,6 @@ class GenerateOut(torch.nn.Module):
         Z = Z.to(device) if Z is not None else None
         A = A.to(device) if A is not None else None
 
-        # Map conditioning-scalar names to the provided per-event arrays.
         scalar_src = {"Density": density, "Z": Z, "A": A, "Size": size}
         missing = [k for k in self.cond_names if scalar_src.get(k) is None]
         if missing:
@@ -144,26 +86,20 @@ class GenerateOut(torch.nn.Module):
             )
 
         mom = F.normalize(mom, dim=-1)
-        all_B = all(s == B for s in shapes.values())
 
         def _scalar_col(x):
-            x = x.reshape(-1, 1)
-            return x.repeat_interleave(n, 0) if all_B else x.expand(B, 1).repeat_interleave(n, 0)
+            return x.reshape(-1, 1).expand(B, 1).repeat_interleave(n, 0)
 
-        if all_B:
-            cc = torch.cat((mom.view(-1, 3) * energy.view(-1, 1), pos.view(-1, 3)), dim=-1)
-            cc = cc.repeat_interleave(n, dim=0)
-        else:
-            e = energy.view(-1, 1).expand(B, 1)
-            mom_b = mom.view(-1, 3).expand(B, 3)
-            pos_b = pos.view(-1, 3).expand(B, 3)
-            cc = torch.cat((mom_b * e, pos_b), dim=-1).repeat_interleave(n, dim=0)
+        e = energy.view(-1, 1).expand(B, 1)
+        mom_b = mom.view(-1, 3).expand(B, 3)
+        pos_b = pos.view(-1, 3).expand(B, 3)
+        cc = torch.cat((mom_b * e, pos_b), dim=-1).repeat_interleave(n, dim=0)
 
         conds_b = torch.cat([_scalar_col(scalar_src[k]) for k in self.cond_names], dim=-1)
         pdgids_b = _scalar_col(pdgids).to(cc.dtype)
         cond = torch.cat((conds_b, cc, pdgids_b), dim=-1)
 
-        sols, _, _ = self.proj_ray_pass_to_model(cond, prepped=False)
+        sols, _, _ = self(cond)
         s = _F(sols)
         per_event = {"E_dep": s.edep}
         per_event.update({k: s.cond(k) for k in self.cond_names})
@@ -174,22 +110,6 @@ class GenerateOut(torch.nn.Module):
         }
 
     def gen_batch(self, cond: torch.Tensor):
-        """Lays out the padded forward-generation batch from sampled counts.
-
-        Runs the multiplicity model on the incoming particle to draw
-        per-species counts, rescales them to fit ``max_seq_l``, and builds
-        the padded features: incoming particle at slot ``2``, one outgoing
-        slot per sampled particle with its species index in the last
-        column, edep slot and all occupied outgoing slots marked as
-        generated (``mask==1``).
-
-        Args:
-            cond: projected conditioning row
-                ``[density, energy, dir(3), pos(3), pdgid]``.
-
-        Returns:
-            tuple: ``(cond_fm (B, L, 8), mask (B, L), attn_mask (B, L))``.
-        """
         pdgid_in = cond[:, -1].long()
         pdgid_in_idx = torch.searchsorted(self.pdgid_in, pdgid_in)
         mult = self.gen_mult((cond[:, :self.n_cond + 7], None, pdgid_in_idx))
@@ -206,22 +126,23 @@ class GenerateOut(torch.nn.Module):
         mult.scatter_add_(-1, dist, valid)
 
         idx = torch.arange(max_particles, device=mult.device)
-        attn_mask = idx < mult.sum(-1, keepdim=True)
-        pdgid_pad = torch.zeros_like(attn_mask, dtype=torch.long)
+        occupied = idx < mult.sum(-1, keepdim=True)
+        pdgid_pad = torch.zeros_like(occupied, dtype=torch.long)
         cumsum_idx = mult.cumsum(-1)[..., :-1].clamp(max=max_particles - 1)
         pdgid_pad.scatter_add_(-1, cumsum_idx, torch.ones_like(pdgid_pad)).cumsum_(-1)
+
         conds = cond[:, :self.n_cond]          # per-event conditioning scalars
-        token = cond[:, self.n_cond:]          # [e, dir(3), pos(3), pdgid] (8 cols)
-        token[..., -1] = torch.searchsorted(self.pdgids, pdgid_in) + 1
-        token = token[:, None, :]
-        cond_pad_r = token.repeat(1, self.max_seq_l - (self.n_prefix + 1), 1)
-        cond_pad_r[..., -1] = attn_mask * (pdgid_pad + 1)
+        in_tok = cond[:, self.n_cond:]         # [e, dir(3), pos(3), pdgid] (8 cols)
+        in_tok[..., -1] = torch.searchsorted(self.pdgids, pdgid_in) + 1
+        in_tok = in_tok[:, None, :]
+        out_tok = in_tok.repeat(1, max_particles, 1)
+        out_tok[..., -1] = occupied * (pdgid_pad + 1)
         cond_fm = torch.cat(
-            (torch.zeros_like(token).expand(-1, self.n_prefix, -1), token, cond_pad_r), dim=1
+            (torch.zeros_like(in_tok).expand(-1, self.n_prefix, -1), in_tok, out_tok), dim=1
         )
 
         attn_mask = torch.cat(
-            (torch.ones_like(attn_mask[:, :1]).repeat(1, self.n_prefix + 1), attn_mask), dim=1
+            (torch.ones_like(occupied[:, :1]).repeat(1, self.n_prefix + 1), occupied), dim=1
         )
         mask = attn_mask.clone().long()
         cond_idx = [0, *range(2, self.n_prefix), self.n_prefix]  # cond scalars + incoming; edep stays 1
@@ -234,30 +155,9 @@ class GenerateOut(torch.nn.Module):
 
 
 class GenerateIn(GenerateOut):
-    """Inverse entry point: infers the incoming particle from a shower.
-
-    Uses the multiplicity model's inverse direction to pick the
-    incoming-particle species (the one with the most weight) and the flow
-    model with the inverse mask (only slot ``2`` generated) for its
-    kinematics.
-    """
 
     @torch.no_grad()
     def __call__(self, batch):
-        """Infers the incoming particle from the outgoing shower.
-
-        Flips the mask so only the incoming slot (``2``) is generated and
-        everything else conditions, writes the argmax species from the
-        multiplicity model into the incoming slot, and flows the
-        kinematics.
-
-        Args:
-            batch: data struct (or ``(f, m, am)`` tuple) holding the shower
-                with raw PDG ids in the last feature column.
-
-        Returns:
-            The incoming-particle features ``(B, 1, 8)`` with a raw PDG id.
-        """
         ds = batch if isinstance(batch, DataStruct) else DataStruct(*batch)
         f = ds.f.full.clone()
         m = torch.zeros_like(ds.m.full)
@@ -283,8 +183,3 @@ class GenerateIn(GenerateOut):
         )[sols[..., -1].long()]
         return _F(sols).in_p
 
-
-class GenerateOutDirect(GenerateOut):
-    """Direct variant — uses :class:`legofmt.main.modules.LEGOLtngDirect`
-    as the flow component."""
-    flow_cls = LEGOLtngDirect

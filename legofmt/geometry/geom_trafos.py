@@ -2,7 +2,6 @@ import torch
 
 
 class GeomTrafos:
-    """Utility geometry and coordinate transformations."""
 
     def _batched(self, coords, c_dims, f_name):
         out = getattr(self, f_name)(coords.unfold(-1, c_dims, c_dims))
@@ -43,10 +42,9 @@ class GeomTrafos:
         loc = self.to_sph(loc_cc).expand((*n, -1))
         if bs_frac > 0.0:
             loc = loc.clone()
-        loc_theta, loc_phi = loc.split(1, -1)
-        if bs_frac > 0.0:
             k = round(bs_frac * n[0])
-            loc_theta[:k] = loc_theta[:k] + torch.pi
+            loc[:k, ..., 0] += torch.pi
+        loc_theta, loc_phi = loc.split(1, -1)
         if not tanh_theta:
             samples_theta = ((
                 2 / kappa * torch.randn(n, device=loc_cc.device) + torch.pi
