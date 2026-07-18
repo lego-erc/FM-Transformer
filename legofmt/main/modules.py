@@ -26,6 +26,8 @@ from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.data.struct import DataStruct, _F
 
+from legofmt.distill.distill import one_step_euler_loss
+
 from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.geometry.gen_base import GenerateBase
 from legofmt.geometry.path_sample_mult import ProductPathSampler, ProductManifold
@@ -284,7 +286,10 @@ class LEGOLtng(ltng.LightningModule):
         loss = self._reduce_and_log(sq, ds_t, loss_sc)
 
         if self.rc.one_step_euler_fac > 0:
-            loss = loss + self.rc.one_step_euler_fac * self._one_step_euler_loss(base, ds_t, pdgid_idx, ps_)
+            sc = one_step_euler_loss(self, base, ds_t, pdgid_idx)
+            if self.training:
+                self.log("loss/one_step_euler", sc.detach(), on_step=True, on_epoch=False, logger=True, sync_dist=False)
+            loss = loss + self.rc.one_step_euler_fac * sc
 
         if (ot := self._base_dist_loss) is not None:
             loss = loss + self.rc.base_dist_loss * ot
@@ -295,32 +300,6 @@ class LEGOLtng(ltng.LightningModule):
                     on_step=True, on_epoch=False, logger=True, sync_dist=False,
                 )
         return loss
-
-    def _one_step_euler_loss(
-        self, base: Tensor, ds_t: DataStruct, pdgid_idx: Tensor, ps_,
-    ) -> Tensor:
-        mask, am = ds_t.m.full, ds_t.am.full
-        gen = (mask == 1).unsqueeze(-1)
-        g   = gen & am.unsqueeze(-1)
-        ckw = dict(mask=mask, attn_mask=am, types=self.types_embd, pdgids=pdgid_idx)
-        man = self.model.manifold
-
-        with torch.no_grad():
-            i    = torch.randint(1, self.rc.one_step_euler_sections + 1, (base.shape[0], 1), device=base.device)
-            step = 2.0 ** -(i - 1).to(base.dtype)  # queried step D, (B, 1)
-            half = step / 2
-            t0   = (torch.rand_like(step) * (1.0 / step).round()).floor() * step  # grid-aligned start
-            x0   = self.ps.sample(base, ds_t.f.model_in, t0.squeeze(-1)).x_t
-        s_pred = self.model(x0, t0, **ckw)
-        with torch.no_grad():
-            x_mid = torch.where(gen, man.expmap(x0, half.unsqueeze(-1) * s_pred), x0)
-            s_mid = self.model(x_mid, t0 + half, **ckw)
-            x_end = torch.where(gen, man.expmap(x_mid, half.unsqueeze(-1) * s_mid), x0)
-            tgt   = man.logmap(x0, x_end) / step.unsqueeze(-1)
-        sc = ((s_pred - tgt) ** 2 * g).sum() / (g.sum().clamp(min=1) * s_pred.shape[-1])
-        if self.training:
-            self.log("loss/one_step_euler", sc.detach(), on_step=True, on_epoch=False, logger=True, sync_dist=False)
-        return sc
 
     def pretrain_base(self, batches, lr: float = 1e-2) -> float:
         opt          = torch.optim.Adam(self.base_head.parameters(), lr=lr)
