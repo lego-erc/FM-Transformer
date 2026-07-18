@@ -100,12 +100,20 @@ train_model = run["train_model"]
 compile_mode = run["compile"]  # false | model | forward_fused
 if train_model == "fm":
     model = LEGOLtng(config)
-    if compile_mode == "model":
-        model.model = torch.compile(model.model, dynamic=False)
-    elif compile_mode == "forward_fused":
-        model.model.forward_fused = torch.compile(model.model.forward_fused, dynamic=False)
 else:
     model = MultModel(config)
+
+resume_from = run.get("resume_from")
+if resume_from:
+    prev = torch.load(resume_from, map_location="cpu", weights_only=False)
+    target = model.model.vf if train_model == "fm" else model
+    incompat = target.load_state_dict(prev["state_dict"], strict=False)
+    assert not incompat.unexpected_keys, f"resume_from arch mismatch: {incompat}"
+
+if train_model == "fm" and compile_mode == "model":
+    model.model = torch.compile(model.model, dynamic=False)
+elif train_model == "fm" and compile_mode == "forward_fused":
+    model.model.forward_fused = torch.compile(model.model.forward_fused, dynamic=False)
 
 trainer.fit(
     model=model

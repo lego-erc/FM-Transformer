@@ -14,7 +14,7 @@ from legofmt.data.prep import DataPrep
 
 rng = np.random.default_rng(0)
 
-n_items = 500        # one (energy, density) draw per item
+n_items = 500        # density points swept per material
 n_events_per_item = 4000
 
 pos = np.array([-50.0, 0.0, 0.0], dtype=np.float64)   # ignored with random_gun=True
@@ -23,17 +23,27 @@ mom = np.array([1.0, 0.0, 0.0], dtype=np.float64)
 energy = np.array([300.0], dtype=np.float64)
 energy_max = 300.0
 energy_min = 10.0
-density = np.linspace(0.5, 10.0, n_items)
-# density = np.array([3.0], dtype=np.float64)
-size = np.array([100.0], dtype=np.float64)
 pdgids_in = np.array([-11, 11, 22], dtype=np.int32)
+
+materials = [
+    (18.0, 39.95, 100.0),   # argon
+    (29.0, 63.546, 10.0),   # copper
+]
+density_space = np.linspace(0.5, 10.0, n_items)
+
+density       = np.tile(density_space, len(materials))
+atomic_number = np.repeat(np.array([z for z, _, _ in materials], dtype=np.float64), n_items)
+mass_number   = np.repeat(np.array([a for _, a, _ in materials], dtype=np.float64), n_items)
+size          = np.repeat(np.array([s for _, _, s in materials], dtype=np.float64), n_items)
 
 data = pyg4lego.run_simulation(
     n_events_per_item, pos, mom, energy,
-    random_energy_emax=energy_max, 
+    random_energy_emax=energy_max,
     random_energy_emin=energy_min,
     random_gun=True,
     density=density,
+    atomic_number=atomic_number,
+    mass_number=mass_number,
     size=size,
     random_energy=True,
     SourceParticles=pdgids_in,
@@ -42,11 +52,17 @@ data = {grp: {k: torch.as_tensor(v) for k, v in d.items()} for grp, d in data.it
 
 manifold = [{"name": "euclidean", "dim": 1 }, {"name": "sphere", "dim": 3 }, {"name": "sphere", "dim": 3 }]
 
+# Per-event conditioning scalars, in slot order. Must match the per_event keys
+# emitted by pyg4lego, and be identical in the training config; otherwise the
+# extra scalars are silently dropped / the slot layout mismatches.
+cond_scalars = ["Density", "Z", "A", "Size"]
+
 config = {
     "cutoff_mev": energy_min,
     "max_energy": energy_max,
     "manifold": manifold,
     "proj_ray": True,
+    "cond_scalars": cond_scalars,
 }
 
 dataset = LEGODataset(
@@ -58,7 +74,7 @@ dataset = LEGODataset(
     device="cpu",
 )
 
-out_dir = "<PATH>" # make this the path to the folder where this script lives
+out_dir = os.path.dirname(os.path.abspath(__file__))
 os.makedirs(out_dir, exist_ok=True)
 
 d = dataset.data
@@ -74,6 +90,7 @@ meta_dict = {
     "particles_in": pdgids_in.tolist(),
     "max_energy": energy_max,
     "cutoff_mev": energy_min,
+    "cond_scalars": cond_scalars,
 }
 
 with open(f"{out_dir}/meta.json", "w") as f:

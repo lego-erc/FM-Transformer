@@ -37,6 +37,9 @@ class GenerateOut(torch.nn.Module):
         flow_conf = torch.load(flow_conf_path, map_location=device, weights_only=False)
         self.model = self.flow_cls(flow_conf).to(device)
         object.__setattr__(self.model.rc, "pdgid_is_idx", True)
+        self.cond_names = tuple(self.model.rc.cond_scalars)
+        self.n_prefix = self.model.rc.n_prefix
+        self.n_cond = len(self.cond_names)  # = n_prefix - 1 (edep excluded)
 
         mult_conf = torch.load(mult_conf_path, map_location=device, weights_only=False)
         self.gen_mult = MultModel(mult_conf).to(device)
@@ -80,18 +83,19 @@ class GenerateOut(torch.nn.Module):
         """
         cond_model = cond.clone()
         if not prepped:
-            mom, pos = cond_model[:, 1:4], cond_model[:, 4:7]
+            nc = self.n_cond
+            mom, pos = cond_model[:, nc:nc + 3], cond_model[:, nc + 3:nc + 6]
             pos = self.proj_ray(torch.cat((mom, pos), dim=-1))[..., 3:]
             dir_, e = self.pen.to_scalar(mom)
             cond_model = torch.cat(
-                (cond_model[:, :1], e, dir_, pos, cond_model[:, 7:]), dim=-1
+                (cond_model[:, :nc], e, dir_, pos, cond_model[:, nc + 6:]), dim=-1
             )
         batch = self.gen_batch(cond_model)
         sols, mask, attn_mask = self.model(batch)
         sols[..., -1] = torch.cat([sols.new_zeros(1), self.pdgids.to(sols.dtype)])[sols[..., -1].long()]
         return sols, mask, attn_mask
 
-    def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids):
+    def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None):
         """Generates ``n`` showers per incoming particle from Geant4-shaped arrays.
 
         Broadcasts the per-event inputs (each of size 1 or batch ``B``),
@@ -114,18 +118,24 @@ class GenerateOut(torch.nn.Module):
         pos, mom, energy, density, size, pdgids = (
             t.to(device) for t in (pos, mom, energy, density, size, pdgids)
         )
+        Z = Z.to(device) if Z is not None else None
+        A = A.to(device) if A is not None else None
 
-        if size.shape[0] != 1:
-            raise ValueError("Multiple sizes not yet supported.")
+        # Map conditioning-scalar names to the provided per-event arrays.
+        scalar_src = {"Density": density, "Z": Z, "A": A, "Size": size}
+        missing = [k for k in self.cond_names if scalar_src.get(k) is None]
+        if missing:
+            raise ValueError(f"gen_model_w_g4_args missing conditioning arrays for {missing}")
+        if "Size" not in self.cond_names and size.shape[0] != 1:
+            raise ValueError("Multiple sizes not yet supported (size is not a conditioning variable).")
 
         shapes = {
             "pos": pos.view(-1, 3).shape[0],
             "mom": mom.view(-1, 3).shape[0],
             "energy": energy.shape[0],
-            "density": density.shape[0],
             "pdgids": pdgids.shape[0],
+            **{k: scalar_src[k].reshape(-1).shape[0] for k in self.cond_names},
         }
-
         B = max(shapes.values())
         err_size = {k: v for k, v in shapes.items() if v not in (1, B)}
         if err_size:
@@ -134,26 +144,31 @@ class GenerateOut(torch.nn.Module):
             )
 
         mom = F.normalize(mom, dim=-1)
+        all_B = all(s == B for s in shapes.values())
 
-        if all([shape == B for shape in shapes.values()]):
+        def _scalar_col(x):
+            x = x.reshape(-1, 1)
+            return x.repeat_interleave(n, 0) if all_B else x.expand(B, 1).repeat_interleave(n, 0)
+
+        if all_B:
             cc = torch.cat((mom.view(-1, 3) * energy.view(-1, 1), pos.view(-1, 3)), dim=-1)
             cc = cc.repeat_interleave(n, dim=0)
-            d = density.view(-1, 1).repeat_interleave(n, dim=0)
-            pdgids_b = pdgids.view(-1, 1).repeat_interleave(n, dim=0).to(cc.dtype)
         else:
             e = energy.view(-1, 1).expand(B, 1)
             mom_b = mom.view(-1, 3).expand(B, 3)
             pos_b = pos.view(-1, 3).expand(B, 3)
-            d = density.view(-1, 1).expand(B, 1).repeat_interleave(n, dim=0)
-            pdgids_b = pdgids.view(-1, 1).expand(B, 1).repeat_interleave(n, dim=0)
             cc = torch.cat((mom_b * e, pos_b), dim=-1).repeat_interleave(n, dim=0)
 
-        cond = torch.cat((d, cc, pdgids_b), dim=-1)
+        conds_b = torch.cat([_scalar_col(scalar_src[k]) for k in self.cond_names], dim=-1)
+        pdgids_b = _scalar_col(pdgids).to(cc.dtype)
+        cond = torch.cat((conds_b, cc, pdgids_b), dim=-1)
 
         sols, _, _ = self.proj_ray_pass_to_model(cond, prepped=False)
         s = _F(sols)
+        per_event = {"E_dep": s.edep}
+        per_event.update({k: s.cond(k) for k in self.cond_names})
         return {
-            "per_event": {"E_dep": s.edep, "Density": s.d},
+            "per_event": per_event,
             "per_particle": {"Incoming": s.in_p, "Outgoing": s.out_p},
             "per_voxel": {"E_dep": sols.new_empty(sols.shape[0], 0, 4)},
         }
@@ -177,10 +192,10 @@ class GenerateOut(torch.nn.Module):
         """
         pdgid_in = cond[:, -1].long()
         pdgid_in_idx = torch.searchsorted(self.pdgid_in, pdgid_in)
-        mult = self.gen_mult((cond[:, :8], None, pdgid_in_idx))
+        mult = self.gen_mult((cond[:, :self.n_cond + 7], None, pdgid_in_idx))
         mult = mult[:, self.ptype_idx] * self.ptype_in_mask
 
-        max_particles = self.max_seq_l - 3
+        max_particles = self.max_seq_l - (self.n_prefix + 1)
         total = mult.sum(-1, keepdim=True)
         scale = (max_particles / total).clamp(max=1.0)
         mult = (mult * scale).long()
@@ -195,20 +210,25 @@ class GenerateOut(torch.nn.Module):
         pdgid_pad = torch.zeros_like(attn_mask, dtype=torch.long)
         cumsum_idx = mult.cumsum(-1)[..., :-1].clamp(max=max_particles - 1)
         pdgid_pad.scatter_add_(-1, cumsum_idx, torch.ones_like(pdgid_pad)).cumsum_(-1)
-        density = cond[:, 0]
-        token = cond[:, 1:]
+        conds = cond[:, :self.n_cond]          # per-event conditioning scalars
+        token = cond[:, self.n_cond:]          # [e, dir(3), pos(3), pdgid] (8 cols)
         token[..., -1] = torch.searchsorted(self.pdgids, pdgid_in) + 1
         token = token[:, None, :]
-        cond_pad_r = token.repeat(1, self.max_seq_l - 3, 1)
+        cond_pad_r = token.repeat(1, self.max_seq_l - (self.n_prefix + 1), 1)
         cond_pad_r[..., -1] = attn_mask * (pdgid_pad + 1)
         cond_fm = torch.cat(
-            (torch.zeros_like(token).expand(-1, 2, -1), token, cond_pad_r), dim=1
+            (torch.zeros_like(token).expand(-1, self.n_prefix, -1), token, cond_pad_r), dim=1
         )
 
-        attn_mask = torch.cat((torch.ones_like(attn_mask[:, :3]), attn_mask), dim=1)
+        attn_mask = torch.cat(
+            (torch.ones_like(attn_mask[:, :1]).repeat(1, self.n_prefix + 1), attn_mask), dim=1
+        )
         mask = attn_mask.clone().long()
-        mask[:, [0, 2]] = 0
-        cond_fm[:, 0, 0] = density
+        cond_idx = [0, *range(2, self.n_prefix), self.n_prefix]  # cond scalars + incoming; edep stays 1
+        mask[:, cond_idx] = 0
+        cond_fm[:, 0, 0] = conds[:, 0]
+        for j in range(1, self.n_cond):
+            cond_fm[:, j + 1, 0] = conds[:, j]
         _F(cond_fm).non_p[..., 1:-1] = 1
         return cond_fm, mask, attn_mask
 
@@ -241,11 +261,12 @@ class GenerateIn(GenerateOut):
         ds = batch if isinstance(batch, DataStruct) else DataStruct(*batch)
         f = ds.f.full.clone()
         m = torch.zeros_like(ds.m.full)
-        m[:, 2] = 1
+        m[:, self.n_prefix] = 1  # only the incoming slot is inferred
         ds = DataStruct(f, m, ds.am.full)
-        out_tok = torch.cat(
-            (ds.f.d.view(-1, 1, 1).expand_as(ds.f.out_cc[..., :1]), ds.f.out_cc), dim=-1
-        )
+        conds = torch.cat(
+            [ds.f.cond(n).view(-1, 1, 1) for n in self.cond_names], dim=-1
+        ).expand(-1, ds.f.out_cc.shape[1], -1)
+        out_tok = torch.cat((conds, ds.f.out_cc), dim=-1)
         out_pid = torch.searchsorted(
             self.ptypes, ds.f.out_p[..., -1].long()
         ).clamp(max=len(self.ptypes) - 1)
@@ -253,7 +274,7 @@ class GenerateIn(GenerateOut):
         # The flow runs with pdgid_is_idx=True: swap the raw ids the mult
         # model consumed above for flow-vocabulary indices.
         f[..., -1] = self.model.convert_pdgids(f[..., -1]).to(f.dtype)
-        f[:, 2, -1] = torch.searchsorted(
+        f[:, self.n_prefix, -1] = torch.searchsorted(
             self.pdgids, self.pdgid_in[pid_in_idx]
         ).clamp(max=len(self.pdgids) - 1) + 1
         sols, _, _ = self.model(ds)

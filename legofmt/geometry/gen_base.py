@@ -35,6 +35,7 @@ class GenerateBase:
         self.e_dep_max = base_conf.get("e_dep_max", 1.)
         self.bs_frac = base_conf.get("bs_frac", 0.0)
         self.scale_dist = base_conf.get("scale_dist", "trunc_norm")
+        self.sm_scale = base_conf.get("sm_scale", 0.5)  # sm_norm tanh temperature; larger -> flatter energy base
 
         if base_dist != "poles":
             raise ValueError("base_dist's other than poles are currently deprecated")
@@ -68,7 +69,7 @@ class GenerateBase:
         elif self.scale_dist == "uniform":
             u = torch.rand((*shape, 1), device=e_in.device)
         elif self.scale_dist == "sm_norm":
-            u = 1 - torch.tanh(torch.randn((*shape, 1), device=e_in.device).abs() / 2)
+            u = 1 - torch.tanh(torch.randn((*shape, 1), device=e_in.device).abs() * self.sm_scale)
         else:
             raise ValueError("Unknown scale_dist")
         return e_in.view(-1, 1, 1) * u

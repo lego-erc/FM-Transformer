@@ -3,6 +3,29 @@ from torch import Tensor
 from torch.utils.data._utils.collate import default_collate_fn_map
 
 
+# Conditioning-scalar slot layout: [cond[0]=density, edep, *cond[1:], incoming,
+# *outgoing]. Names are data_add keys; default = original (density, edep) prefix.
+_COND_SCALARS: tuple[str, ...] = ("Density",)
+
+
+def set_layout(cond_scalars) -> None:
+    global _COND_SCALARS
+    _COND_SCALARS = tuple(cond_scalars)
+
+
+def cond_scalars() -> tuple[str, ...]:
+    return _COND_SCALARS
+
+
+def n_prefix() -> int:
+    return len(_COND_SCALARS) + 1
+
+
+def cond_slot(name: str) -> int:
+    i = _COND_SCALARS.index(name)
+    return 0 if i == 0 else i + 1
+
+
 class _F:
 
     def __init__(self, f: Tensor) -> None:
@@ -12,20 +35,21 @@ class _F:
     def d(self) -> Tensor: return self.full[..., 0, 0]
     @property
     def edep(self) -> Tensor: return self.full[..., 1, 0]
+    def cond(self, name: str) -> Tensor: return self.full[..., cond_slot(name), 0]
     @property
     def pdgids(self) -> Tensor: return self.full[..., -1:]
     @property
-    def non_p(self) -> Tensor: return self.full[..., :2, :]
+    def non_p(self) -> Tensor: return self.full[..., :n_prefix(), :]
     @property
-    def in_p(self) -> Tensor: return self.full[..., 2:3, :]
+    def in_p(self) -> Tensor: return self.full[..., n_prefix():n_prefix() + 1, :]
     @property
-    def out_p(self) -> Tensor: return self.full[..., 3:, :]
+    def out_p(self) -> Tensor: return self.full[..., n_prefix() + 1:, :]
     @property
-    def non_cc(self) -> Tensor: return self.full[..., :2, 0:7]
+    def non_cc(self) -> Tensor: return self.full[..., :n_prefix(), 0:7]
     @property
-    def in_cc(self) -> Tensor: return self.full[..., 2:3, 0:7]
+    def in_cc(self) -> Tensor: return self.full[..., n_prefix():n_prefix() + 1, 0:7]
     @property
-    def out_cc(self) -> Tensor: return self.full[..., 3:, 0:7]
+    def out_cc(self) -> Tensor: return self.full[..., n_prefix() + 1:, 0:7]
     @property
     def model_in(self) -> Tensor: return self.full[..., 0:7]
     @property
@@ -37,7 +61,7 @@ class _M:
     def __init__(self, m: Tensor) -> None:
         self.full = m.squeeze(-1) if m.ndim > 2 else m
     @property
-    def out_p(self) -> Tensor: return self.full[..., 3:]
+    def out_p(self) -> Tensor: return self.full[..., n_prefix() + 1:]
 
 
 class DataStruct:
