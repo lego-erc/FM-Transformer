@@ -592,9 +592,9 @@ def _resolve_fresh_mult(config: dict) -> ResolvedMultConfig:
         raise KeyError("Fresh-training mult config requires dl_conf.lds_args.data")
 
     meta = json.loads(Path(dpath, "meta.json").read_text())
-    cond_scalars = tuple(mm_conf.get("cond_scalars", meta.get("cond_scalars", ("Density",))))
-    set_layout(cond_scalars)  # before MultLoader, which reads layout-dependent accessors
-    n_prefix = len(cond_scalars) + 1
+    mm_conf.setdefault("cond_scalars", tuple(meta.get("cond_scalars", ("Density",))))
+    set_layout(tuple(mm_conf["cond_scalars"]))  # before MultLoader, which reads layout-dependent accessors
+    n_prefix = len(mm_conf["cond_scalars"]) + 1
     mm_conf.setdefault("max_out_particles", meta["ntokens"] - (n_prefix + 1))
     mm_conf.setdefault(
         "ptypes", torch.tensor(meta["particles"]).sort().values
