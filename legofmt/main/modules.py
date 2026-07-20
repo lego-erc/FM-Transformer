@@ -217,7 +217,7 @@ class LEGOLtng(ltng.LightningModule):
                         ((a * b).sum(-1).clamp(-1 + 1e-6, 1 - 1e-6).acos()
                          if isinstance(mf, Sphere) else (a - b).norm(dim=-1)) ** 2
                         for mf, a, b in zip(man.manifolds, tgt, ref)
-                    ).sqrt() + inf_cond * 1e6
+                    ) + inf_cond * 1e6
                 assign = slap(cost, cost.device).long()
                 out[:] = torch.take_along_dim(out, assign.unsqueeze(-1), dim=1)
             base = self.gen_base.insert_add(base)
