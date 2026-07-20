@@ -56,6 +56,7 @@ class ResolvedLEGOConfig:
     t_dist: str
     t_dist_scale: float
     t_zero_frac: float
+    t_dist_shift: float
     ot_coupling: bool
     ot_e_only: bool
     base_dist_loss: float
@@ -188,6 +189,7 @@ def _build_resolved(
         t_dist=model_conf.get("t_dist", "sd3"),
         t_dist_scale=model_conf.get("t_dist_scale", 1.4),
         t_zero_frac=model_conf.get("t_zero_frac", 0.0),
+        t_dist_shift=model_conf.get("t_dist_shift", 1.0),
         ot_coupling=model_conf.get("ot_coupling", False),
         ot_e_only=model_conf.get("ot_e_only", False),
         base_dist_loss=model_conf.get("base_dist_loss", 0.0),

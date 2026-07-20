@@ -103,14 +103,20 @@ class LEGOLtng(ltng.LightningModule):
             bc = self.rc.config.get("base_conf") or {}
             self.base_head = nn.Sequential(
                 nn.Linear(3 + len(self.rc.pdgids_template), 16), nn.Mish(),
-                nn.Linear(16, 1))
+                nn.Linear(16, 3))
             with torch.no_grad():
                 self.base_head[-1].weight.zero_()
                 self.base_head[-1].bias.copy_(torch.tensor(
-                    [float(self.gen_base.sm_scale)]).log())
+                    [float(self.gen_base.sm_scale), 1.0, 1.0]).log())
                 hs = bc.get("base_head")
                 if hs is not None and hs.keys() == self.base_head.state_dict().keys():
-                    self.base_head.load_state_dict(hs)
+                    if hs["2.weight"].shape == self.base_head[-1].weight.shape:
+                        self.base_head.load_state_dict(hs)
+                    else:
+                        self.base_head[0].load_state_dict(
+                            {"weight": hs["0.weight"], "bias": hs["0.bias"]})
+                        self.base_head[-1].weight[0:1].copy_(hs["2.weight"])
+                        self.base_head[-1].bias[0:1].copy_(hs["2.bias"])
                     self.base_head.requires_grad_(not bc.get("base_head_frozen", False))
             params += [p for p in self.base_head.parameters() if p.requires_grad]
         self.opt, self._lr_sched = build_optimizer(params, self.rc.opt_conf)
@@ -185,7 +191,9 @@ class LEGOLtng(ltng.LightningModule):
                     t       = ds_t.f.cond("Size") * ds_t.f.cond("Density") / x0
                     x       = torch.cat((ds_t.f.in_cc[..., 0], species,
                                          t.log().unsqueeze(-1)), dim=-1)
-                    s       = self.base_head(x).exp()
+                    out     = self.base_head(x)
+                    s       = out[..., 0:1].exp()
+                    mu, sig = out[..., 1:2], out[..., 2:3].exp()
                     if learn:
                         z   = 2 ** 0.5 * torch.erfinv(torch.linspace(
                             -0.995, 0.995, 100, device=s.device))  # N(0,1) quantile nodes
@@ -194,8 +202,17 @@ class LEGOLtng(ltng.LightningModule):
                         n   = v.sum(-1).clamp(min=1)
                         u_t = (ds_t.f.out_cc[..., 0] * v).sum(-1) / n
                         ev  = (v.sum(-1) > 0).float()
-                        self._base_dist_loss = ((u_b - u_t) ** 2 * ev).sum() / ev.sum().clamp(min=1)
+                        l_scale = ((u_b - u_t) ** 2 * ev).sum() / ev.sum().clamp(min=1)
+                        ed_b = self.gen_base.e_dep_max * torch.sigmoid(mu + sig * z)
+                        ed_t = ds_t.f.edep
+                        w    = fwd.float()
+                        l_edep = (((ed_b.mean(-1) - ed_t) ** 2
+                                   + (ed_b.pow(2).mean(-1) - ed_t ** 2) ** 2) * w
+                                  ).sum() / w.sum().clamp(min=1)
+                        self._base_dist_loss = l_scale + l_edep
                 self.gen_base.sm_scale = s.detach().unsqueeze(-1)
+                self.gen_base.edep_mu  = mu.detach()
+                self.gen_base.edep_sig = sig.detach()
             base = torch.cat(
                 (ds_t.f.non_cc, self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc)), dim=1,
             )
@@ -272,6 +289,8 @@ class LEGOLtng(ltng.LightningModule):
                 raise ValueError(f"unknown t_dist: {self.rc.t_dist!r}")
             if self.rc.t_zero_frac > 0:
                 t = t * (torch.rand_like(t) >= self.rc.t_zero_frac)
+            if self.rc.t_dist_shift != 1.0:
+                t = t.clamp(min=0) ** (1.0 / self.rc.t_dist_shift)
             ps_ = self.ps.sample(base, ds_t.f.model_in, t)
         v_out = self.model(
             ps_.x_t, ps_.t,

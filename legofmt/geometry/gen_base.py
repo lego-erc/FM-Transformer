@@ -17,6 +17,8 @@ class GenerateBase:
         self.bs_frac = base_conf.get("bs_frac", 0.0)
         self.scale_dist = base_conf.get("scale_dist", "trunc_norm")
         self.sm_scale = base_conf.get("sm_scale", 0.5)  # sm_norm tanh temperature; larger -> flatter energy base
+        self.edep_mu = 0.0   # per-event edep base params; overwritten by LEGOLtng's base_head
+        self.edep_sig = 1.0
 
         if base_dist != "poles":
             raise ValueError("base_dist's other than poles are currently deprecated")
@@ -58,5 +60,8 @@ class GenerateBase:
 
     @torch.no_grad()
     def insert_add(self, base):
-        base[:, 1, 0] = self.e_dep_max * torch.sigmoid(torch.randn_like(base[:, 1, 0]))
+        mu, sig = self.edep_mu, self.edep_sig
+        if torch.is_tensor(mu):
+            mu, sig = mu.squeeze(-1), sig.squeeze(-1)
+        base[:, 1, 0] = self.e_dep_max * torch.sigmoid(mu + sig * torch.randn_like(base[:, 1, 0]))
         return base
