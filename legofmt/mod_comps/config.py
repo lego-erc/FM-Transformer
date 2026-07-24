@@ -90,6 +90,8 @@ class ResolvedLEGOConfig:
 
     reflow_path: str | None
     reflow_kwargs: dict
+    reflow_every: int
+    reflow_start_epoch: int
 
 
 def resolve_legoltng_config(full_config: dict) -> ResolvedLEGOConfig:
@@ -222,6 +224,8 @@ def _build_resolved(
         state_dict=state_dict,
         reflow_path=model_conf.get("reflow_path"),
         reflow_kwargs=model_conf.get("reflow_kwargs", {}),
+        reflow_every=model_conf.get("reflow_every", 1),
+        reflow_start_epoch=model_conf.get("reflow_start_epoch", 0),
     )
 
 

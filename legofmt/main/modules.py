@@ -125,6 +125,12 @@ class LEGOLtng(ltng.LightningModule):
         if self.rc.state_dict is not None:
             self.model.vf.load_state_dict(self.rc.state_dict, strict=False)
 
+        teacher = None
+        if self.rc.reflow_path is not None:
+            from legofmt.distill.reflow import _build_reflow_teacher  # avoids import cycle
+            teacher = _build_reflow_teacher(self.rc.reflow_path)
+        object.__setattr__(self, "reflow_teacher", teacher)  # not a submodule: no state_dict/DDP
+
     def _build_model(self, rc) -> nn.Module:
         return ProjectModel(
             CFMTrafo_x(**rc.model_args),
@@ -152,8 +158,24 @@ class LEGOLtng(ltng.LightningModule):
     def on_fit_start(self) -> None:
         if self.rc.ot_coupling and slap is None:
             raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
+        if self.reflow_teacher is not None:
+            self.reflow_teacher.to(self.device)
         self.model.train()
         self._opt_train()
+
+    @torch.no_grad()
+    def on_train_epoch_end(self) -> None:
+        start = self.rc.reflow_start_epoch
+        if start <= 0 or self.current_epoch + 1 < start:
+            return
+        vf = (self.model._orig_mod if hasattr(self.model, "_orig_mod") else self.model).vf
+        if self.reflow_teacher is None:  # self-reflow: teacher = snapshot of the student
+            from legofmt.distill.reflow import _teacher_from_state  # avoids import cycle
+            teacher = _teacher_from_state(self.rc.config, vf.state_dict())
+            object.__setattr__(self, "reflow_teacher", teacher.to(self.device))
+        else:  # refresh: teacher = last epoch's student
+            t_m = self.reflow_teacher.model
+            (t_m._orig_mod if hasattr(t_m, "_orig_mod") else t_m).vf.load_state_dict(vf.state_dict())
 
     @torch.no_grad()
     def convert_pdgids(self, pdgids: Tensor) -> Tensor:
@@ -291,6 +313,15 @@ class LEGOLtng(ltng.LightningModule):
                 t = t * (torch.rand_like(t) >= self.rc.t_zero_frac)
             if self.rc.t_dist_shift != 1.0:
                 t = t.clamp(min=0) ** (1.0 / self.rc.t_dist_shift)
+            if (
+                self.reflow_teacher is not None and self.training
+                and self.global_step % self.rc.reflow_every == 0
+            ):  # reflow: couple base to the teacher's transport of it
+                tgt = self.reflow_teacher.solve(ds_t, x_init=base, **self.rc.reflow_kwargs)
+                tgt = torch.where((ds_t.m.full == 1).unsqueeze(-1), tgt, ds_t.f.model_in)
+                ds_t = DataStruct(
+                    torch.cat((tgt, ds_t.f.pdgids), dim=-1), ds_t.m.full, ds_t.am.full,
+                )
             ps_ = self.ps.sample(base, ds_t.f.model_in, t)
         v_out = self.model(
             ps_.x_t, ps_.t,
