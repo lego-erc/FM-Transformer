@@ -3,8 +3,8 @@
 
 run:
   train_model: fm            # fm | mult
-  name: rp_fm_v1_240626
-  devices: [1, 2, 3, 4]
+  name: rp_fm_v3_ddtv_220726
+  devices: [1, 2, 4, 6, 7]
   precision: 32
   matmul_precision: medium
   dtype: float32
@@ -24,7 +24,7 @@ logging:
 config:
   dl_conf:
     lds_args:
-      data: rp_lqar_full_er_080626   # prefixed with $LEGO_DATA_DIR at runtime
+      data: rp_010726   # prefixed with $LEGO_DATA_DIR at runtime
       frac: 1.0
       cutoff_mev: 10
       min_particles: 0
@@ -49,20 +49,33 @@ config:
       - { name: sphere, dim: 3 }
       - { name: sphere, dim: 3 }
     ot_coupling: true
-    proj_ray: false
     ot_e_only: false
     max_energy: 300.0
     t_dist: sd3
     t_dist_scale: 0.0
-    loss_sc: 0.0
+    t_dist_shift: 1.3       # density ~ k*t^(k-1): slight right shift toward t=1 (1.0 = off)
+    loss_sc: 0.
+    one_step_euler_fac: 0.
+    curv_fac: 0.5            # d/dt v curvature penalty along the predicted velocity (0 = off)
+    curv_every: 4            # apply every N-th optimizer step (loss rescaled by N)
+    curv_eps: 0.05           # FD step; match the solver step scale (smaller probes sub-step roughness)
+    curv_warmup: 500         # linear ramp-in over optimizer steps (0 = no ramp)
+    reflow_kwargs: {method: midpoint, step_size: 0.5}
+    reflow_start_epoch: 2
+    reflow_every: 4
+    t_zero_frac: 0.
+    base_dist_loss: 1.
+    base_pretrain_batches: 1000
+    base_pretrain_bs: 16384
     mask_conf: { p_forward: 1. }
     cond_cube: false
+    canon_sym: true
     model_args:
-      h_dim: 128
+      h_dim: 256
       in_dim: 7
       nlayers: 6
       nhead: 8
-      dropout: 0.02
+      dropout: 0.
       ff_mult: 4
       nvtypes: 2
       use_adaptive_rmsnorm: true
@@ -76,7 +89,7 @@ config:
 
   opt_conf:
     opt: muon
-    lr: 1.0e-2
+    lr: 1.0e-3
     momentum: 0.95
     nesterov: true
     ns_steps: 5
