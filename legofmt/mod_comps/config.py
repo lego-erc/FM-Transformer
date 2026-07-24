@@ -66,6 +66,10 @@ class ResolvedLEGOConfig:
     loss_sc_fac: float
     one_step_euler_fac: float
     one_step_euler_sections: int
+    curv_fac: float
+    curv_every: int
+    curv_eps: float
+    curv_warmup: int
     cond_cube: bool
     canon_sym: bool
     cond_scalars: tuple[str, ...]
@@ -199,6 +203,10 @@ def _build_resolved(
         loss_sc_fac=model_conf.get("loss_sc", 0.0),
         one_step_euler_fac=model_conf.get("one_step_euler_fac", 0.0),
         one_step_euler_sections=model_conf.get("one_step_euler_sections", 8),
+        curv_fac=model_conf.get("curv_fac", 0.0),
+        curv_every=model_conf.get("curv_every", 4),
+        curv_eps=model_conf.get("curv_eps", 0.05),
+        curv_warmup=model_conf.get("curv_warmup", 500),
         cond_cube=model_conf.get("cond_cube", False),
         canon_sym=model_conf.get("canon_sym", False),
         cond_scalars=cond_scalars,

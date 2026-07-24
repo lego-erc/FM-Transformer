@@ -26,7 +26,7 @@ from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.data.struct import DataStruct, _F
 
-from legofmt.distill.distill import one_step_euler_loss
+from legofmt.distill.distill import curvature_loss, one_step_euler_loss
 
 from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.geometry.gen_base import GenerateBase
@@ -311,6 +311,14 @@ class LEGOLtng(ltng.LightningModule):
             if self.training:
                 self.log("loss/one_step_euler", sc.detach(), on_step=True, on_epoch=False, logger=True, sync_dist=False)
             loss = loss + self.rc.one_step_euler_fac * sc
+
+        if self.rc.curv_fac > 0 and self.training and self.global_step % self.rc.curv_every == 0:
+            w    = self.rc.curv_warmup
+            ramp = 1.0 if w <= 0 else min(1.0, self.global_step / w)
+            if ramp > 0:
+                cv = curvature_loss(self, ps_.x_t, ps_.t, v_out, ds_t, pdgid_idx)
+                self.log("loss/curvature", cv.detach(), on_step=True, on_epoch=False, logger=True, sync_dist=False)
+                loss = loss + self.rc.curv_fac * self.rc.curv_every * ramp * cv
 
         if (ot := self._base_dist_loss) is not None:
             loss = loss + self.rc.base_dist_loss * ot

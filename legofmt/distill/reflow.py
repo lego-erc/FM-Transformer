@@ -1,3 +1,4 @@
+import copy
 import warnings
 from pathlib import Path
 
@@ -10,17 +11,25 @@ from legofmt.main.generate import GenerateOut
 from legofmt.main.modules import LEGOLtng, ProjectModel
 
 
+def _teacher_from_state(config: dict, state_dict: dict) -> nn.Module:
+    """Frozen, ``torch.compile``'d velocity teacher from a config + vf state dict."""
+    conf = copy.deepcopy(config)
+    conf["model_conf"]["reflow_path"] = None  # teacher must not chain-load its own teacher
+    teacher = LEGOLtng({"config": conf, "state_dict": state_dict})
+    teacher.eval().requires_grad_(False)
+    teacher.model = torch.compile(teacher.model, dynamic=False)
+    return teacher
+
+
 def _build_reflow_teacher(reflow_path: str | None) -> nn.Module | None:
-    """Frozen, ``torch.compile``'d velocity teacher for reflow; ``None`` if path unset/missing."""
+    """Teacher loaded from a checkpoint path; ``None`` if path unset/missing."""
     if reflow_path is None:
         return None
     if not Path(reflow_path).is_file():
         warnings.warn(f"reflow_path={reflow_path!r} not found; reflow disabled.", stacklevel=2)
         return None
-    teacher = LEGOLtng(torch.load(reflow_path, map_location="cpu", weights_only=False))
-    teacher.eval().requires_grad_(False)
-    teacher.model = torch.compile(teacher.model, dynamic=False)
-    return teacher
+    ckpt = torch.load(reflow_path, map_location="cpu", weights_only=False)
+    return _teacher_from_state(ckpt["config"], ckpt["state_dict"])
 
 
 class ProjectModelDirect(ProjectModel):
@@ -48,13 +57,8 @@ class ProjectModelDirect(ProjectModel):
 class LEGOLtngDirect(LEGOLtng):
     """Direct residual model: predicts target - base in one step. With
     model_conf.reflow_path set, a frozen velocity teacher's solve(base)
-    replaces the data target (fixed base->target reflow coupling)."""
-
-    def __init__(self, full_config: dict) -> None:
-        super().__init__(full_config)
-        object.__setattr__(
-            self, "reflow_teacher", _build_reflow_teacher(self.rc.reflow_path),
-        )
+    replaces the data target (fixed base->target reflow coupling).
+    Teacher construction/device placement is inherited from LEGOLtng."""
 
     def _build_model(self, rc) -> nn.Module:
         return ProjectModelDirect(
@@ -62,12 +66,6 @@ class LEGOLtngDirect(LEGOLtng):
             rc.manifold,
             cond_cube=rc.cond_cube,
         )
-
-    @torch.no_grad()
-    def on_fit_start(self) -> None:
-        super().on_fit_start()
-        if self.reflow_teacher is not None:
-            self.reflow_teacher.to(self.device)
 
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
         with torch.no_grad():
