@@ -99,10 +99,11 @@ class LEGOLtng(ltng.LightningModule):
 
         self._base_dist_loss = None
         params = list(self.model.parameters())
-        if self.rc.base_dist_loss > 0 and self.gen_base.scale_dist == "sm_norm":
+        if ((self.rc.base_dist_loss > 0 or self.rc.base_pretrain_batches > 0)
+                and self.gen_base.scale_dist == "sm_norm"):
             bc = self.rc.config.get("base_conf") or {}
             self.base_head = nn.Sequential(
-                nn.Linear(3 + len(self.rc.pdgids_template), 16), nn.Mish(),
+                nn.Linear(4 + len(self.rc.pdgids_template), 16), nn.Mish(),
                 nn.Linear(16, 3))
             with torch.no_grad():
                 self.base_head[-1].weight.zero_()
@@ -211,7 +212,16 @@ class LEGOLtng(ltng.LightningModule):
                     Z, A    = ds_t.f.cond("Z"), ds_t.f.cond("A")
                     x0      = 716.4 * A / (Z * (Z + 1) * (287.0 / Z.sqrt()).log())
                     t       = ds_t.f.cond("Size") * ds_t.f.cond("Density") / x0
-                    x       = torch.cat((ds_t.f.in_cc[..., 0], species,
+                    # cord length: full chord through the cube along the incoming
+                    # ray (edge lengths); fwd+bwd -> entry/exit-storage invariant
+                    inc     = ds_t.f.in_cc[..., 0, 1:7].nan_to_num(1.0)
+                    u, pos  = inc[..., :3], inc[..., 3:]
+                    p       = pos / pos.abs().amax(-1, keepdim=True).clamp_min(1e-8)
+                    ok_u    = u.abs() > 1e-6
+                    tf      = torch.where(ok_u, (u.sign() - p) / u, torch.full_like(u, 4.0))
+                    tb      = torch.where(ok_u, (p + u.sign()) / u, torch.full_like(u, 4.0))
+                    chord   = ((tf.amin(-1) + tb.amin(-1)).clamp(0.0, 3.5) / 2).unsqueeze(-1)
+                    x       = torch.cat((ds_t.f.in_cc[..., 0], species, chord,
                                          t.log().unsqueeze(-1)), dim=-1)
                     out     = self.base_head(x)
                     s       = out[..., 0:1].exp()
