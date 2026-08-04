@@ -71,6 +71,9 @@ class ResolvedLEGOConfig:
     curv_every: int
     curv_eps: float
     curv_warmup: int
+    uncert_weighting: bool
+    uncert_bins: int
+    uncert_min: float
     cond_cube: bool
     canon_sym: bool
     cond_scalars: tuple[str, ...]
@@ -224,6 +227,9 @@ def _build_resolved(
         curv_every=model_conf.get("curv_every", 4),
         curv_eps=model_conf.get("curv_eps", 0.05),
         curv_warmup=model_conf.get("curv_warmup", 500),
+        uncert_weighting=model_conf.get("uncert_weighting", False),
+        uncert_bins=model_conf.get("uncert_bins", 16),
+        uncert_min=model_conf.get("uncert_min", -6.0),
         cond_cube=model_conf.get("cond_cube", False),
         canon_sym=model_conf.get("canon_sym", False),
         cond_scalars=cond_scalars,
