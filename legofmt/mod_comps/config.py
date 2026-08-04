@@ -197,12 +197,9 @@ def _build_resolved(
                 "without it the network never sees the step size and the loss "
                 "collapses to a curvature penalty on the velocity field."
             )
-        if sections > 8:
-            warnings.warn(
-                f"one_step_euler_sections={sections} probes steps below 2**-8, "
-                "which CFMTrafo_x's freqs_d bank does not resolve; steps that "
-                "small will be nearly indistinguishable to the model.",
-                stacklevel=2,
+        if sections < 1:
+            raise ValueError(
+                f"one_step_euler_sections must be >= 1, got {sections}."
             )
     return ResolvedLEGOConfig(
         max_seq_l=max_seq_l,

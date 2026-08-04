@@ -97,8 +97,10 @@ class CFMTrafo_x(nn.Module):
             self.register_buffer("mask_freqs", torch.arange(h_dim) % 2)
             if step_cond:
                 self.register_buffer(
-                    "freqs_d", 2 * torch.pi * 2 ** (torch.arange(h_dim) * 8.0 / h_dim),
+                    "freqs_d", 2 * torch.pi * 2 ** (torch.arange(h_dim) * 3.0 / h_dim),
+                    persistent=False,
                 )
+                self.step_gain = nn.Parameter(torch.zeros(1))
             self._register_load_state_dict_pre_hook(self._legacy_param_rename)
         else:
             self.global_cond = nn.Parameter(torch.zeros(1, h_dim))
@@ -140,7 +142,7 @@ class CFMTrafo_x(nn.Module):
             tf = t.unsqueeze(-1) * self.freqs
             cond = torch.where(self.mask_freqs.bool(), tf.sin(), tf.cos())
             if self.step_cond and d is not None:
-                cond = cond + (d.unsqueeze(-1) * self.freqs_d).sin()
+                cond = cond + self.step_gain * (d.unsqueeze(-1) * self.freqs_d).sin()
         else:
             cond = self.global_cond.expand(x.shape[0], -1)
 

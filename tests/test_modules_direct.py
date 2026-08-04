@@ -223,30 +223,107 @@ def _vf_call(model, ds, **kw):
     )
 
 
-def test_step_cond_zero_is_the_velocity_slice() -> None:
-    """d=0 must reproduce the unconditioned field exactly -- that is what makes
-    an existing velocity checkpoint a valid warm start for the flow map."""
+def _open_gate(model, v: float = 1.0):
+    """step_gain is zero-init, so d has no effect until it is opened."""
+    with torch.no_grad():
+        model.model.vf.step_gain.fill_(v)
+    return model
+
+
+def test_step_cond_gain_is_zero_init_and_1d() -> None:
+    """At init every d must reproduce the velocity slice: that is what stops an
+    untrained step-conditioned slice from being arbitrarily wrong (it was, see
+    the euler-vs-midpoint failure). 1-D so muon_factory routes it to AdamW --
+    Newton-Schulz would discard the magnitude of a gate."""
     model = LEGOLtngVelocity(_step_cond_config())
+    model.on_fit_start(); model.eval()
+    ds = _fake_batch()
+    assert model.model.vf.step_gain.ndim == 1
+    assert float(model.model.vf.step_gain.detach().abs().sum()) == 0.0
+    torch.manual_seed(0); ref = _vf_call(model, ds, t=torch.tensor(0.3))
+    for dv in (0.0, 0.125, 0.5, 1.0):
+        torch.manual_seed(0)
+        out = _vf_call(model, ds, t=torch.tensor(0.3), d=torch.tensor(dv))
+        assert torch.equal(ref, out), f"d={dv} deviates from the velocity slice at init"
+
+
+def test_step_cond_zero_is_the_velocity_slice() -> None:
+    """With the gate open, d=0 must still reproduce the unconditioned field
+    exactly -- that is what makes a velocity checkpoint a valid warm start."""
+    model = _open_gate(LEGOLtngVelocity(_step_cond_config()))
     model.on_fit_start(); model.eval()
     ds = _fake_batch()
     torch.manual_seed(0); out_none = _vf_call(model, ds, t=torch.tensor(0.3))
     torch.manual_seed(0); out_zero = _vf_call(model, ds, t=torch.tensor(0.3), d=torch.tensor(0.0))
-    model.model.vf.step_cond = False
-    torch.manual_seed(0); out_off = _vf_call(model, ds, t=torch.tensor(0.3), d=torch.tensor(0.5))
+    torch.manual_seed(0); out_half = _vf_call(model, ds, t=torch.tensor(0.3), d=torch.tensor(0.5))
     assert torch.equal(out_none, out_zero), "d=0 differs from d=None"
-    assert torch.equal(out_none, out_off), "step_cond=False slice differs from d=0"
+    assert not torch.allclose(out_none, out_half), "gate open but d=0.5 changes nothing"
 
 
 def test_step_cond_distinguishes_t_from_d() -> None:
     """Regression for 96344ee: emb_t(t) + emb_d(d) built on one frequency bank
     with the same sin/cos interleave is exactly symmetric under swapping t and
     d, so the model cannot tell (t=0.2, d=0.8) from (t=0.8, d=0.2)."""
-    model = LEGOLtngVelocity(_step_cond_config())
+    model = _open_gate(LEGOLtngVelocity(_step_cond_config()))
     model.on_fit_start(); model.eval()
     ds = _fake_batch()
     a = _vf_call(model, ds, t=torch.tensor(0.2), d=torch.tensor(0.8))
     b = _vf_call(model, ds, t=torch.tensor(0.8), d=torch.tensor(0.2))
     assert not torch.allclose(a, b), "(t, d) is degenerate under swapping"
+
+
+def test_step_emb_is_smooth_in_d() -> None:
+    """The property that actually matters and that I originally failed to check:
+    nearby d must have SIMILAR embeddings, or the net cannot interpolate between
+    the dyadic steps the loss trains and every d becomes an unrelated task. The
+    old 8-octave bank scored 0.35 here. Also require ||emb_d|| -> 0 as d -> 0,
+    since the average velocity over a vanishing interval is the instantaneous one."""
+    vf = LEGOLtngVelocity(_step_cond_config()).model.vf
+    emb = lambda d: (torch.tensor([[float(d)]]) * vf.freqs_d).sin()[0]
+    cs = torch.nn.functional.cosine_similarity
+    for d0 in (0.125, 0.25, 0.5, 1.0):
+        sim = cs(emb(d0), emb(d0 + 0.01), dim=0)
+        assert sim > 0.9, f"emb_d not smooth at d={d0}: cos={sim:.3f}"
+    # still separable across octaves, otherwise d carries no information
+    assert cs(emb(0.5), emb(0.25), dim=0) < 0.9, "octaves not distinguishable"
+    # and it decays toward the velocity slice
+    assert emb(2 ** -7).norm() < 0.4 * emb(0.5).norm()
+    assert emb(0.0).norm() == 0.0
+
+
+def test_flow_map_ladder_is_anchored_at_zero() -> None:
+    """The bug behind the euler failure: predictions cover d in
+    {2**0 .. 2**-(sections-1)} but the teacher queries d=step/2, which falls one
+    octave below for the smallest step. That bottom rung was supervised by
+    nothing, so the whole bootstrap stood on an arbitrary function."""
+    from legofmt.distill.distill import one_step_euler_loss
+
+    sections = 4
+    model = LEGOLtngVelocity(_step_cond_config(sections=sections))
+    model.on_fit_start(); model.train()
+    ds = _fake_batch(B=64)
+    base = model.gen_base_wrapper(ds)
+    pid = model.convert_pdgids(ds.f.pdgids)
+
+    supervised, teacher = set(), set()
+    orig = model.model.vf.forward
+
+    def spy(x, mask, attn_mask, types, pdgids_, t=None, d=None):
+        out = orig(x, mask, attn_mask, types, pdgids_, t=t, d=d)
+        if d is not None:
+            vals = {round(float(v), 8) for v in d[mask == 1]}
+            (supervised if torch.is_grad_enabled() else teacher).update(vals)
+        return out
+
+    model.model.vf.forward = spy
+    for _ in range(300):
+        one_step_euler_loss(model, base, ds, pid)
+    model.model.vf.forward = orig
+
+    assert 0.0 in teacher, "ladder is not anchored: d=0 is never the teacher"
+    unsupervised = {d for d in teacher if d > 0} - supervised
+    assert not unsupervised, f"teacher queries unsupervised d: {sorted(unsupervised)}"
+    assert min(d for d in supervised) == 2.0 ** -(sections - 1)
 
 
 def test_step_cond_flow_map_loss_steps() -> None:
@@ -297,17 +374,29 @@ def test_step_cond_euler_step_budgets_differ() -> None:
 
 
 def test_step_cond_loads_legacy_state_dict() -> None:
-    """A pre-step_cond checkpoint has no freqs_d; strict=False must absorb that
-    and leave the constructed bank intact."""
+    """Loading an older checkpoint must leave step_gain at 0, which makes the
+    model ignore d entirely -- so a checkpoint trained against the old wide bank
+    degrades to its (good) velocity field rather than to a broken flow map.
+    freqs_d is non-persistent, so it never travels in or out of a state_dict."""
     plain = LEGOLtngVelocity(_tiny_config())
     sd = plain.model.vf.state_dict()
-    assert "freqs_d" not in sd
     model = LEGOLtngVelocity(_step_cond_config())
     bank = model.model.vf.freqs_d.clone()
+
+    assert "freqs_d" not in sd
+    assert "freqs_d" not in model.model.vf.state_dict(), "freqs_d must not be persistent"
+
     res = model.model.vf.load_state_dict(sd, strict=False)
-    assert res.missing_keys == ["freqs_d"], res.missing_keys
+    assert res.missing_keys == ["step_gain"], res.missing_keys
     assert not res.unexpected_keys, res.unexpected_keys
     assert torch.equal(model.model.vf.freqs_d, bank)
+    assert float(model.model.vf.step_gain.detach().abs().sum()) == 0.0
+
+    # an OLD step_cond ckpt carried freqs_d as a persistent buffer: tolerated
+    stale = {**sd, "freqs_d": torch.zeros_like(bank)}
+    res = model.model.vf.load_state_dict(stale, strict=False)
+    assert res.unexpected_keys == ["freqs_d"], res.unexpected_keys
+    assert torch.equal(model.model.vf.freqs_d, bank), "stale bank overwrote the new one"
 
 
 @pytest.mark.parametrize("cls", [LEGOLtngVelocity, LEGOLtng])

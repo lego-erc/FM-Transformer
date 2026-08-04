@@ -24,16 +24,18 @@ def one_step_euler_loss(lego, base: Tensor, ds_t, pdgid_idx: Tensor) -> Tensor:
     ckw = dict(mask=mask, attn_mask=am, types=lego.types_embd, pdgids=pdgid_idx)
     man = lego.model.manifold
 
+    sections = lego.rc.one_step_euler_sections
     with torch.no_grad():
-        step = 2.0 ** -(torch.randint(1, lego.rc.one_step_euler_sections + 1,
+        step = 2.0 ** -(torch.randint(1, sections + 1,
                                       (base.shape[0], 1), device=base.device) - 1).to(base.dtype)
         t0   = (torch.rand_like(step) * (1.0 / step).round()).floor() * step  # grid-aligned start
         x0   = lego.ps.sample(base, ds_t.f.model_in, t0.squeeze(-1)).x_t
         half = step / 2
         h    = half.unsqueeze(-1)
-        s1    = lego.model(x0, t0, d=half, **ckw)
+        d_t  = torch.where(half >= 2.0 ** -(sections - 1), half, torch.zeros_like(half))
+        s1    = lego.model(x0, t0, d=d_t, **ckw)
         x_mid = torch.where(gen, man.expmap(x0, h * s1), x0)
-        s2    = lego.model(x_mid, t0 + half, d=half, **ckw)
+        s2    = lego.model(x_mid, t0 + half, d=d_t, **ckw)
         x_end = torch.where(gen, man.expmap(x_mid, h * s2), x_mid)
         tgt   = man.logmap(x0, x_end) / step.unsqueeze(-1)
     s_pred = lego.model(x0, t0, d=step, **ckw)
