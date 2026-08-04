@@ -310,6 +310,96 @@ def test_step_cond_loads_legacy_state_dict() -> None:
     assert torch.equal(model.model.vf.freqs_d, bank)
 
 
+def _uncert_config(bins: int = 8) -> dict:
+    cfg = _tiny_config()
+    cfg["config"]["model_conf"]["uncert_weighting"] = True
+    cfg["config"]["model_conf"]["uncert_bins"] = bins
+    return cfg
+
+
+def test_uncert_zero_init_matches_unweighted() -> None:
+    """lv=0 -> weight exp(0)=1 and a zero barrier, so switching the knob on
+    cannot change where training starts. Not bit-exact: the weighted branch
+    multiplies before reducing, which reorders the float32 summation."""
+    plain = LEGOLtngVelocity(_tiny_config())
+    unc = LEGOLtngVelocity(_uncert_config())
+    unc.model.load_state_dict(plain.model.state_dict())
+    for m in (plain, unc):
+        m.on_fit_start(); m.train()
+    ds = _fake_batch()
+    torch.manual_seed(0); l_plain = plain._step(ds, 0)
+    torch.manual_seed(0); l_unc = unc._step(ds, 0)
+    assert torch.allclose(l_plain, l_unc, rtol=1e-6, atol=0), \
+        f"{l_plain.item()} != {l_unc.item()}"
+
+
+def test_uncert_param_is_1d_so_muon_skips_it() -> None:
+    """muon_factory routes ndim>=2 to Muon, whose Newton-Schulz step discards
+    magnitude -- fatal for a log-variance. Keep lv 1-D."""
+    from legofmt.mod_comps.optimizers import muon_factory
+
+    model = LEGOLtngVelocity(_uncert_config(bins=8))
+    assert model.lv.ndim == 1 and model.lv.numel() == 8 * 3
+    # the tiny config uses schedulefree, so build a Muon the way opt: muon would
+    opt = muon_factory([*model.model.parameters(), model.lv], lr=1e-3)
+    muon = [gr for gr in opt.param_groups if gr.get("use_muon")]
+    adamw = [gr for gr in opt.param_groups if not gr.get("use_muon")]
+    assert muon and adamw, "expected both a Muon and an AdamW group"
+    assert not any(p is model.lv for gr in muon for p in gr["params"]), "lv went to Muon"
+    assert any(p is model.lv for gr in adamw for p in gr["params"]), "lv reached no group"
+
+
+def test_uncert_lv_receives_grad_and_tracks_loss_scale() -> None:
+    """The barrier fixes exp(lv) -> E[L|t], so a block with a larger loss must
+    end up with a larger fitted variance."""
+    model = LEGOLtngVelocity(_uncert_config(bins=1))  # one bin: pure scale fit
+    model.on_fit_start(); model.train()
+    ds = _fake_batch(B=8)
+    opt = torch.optim.Adam([model.lv], lr=0.2)
+    scales = None
+    for _ in range(150):
+        opt.zero_grad()
+        sq = torch.zeros(8, 5, 7)
+        sq[..., 0:1] = 4.0      # energy block: large loss
+        sq[..., 1:4] = 1.0      # dir block:    medium
+        sq[..., 4:7] = 0.25     # pos block:    small
+        loss = model._reduce_and_log(sq, ds, 0.0, t=torch.full((8,), 0.5))
+        loss.backward()
+        opt.step()
+        scales = model.lv.detach().exp()
+    assert model.lv.grad is not None and model.lv.grad.abs().sum() > 0
+    assert scales[0] > scales[1] > scales[2], f"variances not ordered: {scales}"
+    # exp(lv) should land on the per-block mean squared error itself
+    assert torch.allclose(scales, torch.tensor([4.0, 1.0, 0.25]), rtol=0.1), scales
+
+
+def test_uncert_floor_caps_the_weight() -> None:
+    """A near-zero loss would send w=exp(-lv) to infinity; uncert_min bounds it."""
+    cfg = _uncert_config(bins=1)
+    cfg["config"]["model_conf"]["uncert_min"] = -2.0
+    model = LEGOLtngVelocity(cfg)
+    model.on_fit_start(); model.train()
+    ds = _fake_batch(B=8)
+    opt = torch.optim.Adam([model.lv], lr=0.5)
+    for _ in range(200):
+        opt.zero_grad()
+        loss = model._reduce_and_log(
+            torch.full((8, 5, 7), 1e-8), ds, 0.0, t=torch.full((8,), 0.5))
+        loss.backward()
+        opt.step()
+    used = model.lv.detach().clamp(min=-2.0)
+    assert torch.all(used >= -2.0 - 1e-6)
+    assert torch.exp(-used).max() <= torch.exp(torch.tensor(2.0)) + 1e-4
+
+
+def test_uncert_rejects_time_independent_path() -> None:
+    """LEGOLtngDirect has no per-event t, so weighting must fail loudly."""
+    model = LEGOLtng(_uncert_config())          # LEGOLtng here is LEGOLtngDirect
+    model.on_fit_start(); model.train()
+    with pytest.raises(ValueError, match="per-event t"):
+        model._step(_fake_batch(), 0)
+
+
 @pytest.mark.parametrize("cls", [LEGOLtngVelocity, LEGOLtng])
 def test_all_params_receive_grad(cls) -> None:
     """One training step touches every parameter (DDP-safety with

@@ -124,6 +124,10 @@ class LEGOLtng(ltng.LightningModule):
                         self.base_head[-1].bias[0:1].copy_(hs["2.bias"])
                     self.base_head.requires_grad_(not bc.get("base_head_frozen", False))
             params += [p for p in self.base_head.parameters() if p.requires_grad]
+        if self.rc.uncert_weighting:
+            self.lv = nn.Parameter(torch.zeros(self.rc.uncert_bins * 3))
+            params += [self.lv]
+
         self.opt, self._lr_sched = build_optimizer(params, self.rc.opt_conf)
         self._opt_is_sf = callable(getattr(self.opt, "train", None))
 
@@ -277,25 +281,51 @@ class LEGOLtng(ltng.LightningModule):
             noise = base if noise is None else torch.where(fwd.view(-1, 1, 1), base, noise)
         return torch.where((m == 1).unsqueeze(-1), noise, data)
 
-    def _reduce_and_log(self, sq: Tensor, ds_t: DataStruct, loss_sc) -> Tensor:
+    def _reduce_and_log(
+        self, sq: Tensor, ds_t: DataStruct, loss_sc, t: Tensor | None = None,
+    ) -> Tensor:
         g        = ((ds_t.m.full == 1) & (ds_t.am.full == 1)).unsqueeze(-1)
         denom    = g.sum().clamp(min=1)
         out      = sq * g
         loss_e   = out[..., 0:1].sum() / denom
         loss_dir = out[..., 1:4].sum() / (denom * 3)
         loss_x   = out[..., 4:7].sum() / (denom * 3)
+        logs     = {}
+        if not self.rc.uncert_weighting:
+            total = loss_e + loss_dir + loss_x
+        else:
+            if t is None:
+                raise ValueError(
+                    "uncert_weighting=True needs the per-event t, which the "
+                    "time-independent (LEGOLtngDirect) path does not have."
+                )
+            nb  = self.rc.uncert_bins
+            idx = (t.detach().clamp(0, 1) * nb).long().clamp(max=nb - 1)
+            lv  = self.lv.view(nb, 3)[idx].clamp(min=self.rc.uncert_min)  # (B, 3)
+            w   = torch.exp(-lv)
+            total = (
+                (out[..., 0:1] * w[:, 0].view(-1, 1, 1)).sum() / denom
+                + (out[..., 1:4] * w[:, 1].view(-1, 1, 1)).sum() / (denom * 3)
+                + (out[..., 4:7] * w[:, 2].view(-1, 1, 1)).sum() / (denom * 3)
+                + lv.mean(0).sum()  # the +log(sigma^2) barrier; zero at init
+            )
+            v = lv.detach().exp().mean(0)
+            logs = {"uncert/var_energy": v[0], "uncert/var_dir": v[1], "uncert/var_pos": v[2]}
         if self.training:
             log_sc = loss_sc.detach() if torch.is_tensor(loss_sc) else loss_sc
             self.log_dict(
                 {
+                    # unweighted, so these stay comparable across uncert settings
                     "loss/energy": loss_e.detach(),
                     "loss/out_dir": loss_dir.detach(),
                     "loss/out_pos": loss_x.detach(),
+                    "loss/raw": (loss_e + loss_dir + loss_x).detach(),
                     "loss/sc": log_sc,
+                    **logs,
                 },
                 on_step=True, on_epoch=False, logger=True, sync_dist=False,
             )
-        return loss_e + loss_dir + loss_x + self.rc.loss_sc_fac * loss_sc
+        return total + self.rc.loss_sc_fac * loss_sc
 
     @torch.no_grad()
     def _sample_mask(self, ds_t: DataStruct) -> Tensor:
@@ -349,7 +379,7 @@ class LEGOLtng(ltng.LightningModule):
         else:
             loss_sc = 0.0
         sq = (v_out - ps_.dx_t) ** 2
-        loss = self._reduce_and_log(sq, ds_t, loss_sc)
+        loss = self._reduce_and_log(sq, ds_t, loss_sc, t=t)
 
         every = self.rc.one_step_euler_every
         if self.rc.one_step_euler_fac > 0 and (
