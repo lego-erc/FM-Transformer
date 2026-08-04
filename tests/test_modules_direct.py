@@ -361,6 +361,22 @@ def test_one_step_euler_every_gates_the_term() -> None:
     assert on == 4 and off == 1, f"expected 4 forwards on, 1 off; got {on}, {off}"
 
 
+@pytest.mark.parametrize("gs", [0, 1])
+def test_step_gain_gets_grad_even_when_flow_map_is_gated_off(gs) -> None:
+    """step_gain is only reachable when d is not None, and the flow-map loss is
+    the only caller that passes d. With one_step_euler_every > 1 the term is
+    skipped on some steps, so step_gain would leave the graph and plain `ddp`
+    (find_unused_parameters=False) raises. d=None must mean d=0, not skip."""
+    cfg = _step_cond_config()
+    cfg["config"]["model_conf"]["one_step_euler_every"] = 2
+    model = LEGOLtngVelocity(cfg)
+    model.on_fit_start(); model.train()
+    with patch.object(LEGOLtngVelocity, "global_step", gs):
+        model._step(_fake_batch(), 0).backward()
+    missing = [n for n, p in model.named_parameters() if p.grad is None]
+    assert not missing, f"global_step={gs} left params without grad: {missing}"
+
+
 def test_step_cond_euler_step_budgets_differ() -> None:
     model = LEGOLtngVelocity(_step_cond_config())
     model.on_fit_start(); model.eval()
