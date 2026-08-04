@@ -29,10 +29,12 @@ def one_step_euler_loss(lego, base: Tensor, ds_t, pdgid_idx: Tensor) -> Tensor:
                                       (base.shape[0], 1), device=base.device) - 1).to(base.dtype)
         t0   = (torch.rand_like(step) * (1.0 / step).round()).floor() * step  # grid-aligned start
         x0   = lego.ps.sample(base, ds_t.f.model_in, t0.squeeze(-1)).x_t
-        h    = (step / 2).unsqueeze(-1)
-    s_pred = lego.model(x0, t0, **ckw)
-    with torch.no_grad():
-        x_mid = torch.where(gen, man.expmap(x0, h * s_pred), x0)
-        x_end = torch.where(gen, man.expmap(x_mid, h * lego.model(x_mid, t0 + step / 2, **ckw)), x0)
+        half = step / 2
+        h    = half.unsqueeze(-1)
+        s1    = lego.model(x0, t0, d=half, **ckw)
+        x_mid = torch.where(gen, man.expmap(x0, h * s1), x0)
+        s2    = lego.model(x_mid, t0 + half, d=half, **ckw)
+        x_end = torch.where(gen, man.expmap(x_mid, h * s2), x_mid)
         tgt   = man.logmap(x0, x_end) / step.unsqueeze(-1)
+    s_pred = lego.model(x0, t0, d=step, **ckw)
     return ((s_pred - tgt) ** 2 * g).sum() / (g.sum().clamp(min=1) * s_pred.shape[-1])

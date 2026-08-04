@@ -70,11 +70,15 @@ class ProjectModel(nn.Module):
         attn_mask: Tensor,
         types: Tensor,
         pdgids: Tensor | None = None,
+        d: Tensor | None = None,
     ) -> Tensor:
         x_proj, x_att = self._prep_x(x, attn_mask)
         t = torch.atleast_2d(t).expand_as(attn_mask)
         t = torch.where(mask == 1, t, 1.0)  # conditions get t=1
-        v = self.vf(x_att, mask, attn_mask, types, pdgids, t=t)
+        if getattr(self.vf, "step_cond", False) and d is not None:
+            d = torch.atleast_2d(d).expand_as(attn_mask)
+            d = torch.where(mask == 1, d, 0.0)  # conditions are not transported
+        v = self.vf(x_att, mask, attn_mask, types, pdgids, t=t, d=d)
         v_proj = self.manifold.proju(x_proj, v)
         return torch.where(attn_mask.unsqueeze(-1), v_proj, v)
 
@@ -347,11 +351,15 @@ class LEGOLtng(ltng.LightningModule):
         sq = (v_out - ps_.dx_t) ** 2
         loss = self._reduce_and_log(sq, ds_t, loss_sc)
 
-        if self.rc.one_step_euler_fac > 0:
+        every = self.rc.one_step_euler_every
+        if self.rc.one_step_euler_fac > 0 and (
+            not self.training or self.global_step % every == 0
+        ):
             sc = one_step_euler_loss(self, base, ds_t, pdgid_idx)
+            w = self.rc.one_step_euler_fac * (every if self.training else 1)
             if self.training:
                 self.log("loss/one_step_euler", sc.detach(), on_step=True, on_epoch=False, logger=True, sync_dist=False)
-            loss = loss + self.rc.one_step_euler_fac * sc
+            loss = loss + w * sc
 
         if self.rc.curv_fac > 0 and self.training and self.global_step % self.rc.curv_every == 0:
             w    = self.rc.curv_warmup
@@ -591,7 +599,7 @@ class LEGOLtng(ltng.LightningModule):
         gen = (extras["mask"] == 1).unsqueeze(-1)
         for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
             dt = t_b - t_a
-            s  = self.model(x, t_a, **extras)
+            s  = self.model(x, t_a, d=dt, **extras)
             x  = torch.where(gen, self.model.manifold.expmap(x, dt * s), x)
             if return_intermediates:
                 xs.append(x)

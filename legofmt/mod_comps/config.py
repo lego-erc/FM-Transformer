@@ -66,6 +66,7 @@ class ResolvedLEGOConfig:
     loss_sc_fac: float
     one_step_euler_fac: float
     one_step_euler_sections: int
+    one_step_euler_every: int
     curv_fac: float
     curv_every: int
     curv_eps: float
@@ -187,6 +188,22 @@ def _build_resolved(
     cond_scalars = tuple(model_conf.get("cond_scalars", ("Density",)))
     n_prefix = len(cond_scalars) + 1  # + edep slot (generated)
     set_layout(cond_scalars)
+
+    sections = model_conf.get("one_step_euler_sections", 8)
+    if model_conf.get("one_step_euler_fac", 0.0) > 0:
+        if not model_args.get("step_cond", False):
+            raise ValueError(
+                "one_step_euler_fac > 0 requires model_args.step_cond=True; "
+                "without it the network never sees the step size and the loss "
+                "collapses to a curvature penalty on the velocity field."
+            )
+        if sections > 8:
+            warnings.warn(
+                f"one_step_euler_sections={sections} probes steps below 2**-8, "
+                "which CFMTrafo_x's freqs_d bank does not resolve; steps that "
+                "small will be nearly indistinguishable to the model.",
+                stacklevel=2,
+            )
     return ResolvedLEGOConfig(
         max_seq_l=max_seq_l,
         pdgids_template=pdgids.contiguous(),
@@ -204,7 +221,8 @@ def _build_resolved(
         pdgid_is_idx=model_conf.get("pdgid_is_idx", False),
         loss_sc_fac=model_conf.get("loss_sc", 0.0),
         one_step_euler_fac=model_conf.get("one_step_euler_fac", 0.0),
-        one_step_euler_sections=model_conf.get("one_step_euler_sections", 8),
+        one_step_euler_sections=sections,
+        one_step_euler_every=model_conf.get("one_step_euler_every", 1),
         curv_fac=model_conf.get("curv_fac", 0.0),
         curv_every=model_conf.get("curv_every", 4),
         curv_eps=model_conf.get("curv_eps", 0.05),

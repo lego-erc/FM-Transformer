@@ -8,6 +8,7 @@ layout, and runs one forward + backward pass.
 from __future__ import annotations
 
 import warnings
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -48,6 +49,10 @@ def _tiny_config() -> dict:
                 ],
                 "max_energy": 300.0,
                 "pdgids": pdgids,
+                # base_pretrain_batches defaults to 300, which (with
+                # scale_dist=sm_norm) builds base_head -- and that reads the
+                # Z/A cond scalars this fixture does not carry.
+                "base_pretrain_batches": 0,
                 "model_args": {
                     "h_dim": 16,
                     "nlayers": 2,
@@ -200,6 +205,109 @@ def test_reflow_teacher_isolated_from_submodule_registry(tmp_path) -> None:
     assert teacher.model.training is False
     model.train()
     assert teacher.model.training is False
+
+
+def _step_cond_config(fac: float = 1.0, sections: int = 4) -> dict:
+    cfg = _tiny_config()
+    mc = cfg["config"]["model_conf"]
+    mc["model_args"]["step_cond"] = True
+    mc["one_step_euler_fac"] = fac
+    mc["one_step_euler_sections"] = sections
+    return cfg
+
+
+def _vf_call(model, ds, **kw):
+    return model.model(
+        model.gen_base_wrapper(ds), mask=ds.m.full, attn_mask=ds.am.full,
+        types=model.types_embd, pdgids=model.convert_pdgids(ds.f.pdgids), **kw,
+    )
+
+
+def test_step_cond_zero_is_the_velocity_slice() -> None:
+    """d=0 must reproduce the unconditioned field exactly -- that is what makes
+    an existing velocity checkpoint a valid warm start for the flow map."""
+    model = LEGOLtngVelocity(_step_cond_config())
+    model.on_fit_start(); model.eval()
+    ds = _fake_batch()
+    torch.manual_seed(0); out_none = _vf_call(model, ds, t=torch.tensor(0.3))
+    torch.manual_seed(0); out_zero = _vf_call(model, ds, t=torch.tensor(0.3), d=torch.tensor(0.0))
+    model.model.vf.step_cond = False
+    torch.manual_seed(0); out_off = _vf_call(model, ds, t=torch.tensor(0.3), d=torch.tensor(0.5))
+    assert torch.equal(out_none, out_zero), "d=0 differs from d=None"
+    assert torch.equal(out_none, out_off), "step_cond=False slice differs from d=0"
+
+
+def test_step_cond_distinguishes_t_from_d() -> None:
+    """Regression for 96344ee: emb_t(t) + emb_d(d) built on one frequency bank
+    with the same sin/cos interleave is exactly symmetric under swapping t and
+    d, so the model cannot tell (t=0.2, d=0.8) from (t=0.8, d=0.2)."""
+    model = LEGOLtngVelocity(_step_cond_config())
+    model.on_fit_start(); model.eval()
+    ds = _fake_batch()
+    a = _vf_call(model, ds, t=torch.tensor(0.2), d=torch.tensor(0.8))
+    b = _vf_call(model, ds, t=torch.tensor(0.8), d=torch.tensor(0.2))
+    assert not torch.allclose(a, b), "(t, d) is degenerate under swapping"
+
+
+def test_step_cond_flow_map_loss_steps() -> None:
+    model = LEGOLtngVelocity(_step_cond_config())
+    model.on_fit_start(); model.train()
+    loss = model._step(_fake_batch(), 0)
+    assert loss.dim() == 0 and torch.isfinite(loss), f"bad loss: {loss}"
+    loss.backward()
+    assert _has_nonzero_grad(model.model.parameters()), "no nonzero gradients"
+
+
+def test_one_step_euler_requires_step_cond() -> None:
+    cfg = _tiny_config()
+    cfg["config"]["model_conf"]["one_step_euler_fac"] = 1.0
+    with pytest.raises(ValueError, match="step_cond"):
+        LEGOLtngVelocity(cfg)
+
+
+def test_one_step_euler_every_gates_the_term() -> None:
+    """With every=2 an odd global_step must skip the term entirely."""
+    cfg = _step_cond_config()
+    cfg["config"]["model_conf"]["one_step_euler_every"] = 2
+    model = LEGOLtngVelocity(cfg)
+    model.on_fit_start(); model.train()
+    seen = []
+    orig = model.model.vf.forward
+    model.model.vf.forward = lambda *a, _o=orig, **k: (seen.append(1), _o(*a, **k))[1]
+
+    torch.manual_seed(0); model._step(_fake_batch(), 0)
+    on = len(seen)                      # global_step 0: CFM + s1 + s2 + s_pred
+    seen.clear()
+    with patch.object(LEGOLtngVelocity, "global_step", 1):
+        torch.manual_seed(0); model._step(_fake_batch(), 0)
+    off = len(seen)                     # global_step 1: CFM only
+    assert on == 4 and off == 1, f"expected 4 forwards on, 1 off; got {on}, {off}"
+
+
+def test_step_cond_euler_step_budgets_differ() -> None:
+    model = LEGOLtngVelocity(_step_cond_config())
+    model.on_fit_start(); model.eval()
+    ds = _fake_batch(B=4)
+    base = model.gen_base_wrapper(ds)
+    one = model.solve(ds, x_init=base, method="euler", step_size=1.0)
+    four = model.solve(ds, x_init=base, method="euler", step_size=0.25)
+    assert one.shape == four.shape == base.shape
+    assert torch.isfinite(one).all() and torch.isfinite(four).all()
+    assert not torch.allclose(one, four), "step budget had no effect"
+
+
+def test_step_cond_loads_legacy_state_dict() -> None:
+    """A pre-step_cond checkpoint has no freqs_d; strict=False must absorb that
+    and leave the constructed bank intact."""
+    plain = LEGOLtngVelocity(_tiny_config())
+    sd = plain.model.vf.state_dict()
+    assert "freqs_d" not in sd
+    model = LEGOLtngVelocity(_step_cond_config())
+    bank = model.model.vf.freqs_d.clone()
+    res = model.model.vf.load_state_dict(sd, strict=False)
+    assert res.missing_keys == ["freqs_d"], res.missing_keys
+    assert not res.unexpected_keys, res.unexpected_keys
+    assert torch.equal(model.model.vf.freqs_d, bank)
 
 
 @pytest.mark.parametrize("cls", [LEGOLtngVelocity, LEGOLtng])
