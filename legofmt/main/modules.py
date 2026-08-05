@@ -127,6 +127,9 @@ class LEGOLtng(ltng.LightningModule):
         if self.rc.uncert_weighting:
             self.lv = nn.Parameter(torch.zeros(self.rc.uncert_bins * 3))
             params += [self.lv]
+            if self.rc.one_step_euler_fac > 0:
+                self.lv_flow = nn.Parameter(torch.zeros(1))
+                params += [self.lv_flow]
 
         self.opt, self._lr_sched = build_optimizer(params, self.rc.opt_conf)
         self._opt_is_sf = callable(getattr(self.opt, "train", None))
@@ -382,13 +385,24 @@ class LEGOLtng(ltng.LightningModule):
         loss = self._reduce_and_log(sq, ds_t, loss_sc, t=t)
 
         every = self.rc.one_step_euler_every
-        if self.rc.one_step_euler_fac > 0 and (
-            not self.training or self.global_step % every == 0
-        ):
+        fac   = self.rc.one_step_euler_fac
+        lvf   = None
+        if fac > 0 and hasattr(self, "lv_flow"):
+            # Barrier every step, data term only when the gate fires: the
+            # expectations still meet at exp(lv_flow) = E[L_flow], and lv_flow
+            # never leaves the graph (DDP find_unused_parameters=False).
+            lvf  = self.lv_flow.clamp(min=self.rc.uncert_min).squeeze()
+            loss = loss + fac * lvf
+        if fac > 0 and (not self.training or self.global_step % every == 0):
             sc = one_step_euler_loss(self, base, ds_t, pdgid_idx)
-            w = self.rc.one_step_euler_fac * (every if self.training else 1)
+            w = fac * (every if self.training else 1)
+            if lvf is not None:
+                w = w * torch.exp(-lvf)
             if self.training:
-                self.log("loss/one_step_euler", sc.detach(), on_step=True, on_epoch=False, logger=True, sync_dist=False)
+                logs = {"loss/one_step_euler": sc.detach()}
+                if lvf is not None:
+                    logs["uncert/var_flow"] = lvf.detach().exp()
+                self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
             loss = loss + w * sc
 
         if self.rc.curv_fac > 0 and self.training and self.global_step % self.rc.curv_every == 0:
