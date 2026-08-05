@@ -84,12 +84,14 @@ class CFMTrafo_x(nn.Module):
         self.cond_bi_pdgids = nn.Parameter(torch.empty(npdgids, h_dim))
         self.cond_bo_pdgids = nn.Parameter(torch.empty(npdgids, in_dim))
 
+        w_std = xavier_gain * 3 ** 0.5 * (2.0 / (in_dim + h_dim)) ** 0.5
+        for p in (self.cond_w_mask, self.cond_w_types, self.cond_w_pdgids):
+            nn.init.normal_(p, std=w_std)
         for p in (
-            self.cond_w_mask, self.cond_bi_mask, self.cond_bo_mask,
-            self.cond_w_types, self.cond_bi_types, self.cond_bo_types,
-            self.cond_w_pdgids, self.cond_bi_pdgids, self.cond_bo_pdgids,
+            self.cond_bi_mask, self.cond_bi_types, self.cond_bi_pdgids,
+            self.cond_bo_mask, self.cond_bo_types, self.cond_bo_pdgids,
         ):
-            nn.init.xavier_normal_(p, gain=xavier_gain)
+            nn.init.zeros_(p)
 
         if time_cond:
             # Sinusoidal time embedding, freqs scaled by h_dim.
