@@ -196,6 +196,13 @@ class LEGOLtng(ltng.LightningModule):
             self.pdgids_template.to(pdgids.device), pdgids.contiguous()) + 1
         return pdgid_idx.masked_fill_(cond, 0)
 
+    def _shift_overflow_targets(self, ds_t: DataStruct) -> DataStruct:
+        f  = ds_t.f.full.clone()
+        op = _F(f).out_p
+        op[..., 0].masked_fill_((op[..., 0] == 0) & ds_t.am.out_p.bool(),
+                                -self.rc.overflow_delta)
+        return DataStruct(f, ds_t.m.full, ds_t.am.full)
+
     def _canon_dirs(self, x: Tensor, face: Tensor, fwd: Tensor, inverse: bool = False) -> Tensor:
         rot  = self.sym.uncanonicalize if inverse else self.sym.canonicalize
         dirs = rot(torch.stack((x[..., 1:4], x[..., 4:7]), dim=-2), face)
@@ -343,6 +350,8 @@ class LEGOLtng(ltng.LightningModule):
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
         with torch.no_grad():
             ds_t = DataStruct(ds_t.f.full, self._sample_mask(ds_t), ds_t.am.full)
+            if self.rc.overflow_delta > 0:
+                ds_t = self._shift_overflow_targets(ds_t)
             if self.sym is not None:
                 fwd  = ds_t.m.full[:, self.rc.n_prefix] == 0
                 face = self.sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
