@@ -55,6 +55,8 @@ class ResolvedLEGOConfig:
 
     t_dist: str
     t_dist_scale: float
+    t_zero_frac: float
+    t_dist_shift: float
     ot_coupling: bool
     ot_e_only: bool
     base_dist_loss: float
@@ -64,6 +66,15 @@ class ResolvedLEGOConfig:
     loss_sc_fac: float
     one_step_euler_fac: float
     one_step_euler_sections: int
+    one_step_euler_every: int
+    curv_fac: float
+    curv_every: int
+    curv_eps: float
+    curv_warmup: int
+    uncert_weighting: bool
+    uncert_bins: int
+    uncert_min: float
+    overflow_delta: float
     cond_cube: bool
     canon_sym: bool
     cond_scalars: tuple[str, ...]
@@ -84,6 +95,8 @@ class ResolvedLEGOConfig:
 
     reflow_path: str | None
     reflow_kwargs: dict
+    reflow_every: int
+    reflow_start_epoch: int
 
 
 def resolve_legoltng_config(full_config: dict) -> ResolvedLEGOConfig:
@@ -179,6 +192,22 @@ def _build_resolved(
     cond_scalars = tuple(model_conf.get("cond_scalars", ("Density",)))
     n_prefix = len(cond_scalars) + 1  # + edep slot (generated)
     set_layout(cond_scalars)
+
+    sections = model_conf.get("one_step_euler_sections", 8)
+    if model_conf.get("one_step_euler_fac", 0.0) > 0:
+        if not model_args.get("step_cond", False):
+            raise ValueError(
+                "one_step_euler_fac > 0 requires model_args.step_cond=True; "
+                "without it the network never sees the step size and the loss "
+                "collapses to a curvature penalty on the velocity field."
+            )
+        if sections < 1:
+            raise ValueError(
+                f"one_step_euler_sections must be >= 1, got {sections}."
+            )
+    overflow_delta = model_conf.get("overflow_delta", 0.0)
+    if overflow_delta < 0:
+        raise ValueError(f"overflow_delta must be >= 0, got {overflow_delta}.")
     return ResolvedLEGOConfig(
         max_seq_l=max_seq_l,
         pdgids_template=pdgids.contiguous(),
@@ -186,6 +215,8 @@ def _build_resolved(
         model_args=model_args,
         t_dist=model_conf.get("t_dist", "sd3"),
         t_dist_scale=model_conf.get("t_dist_scale", 1.4),
+        t_zero_frac=model_conf.get("t_zero_frac", 0.0),
+        t_dist_shift=model_conf.get("t_dist_shift", 1.0),
         ot_coupling=model_conf.get("ot_coupling", False),
         ot_e_only=model_conf.get("ot_e_only", False),
         base_dist_loss=model_conf.get("base_dist_loss", 0.0),
@@ -194,7 +225,16 @@ def _build_resolved(
         pdgid_is_idx=model_conf.get("pdgid_is_idx", False),
         loss_sc_fac=model_conf.get("loss_sc", 0.0),
         one_step_euler_fac=model_conf.get("one_step_euler_fac", 0.0),
-        one_step_euler_sections=model_conf.get("one_step_euler_sections", 8),
+        one_step_euler_sections=sections,
+        one_step_euler_every=model_conf.get("one_step_euler_every", 1),
+        curv_fac=model_conf.get("curv_fac", 0.0),
+        curv_every=model_conf.get("curv_every", 4),
+        curv_eps=model_conf.get("curv_eps", 0.05),
+        curv_warmup=model_conf.get("curv_warmup", 500),
+        uncert_weighting=model_conf.get("uncert_weighting", False),
+        uncert_bins=model_conf.get("uncert_bins", 16),
+        uncert_min=model_conf.get("uncert_min", -6.0),
+        overflow_delta=overflow_delta,
         cond_cube=model_conf.get("cond_cube", False),
         canon_sym=model_conf.get("canon_sym", False),
         cond_scalars=cond_scalars,
@@ -210,6 +250,8 @@ def _build_resolved(
         state_dict=state_dict,
         reflow_path=model_conf.get("reflow_path"),
         reflow_kwargs=model_conf.get("reflow_kwargs", {}),
+        reflow_every=model_conf.get("reflow_every", 1),
+        reflow_start_epoch=model_conf.get("reflow_start_epoch", 0),
     )
 
 

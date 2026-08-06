@@ -26,7 +26,7 @@ from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.data.struct import DataStruct, _F
 
-from legofmt.distill.distill import one_step_euler_loss
+from legofmt.distill.distill import curvature_loss, one_step_euler_loss
 
 from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.geometry.gen_base import GenerateBase
@@ -70,11 +70,15 @@ class ProjectModel(nn.Module):
         attn_mask: Tensor,
         types: Tensor,
         pdgids: Tensor | None = None,
+        d: Tensor | None = None,
     ) -> Tensor:
         x_proj, x_att = self._prep_x(x, attn_mask)
         t = torch.atleast_2d(t).expand_as(attn_mask)
         t = torch.where(mask == 1, t, 1.0)  # conditions get t=1
-        v = self.vf(x_att, mask, attn_mask, types, pdgids, t=t)
+        if getattr(self.vf, "step_cond", False):
+            d = torch.zeros_like(t) if d is None else torch.atleast_2d(d).expand_as(attn_mask)
+            d = torch.where(mask == 1, d, 0.0)  # conditions are not transported
+        v = self.vf(x_att, mask, attn_mask, types, pdgids, t=t, d=d)
         v_proj = self.manifold.proju(x_proj, v)
         return torch.where(attn_mask.unsqueeze(-1), v_proj, v)
 
@@ -99,25 +103,45 @@ class LEGOLtng(ltng.LightningModule):
 
         self._base_dist_loss = None
         params = list(self.model.parameters())
-        if self.rc.base_dist_loss > 0 and self.gen_base.scale_dist == "sm_norm":
+        if ((self.rc.base_dist_loss > 0 or self.rc.base_pretrain_batches > 0)
+                and self.gen_base.scale_dist == "sm_norm"):
             bc = self.rc.config.get("base_conf") or {}
             self.base_head = nn.Sequential(
-                nn.Linear(3 + len(self.rc.pdgids_template), 16), nn.Mish(),
-                nn.Linear(16, 1))
+                nn.Linear(4 + len(self.rc.pdgids_template), 16), nn.Mish(),
+                nn.Linear(16, 3))
             with torch.no_grad():
                 self.base_head[-1].weight.zero_()
                 self.base_head[-1].bias.copy_(torch.tensor(
-                    [float(self.gen_base.sm_scale)]).log())
+                    [float(self.gen_base.sm_scale), 1.0, 1.0]).log())
                 hs = bc.get("base_head")
                 if hs is not None and hs.keys() == self.base_head.state_dict().keys():
-                    self.base_head.load_state_dict(hs)
+                    if hs["2.weight"].shape == self.base_head[-1].weight.shape:
+                        self.base_head.load_state_dict(hs)
+                    else:
+                        self.base_head[0].load_state_dict(
+                            {"weight": hs["0.weight"], "bias": hs["0.bias"]})
+                        self.base_head[-1].weight[0:1].copy_(hs["2.weight"])
+                        self.base_head[-1].bias[0:1].copy_(hs["2.bias"])
                     self.base_head.requires_grad_(not bc.get("base_head_frozen", False))
             params += [p for p in self.base_head.parameters() if p.requires_grad]
+        if self.rc.uncert_weighting:
+            self.lv = nn.Parameter(torch.zeros(self.rc.uncert_bins * 3))
+            params += [self.lv]
+            if self.rc.one_step_euler_fac > 0:
+                self.lv_flow = nn.Parameter(torch.zeros(1))
+                params += [self.lv_flow]
+
         self.opt, self._lr_sched = build_optimizer(params, self.rc.opt_conf)
         self._opt_is_sf = callable(getattr(self.opt, "train", None))
 
         if self.rc.state_dict is not None:
             self.model.vf.load_state_dict(self.rc.state_dict, strict=False)
+
+        teacher = None
+        if self.rc.reflow_path is not None:
+            from legofmt.distill.reflow import _build_reflow_teacher  # avoids import cycle
+            teacher = _build_reflow_teacher(self.rc.reflow_path)
+        object.__setattr__(self, "reflow_teacher", teacher)  # not a submodule: no state_dict/DDP
 
     def _build_model(self, rc) -> nn.Module:
         return ProjectModel(
@@ -146,8 +170,24 @@ class LEGOLtng(ltng.LightningModule):
     def on_fit_start(self) -> None:
         if self.rc.ot_coupling and slap is None:
             raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
+        if self.reflow_teacher is not None:
+            self.reflow_teacher.to(self.device)
         self.model.train()
         self._opt_train()
+
+    @torch.no_grad()
+    def on_train_epoch_end(self) -> None:
+        start = self.rc.reflow_start_epoch
+        if start <= 0 or self.current_epoch + 1 < start:
+            return
+        vf = (self.model._orig_mod if hasattr(self.model, "_orig_mod") else self.model).vf
+        if self.reflow_teacher is None:  # self-reflow: teacher = snapshot of the student
+            from legofmt.distill.reflow import _teacher_from_state  # avoids import cycle
+            teacher = _teacher_from_state(self.rc.config, vf.state_dict())
+            object.__setattr__(self, "reflow_teacher", teacher.to(self.device))
+        else:  # refresh: teacher = last epoch's student
+            t_m = self.reflow_teacher.model
+            (t_m._orig_mod if hasattr(t_m, "_orig_mod") else t_m).vf.load_state_dict(vf.state_dict())
 
     @torch.no_grad()
     def convert_pdgids(self, pdgids: Tensor) -> Tensor:
@@ -155,6 +195,13 @@ class LEGOLtng(ltng.LightningModule):
         pdgid_idx = torch.searchsorted(
             self.pdgids_template.to(pdgids.device), pdgids.contiguous()) + 1
         return pdgid_idx.masked_fill_(cond, 0)
+
+    def _shift_overflow_targets(self, ds_t: DataStruct) -> DataStruct:
+        f  = ds_t.f.full.clone()
+        op = _F(f).out_p
+        op[..., 0].masked_fill_((op[..., 0] == 0) & ds_t.am.out_p.bool(),
+                                -self.rc.overflow_delta)
+        return DataStruct(f, ds_t.m.full, ds_t.am.full)
 
     def _canon_dirs(self, x: Tensor, face: Tensor, fwd: Tensor, inverse: bool = False) -> Tensor:
         rot  = self.sym.uncanonicalize if inverse else self.sym.canonicalize
@@ -183,9 +230,20 @@ class LEGOLtng(ltng.LightningModule):
                     Z, A    = ds_t.f.cond("Z"), ds_t.f.cond("A")
                     x0      = 716.4 * A / (Z * (Z + 1) * (287.0 / Z.sqrt()).log())
                     t       = ds_t.f.cond("Size") * ds_t.f.cond("Density") / x0
-                    x       = torch.cat((ds_t.f.in_cc[..., 0], species,
+                    # cord length: full chord through the cube along the incoming
+                    # ray (edge lengths); fwd+bwd -> entry/exit-storage invariant
+                    inc     = ds_t.f.in_cc[..., 0, 1:7].nan_to_num(1.0)
+                    u, pos  = inc[..., :3], inc[..., 3:]
+                    p       = pos / pos.abs().amax(-1, keepdim=True).clamp_min(1e-8)
+                    ok_u    = u.abs() > 1e-6
+                    tf      = torch.where(ok_u, (u.sign() - p) / u, torch.full_like(u, 4.0))
+                    tb      = torch.where(ok_u, (p + u.sign()) / u, torch.full_like(u, 4.0))
+                    chord   = ((tf.amin(-1) + tb.amin(-1)).clamp(0.0, 3.5) / 2).unsqueeze(-1)
+                    x       = torch.cat((ds_t.f.in_cc[..., 0], species, chord,
                                          t.log().unsqueeze(-1)), dim=-1)
-                    s       = self.base_head(x).exp()
+                    out     = self.base_head(x)
+                    s       = out[..., 0:1].exp()
+                    mu, sig = out[..., 1:2], out[..., 2:3].exp()
                     if learn:
                         z   = 2 ** 0.5 * torch.erfinv(torch.linspace(
                             -0.995, 0.995, 100, device=s.device))  # N(0,1) quantile nodes
@@ -194,8 +252,17 @@ class LEGOLtng(ltng.LightningModule):
                         n   = v.sum(-1).clamp(min=1)
                         u_t = (ds_t.f.out_cc[..., 0] * v).sum(-1) / n
                         ev  = (v.sum(-1) > 0).float()
-                        self._base_dist_loss = ((u_b - u_t) ** 2 * ev).sum() / ev.sum().clamp(min=1)
+                        l_scale = ((u_b - u_t) ** 2 * ev).sum() / ev.sum().clamp(min=1)
+                        ed_b = self.gen_base.e_dep_max * torch.sigmoid(mu + sig * z)
+                        ed_t = ds_t.f.edep
+                        w    = fwd.float()
+                        l_edep = (((ed_b.mean(-1) - ed_t) ** 2
+                                   + (ed_b.pow(2).mean(-1) - ed_t ** 2) ** 2) * w
+                                  ).sum() / w.sum().clamp(min=1)
+                        self._base_dist_loss = l_scale + l_edep
                 self.gen_base.sm_scale = s.detach().unsqueeze(-1)
+                self.gen_base.edep_mu  = mu.detach()
+                self.gen_base.edep_sig = sig.detach()
             base = torch.cat(
                 (ds_t.f.non_cc, self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc)), dim=1,
             )
@@ -217,32 +284,58 @@ class LEGOLtng(ltng.LightningModule):
                         ((a * b).sum(-1).clamp(-1 + 1e-6, 1 - 1e-6).acos()
                          if isinstance(mf, Sphere) else (a - b).norm(dim=-1)) ** 2
                         for mf, a, b in zip(man.manifolds, tgt, ref)
-                    ).sqrt() + inf_cond * 1e6
+                    ) + inf_cond * 1e6
                 assign = slap(cost, cost.device).long()
                 out[:] = torch.take_along_dim(out, assign.unsqueeze(-1), dim=1)
             base = self.gen_base.insert_add(base)
             noise = base if noise is None else torch.where(fwd.view(-1, 1, 1), base, noise)
         return torch.where((m == 1).unsqueeze(-1), noise, data)
 
-    def _reduce_and_log(self, sq: Tensor, ds_t: DataStruct, loss_sc) -> Tensor:
+    def _reduce_and_log(
+        self, sq: Tensor, ds_t: DataStruct, loss_sc, t: Tensor | None = None,
+    ) -> Tensor:
         g        = ((ds_t.m.full == 1) & (ds_t.am.full == 1)).unsqueeze(-1)
         denom    = g.sum().clamp(min=1)
         out      = sq * g
         loss_e   = out[..., 0:1].sum() / denom
         loss_dir = out[..., 1:4].sum() / (denom * 3)
         loss_x   = out[..., 4:7].sum() / (denom * 3)
+        logs     = {}
+        if not self.rc.uncert_weighting:
+            total = loss_e + loss_dir + loss_x
+        else:
+            if t is None:
+                raise ValueError(
+                    "uncert_weighting=True needs the per-event t, which the "
+                    "time-independent (LEGOLtngDirect) path does not have."
+                )
+            nb  = self.rc.uncert_bins
+            idx = (t.detach().clamp(0, 1) * nb).long().clamp(max=nb - 1)
+            lv  = self.lv.view(nb, 3)[idx].clamp(min=self.rc.uncert_min)  # (B, 3)
+            w   = torch.exp(-lv)
+            total = (
+                (out[..., 0:1] * w[:, 0].view(-1, 1, 1)).sum() / denom
+                + (out[..., 1:4] * w[:, 1].view(-1, 1, 1)).sum() / (denom * 3)
+                + (out[..., 4:7] * w[:, 2].view(-1, 1, 1)).sum() / (denom * 3)
+                + lv.mean(0).sum()  # the +log(sigma^2) barrier; zero at init
+            )
+            v = lv.detach().exp().mean(0)
+            logs = {"uncert/var_energy": v[0], "uncert/var_dir": v[1], "uncert/var_pos": v[2]}
         if self.training:
             log_sc = loss_sc.detach() if torch.is_tensor(loss_sc) else loss_sc
             self.log_dict(
                 {
+                    # unweighted, so these stay comparable across uncert settings
                     "loss/energy": loss_e.detach(),
                     "loss/out_dir": loss_dir.detach(),
                     "loss/out_pos": loss_x.detach(),
+                    "loss/raw": (loss_e + loss_dir + loss_x).detach(),
                     "loss/sc": log_sc,
+                    **logs,
                 },
                 on_step=True, on_epoch=False, logger=True, sync_dist=False,
             )
-        return loss_e + loss_dir + loss_x + self.rc.loss_sc_fac * loss_sc
+        return total + self.rc.loss_sc_fac * loss_sc
 
     @torch.no_grad()
     def _sample_mask(self, ds_t: DataStruct) -> Tensor:
@@ -257,6 +350,8 @@ class LEGOLtng(ltng.LightningModule):
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
         with torch.no_grad():
             ds_t = DataStruct(ds_t.f.full, self._sample_mask(ds_t), ds_t.am.full)
+            if self.rc.overflow_delta > 0:
+                ds_t = self._shift_overflow_targets(ds_t)
             if self.sym is not None:
                 fwd  = ds_t.m.full[:, self.rc.n_prefix] == 0
                 face = self.sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
@@ -270,6 +365,19 @@ class LEGOLtng(ltng.LightningModule):
                 t = 1 - u + self.rc.t_dist_scale / 3 * ((torch.pi / 2 * u).sin() ** 2 - u)
             else:
                 raise ValueError(f"unknown t_dist: {self.rc.t_dist!r}")
+            if self.rc.t_zero_frac > 0:
+                t = t * (torch.rand_like(t) >= self.rc.t_zero_frac)
+            if self.rc.t_dist_shift != 1.0:
+                t = t.clamp(min=0) ** (1.0 / self.rc.t_dist_shift)
+            if (
+                self.reflow_teacher is not None and self.training
+                and self.global_step % self.rc.reflow_every == 0
+            ):  # reflow: couple base to the teacher's transport of it
+                tgt = self.reflow_teacher.solve(ds_t, x_init=base, **self.rc.reflow_kwargs)
+                tgt = torch.where((ds_t.m.full == 1).unsqueeze(-1), tgt, ds_t.f.model_in)
+                ds_t = DataStruct(
+                    torch.cat((tgt, ds_t.f.pdgids), dim=-1), ds_t.m.full, ds_t.am.full,
+                )
             ps_ = self.ps.sample(base, ds_t.f.model_in, t)
         v_out = self.model(
             ps_.x_t, ps_.t,
@@ -283,13 +391,36 @@ class LEGOLtng(ltng.LightningModule):
         else:
             loss_sc = 0.0
         sq = (v_out - ps_.dx_t) ** 2
-        loss = self._reduce_and_log(sq, ds_t, loss_sc)
+        loss = self._reduce_and_log(sq, ds_t, loss_sc, t=t)
 
-        if self.rc.one_step_euler_fac > 0:
+        every = self.rc.one_step_euler_every
+        fac   = self.rc.one_step_euler_fac
+        lvf   = None
+        if fac > 0 and hasattr(self, "lv_flow"):
+            # Barrier every step, data term only when the gate fires: the
+            # expectations still meet at exp(lv_flow) = E[L_flow], and lv_flow
+            # never leaves the graph (DDP find_unused_parameters=False).
+            lvf  = self.lv_flow.clamp(min=self.rc.uncert_min).squeeze()
+            loss = loss + fac * lvf
+        if fac > 0 and (not self.training or self.global_step % every == 0):
             sc = one_step_euler_loss(self, base, ds_t, pdgid_idx)
+            w = fac * (every if self.training else 1)
+            if lvf is not None:
+                w = w * torch.exp(-lvf)
             if self.training:
-                self.log("loss/one_step_euler", sc.detach(), on_step=True, on_epoch=False, logger=True, sync_dist=False)
-            loss = loss + self.rc.one_step_euler_fac * sc
+                logs = {"loss/one_step_euler": sc.detach()}
+                if lvf is not None:
+                    logs["uncert/var_flow"] = lvf.detach().exp()
+                self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
+            loss = loss + w * sc
+
+        if self.rc.curv_fac > 0 and self.training and self.global_step % self.rc.curv_every == 0:
+            w    = self.rc.curv_warmup
+            ramp = 1.0 if w <= 0 else min(1.0, self.global_step / w)
+            if ramp > 0:
+                cv = curvature_loss(self, ps_.x_t, ps_.t, v_out, ds_t, pdgid_idx)
+                self.log("loss/curvature", cv.detach(), on_step=True, on_epoch=False, logger=True, sync_dist=False)
+                loss = loss + self.rc.curv_fac * self.rc.curv_every * ramp * cv
 
         if (ot := self._base_dist_loss) is not None:
             loss = loss + self.rc.base_dist_loss * ot
@@ -521,7 +652,7 @@ class LEGOLtng(ltng.LightningModule):
         gen = (extras["mask"] == 1).unsqueeze(-1)
         for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
             dt = t_b - t_a
-            s  = self.model(x, t_a, **extras)
+            s  = self.model(x, t_a, d=dt, **extras)
             x  = torch.where(gen, self.model.manifold.expmap(x, dt * s), x)
             if return_intermediates:
                 xs.append(x)

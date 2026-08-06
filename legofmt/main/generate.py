@@ -7,7 +7,7 @@ from ..main.modules import LEGOLtng
 from ..multiplicity.model import MultModel
 from ..geometry.raytracing_proj import CubeTrace
 from ..geometry.energy_proj import EnergyProjections
-from ..data.struct import _F, DataStruct
+from ..data.struct import _F, DataStruct, set_layout
 
 
 class GenerateOut(torch.nn.Module):
@@ -29,6 +29,16 @@ class GenerateOut(torch.nn.Module):
         self.pdgid_in = mult_conf["config"]["mm_conf"]["ptypes_in"].to(device)
         self.ptypes = mult_conf["config"]["mm_conf"]["ptypes"].to(device)
 
+        mm_cond = mult_conf["config"]["mm_conf"].get("cond_scalars")
+        self.n_mult_cond = len(mm_cond) if mm_cond else self.gen_mult.proj_in_.in_features - 7
+        if mm_cond and tuple(mm_cond) != self.cond_names[:self.n_mult_cond]:
+            raise ValueError(
+                f"mult cond_scalars {tuple(mm_cond)} is not a prefix of the flow's "
+                f"{self.cond_names}; cond carries only the flow's scalars."
+            )
+
+        set_layout(self.cond_names)
+
         if couple_in_out_pdgids:
             self.model.rc.odeint_conf["filter_pdgid"] = self.pdgid_in
 
@@ -46,7 +56,9 @@ class GenerateOut(torch.nn.Module):
         if not prepped:
             nc = self.n_cond
             mom, pos = cond_model[:, nc:nc + 3], cond_model[:, nc + 3:nc + 6]
-            pos = self.proj_ray(torch.cat((mom, pos), dim=-1))[..., 3:]
+            pos = F.normalize(
+                self.proj_ray(torch.cat((mom, pos), dim=-1))[..., 3:], dim=-1
+            )
             dir_, e = self.pen.to_scalar(mom)
             cond_model = torch.cat(
                 (cond_model[:, :nc], e, dir_, pos, cond_model[:, nc + 6:]), dim=-1
@@ -112,7 +124,10 @@ class GenerateOut(torch.nn.Module):
     def gen_batch(self, cond: torch.Tensor):
         pdgid_in = cond[:, -1].long()
         pdgid_in_idx = torch.searchsorted(self.pdgid_in, pdgid_in)
-        mult = self.gen_mult((cond[:, :self.n_cond + 7], None, pdgid_in_idx))
+        mult_in = torch.cat(
+            (cond[:, :self.n_mult_cond], cond[:, self.n_cond:self.n_cond + 7]), dim=-1
+        )
+        mult = self.gen_mult((mult_in, None, pdgid_in_idx))
         mult = mult[:, self.ptype_idx] * self.ptype_in_mask
 
         max_particles = self.max_seq_l - (self.n_prefix + 1)

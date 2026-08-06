@@ -124,8 +124,11 @@ if hasattr(model, "base_head"):
     }
     model.rc.config["base_conf"]["base_head_frozen"] = not model.base_head[-1].weight.requires_grad
 
-ckpt_base = run.get("ckpt_dir") or os.environ.get("LEGO_CKPT_DIR", "./checkpoints/")
-ckpt_dir = os.path.join(ckpt_base, "flow" if train_model == "fm" else "mult")
+if run.get("ckpt_dir"):
+    ckpt_dir = run["ckpt_dir"]  # explicit dir -> save directly here, no flow/mult subdir
+else:
+    ckpt_base = os.environ.get("LEGO_CKPT_DIR", "./checkpoints/")
+    ckpt_dir = os.path.join(ckpt_base, "flow" if train_model == "fm" else "mult")
 ckpt_path = os.path.join(ckpt_dir, f"{name}.pt")
 os.makedirs(ckpt_dir, exist_ok=True)
 

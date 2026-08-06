@@ -39,9 +39,12 @@ class CFMTrafo_x(nn.Module):
         npdgids: int = 1,
         dim_in_out: int | None = None,
         time_cond: bool = True,
+        step_cond: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
+        if step_cond and not time_cond:
+            raise ValueError("step_cond=True requires time_cond=True")
         ntypes = ntypes if ntypes is not None else max_seq_l
         self.h_dim = h_dim
         self.in_dim = in_dim
@@ -50,6 +53,7 @@ class CFMTrafo_x(nn.Module):
         self.ntypes = ntypes
         self.npdgids = npdgids
         self.time_cond = time_cond
+        self.step_cond = step_cond
 
         self.vf = ContinuousTransformerWrapper(
             dim_in=dim_in_out,
@@ -80,17 +84,25 @@ class CFMTrafo_x(nn.Module):
         self.cond_bi_pdgids = nn.Parameter(torch.empty(npdgids, h_dim))
         self.cond_bo_pdgids = nn.Parameter(torch.empty(npdgids, in_dim))
 
+        w_std = xavier_gain * 3 ** 0.5 * (2.0 / (in_dim + h_dim)) ** 0.5
+        for p in (self.cond_w_mask, self.cond_w_types, self.cond_w_pdgids):
+            nn.init.normal_(p, std=w_std)
         for p in (
-            self.cond_w_mask, self.cond_bi_mask, self.cond_bo_mask,
-            self.cond_w_types, self.cond_bi_types, self.cond_bo_types,
-            self.cond_w_pdgids, self.cond_bi_pdgids, self.cond_bo_pdgids,
+            self.cond_bi_mask, self.cond_bi_types, self.cond_bi_pdgids,
+            self.cond_bo_mask, self.cond_bo_types, self.cond_bo_pdgids,
         ):
-            nn.init.xavier_normal_(p, gain=xavier_gain)
+            nn.init.zeros_(p)
 
         if time_cond:
             # Sinusoidal time embedding, freqs scaled by h_dim.
             self.register_buffer("freqs", h_dim * 1e-4 ** (torch.arange(h_dim) / h_dim))
             self.register_buffer("mask_freqs", torch.arange(h_dim) % 2)
+            if step_cond:
+                self.register_buffer(
+                    "freqs_d", 2 * torch.pi * 2 ** (torch.arange(h_dim) * 3.0 / h_dim),
+                    persistent=False,
+                )
+                self.step_gain = nn.Parameter(torch.zeros(1))
             self._register_load_state_dict_pre_hook(self._legacy_param_rename)
         else:
             self.global_cond = nn.Parameter(torch.zeros(1, h_dim))
@@ -120,6 +132,7 @@ class CFMTrafo_x(nn.Module):
         types: Tensor,
         pdgids: Tensor | None,
         t: Tensor | None = None,
+        d: Tensor | None = None,
     ) -> Tensor:
         n = x.shape[1]
         mi, ti, pi = mask.view(-1), types.view(-1)[:n], pdgids.view(-1)
@@ -130,6 +143,8 @@ class CFMTrafo_x(nn.Module):
         if self.time_cond:
             tf = t.unsqueeze(-1) * self.freqs
             cond = torch.where(self.mask_freqs.bool(), tf.sin(), tf.cos())
+            if self.step_cond and d is not None:
+                cond = cond + self.step_gain * (d.unsqueeze(-1) * self.freqs_d).sin()
         else:
             cond = self.global_cond.expand(x.shape[0], -1)
 
