@@ -24,6 +24,7 @@ _OT_COUPLING_REQUIRES_LAP = (
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 
 from legofmt.data.dataloaders import LEGODataset
+from legofmt.data.prep import DataPrep
 from legofmt.data.struct import DataStruct, _F
 
 from legofmt.distill.distill import one_step_euler_loss
@@ -344,7 +345,7 @@ class LEGOLtng(ltng.LightningModule):
     def setup(self, stage: str | None = None) -> None:
         if getattr(self, "_val_ds", None) is not None:
             return
-        full  = LEGODataset(**self.rc.dl_conf["lds_args"])
+        full  = LEGODataset(**self.rc.dl_conf["lds_args"], prep=DataPrep(self.rc.config))
         n_val = max(1, int(len(full) * self.rc.val_conf.get("val_frac", 0.01)))
         gen   = torch.Generator().manual_seed(self.rc.val_conf.get("seed", 0))
         self._train_ds, self._val_ds = random_split(

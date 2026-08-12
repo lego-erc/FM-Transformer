@@ -18,7 +18,8 @@ class DataPrep:
             max_energy = model_conf["max_energy"]
             cond = model_conf.get("cond_scalars", ("Density",))
         else:
-            self.manifold = build_manifold(config["manifold"])
+            m = config.get("manifold")
+            self.manifold = build_manifold(m) if m else None
             self.proj_ray = config.get("proj_ray")
             cutoff_mev = config.get("cutoff_mev")
             max_energy = config.get("max_energy")
@@ -42,7 +43,8 @@ class DataPrep:
         cc = cc.nan_to_num(1)
         mom, pos = cc.split(3, -1)
         dir_, e = self.pen.to_scalar(mom)
-        e = torch.cat((e[:, :1], 1 - (e[:, 1:] / e[:, :1].clamp_min(1e-6)).clamp(0, 1)), dim=1)
+        e = torch.cat((mom[:, :1].norm(dim=-1, keepdim=True),
+                       1 - (e[:, 1:] / e[:, :1].clamp_min(1e-6)).clamp(0, 1)), dim=1)
         if self.proj_ray:
             ray = torch.cat((dir_[:, 0], pos[:, 0]), dim=-1)
             pos = pos.clone()
@@ -52,10 +54,19 @@ class DataPrep:
         )
 
     @torch.no_grad()
+    def norm_e(self, batch: tuple) -> tuple:
+        f, mask, attn_mask = batch
+        in_cc = _F(f).in_cc
+        _, e = self.pen.to_scalar(in_cc[..., 1:4] * in_cc[..., 0:1])
+        in_cc[..., 0:1] = e
+        _F(f).edep.div_(self.pen.max_energy)
+        return f, mask, attn_mask
+
+    @torch.no_grad()
     def format_add(self, batch: tuple) -> Tensor:
         cc_ext, mask, attn_mask, data_add = batch
         e_dep = torch.ones_like(cc_ext[:, :1])
-        e_dep[..., 0] = data_add["E_dep"].view_as(e_dep[..., 0]) / self.pen.max_energy
+        e_dep[..., 0] = data_add["E_dep"].view_as(e_dep[..., 0])
         cond_rows = []
         for name in cond_scalars():
             row = torch.ones_like(cc_ext[:, :1])

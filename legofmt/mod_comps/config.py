@@ -116,7 +116,7 @@ def _resolve_fresh(config: dict) -> ResolvedLEGOConfig:
         torch.tensor(meta["particles"], dtype=torch.int64).sort().values.contiguous()
     )
 
-    max_energy = meta.get("max_energy", model_conf.get("max_energy"))
+    max_energy = model_conf.get("max_energy", meta.get("max_energy"))
     if max_energy is None:
         raise KeyError(
             f"max_energy missing from {dpath}/meta.json and model_conf; "
