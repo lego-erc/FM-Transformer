@@ -207,6 +207,8 @@ class LEGOLtng(ltng.LightningModule):
         rot  = self.sym.uncanonicalize if inverse else self.sym.canonicalize
         dirs = rot(torch.stack((x[..., 1:4], x[..., 4:7]), dim=-2), face)
         new  = torch.cat((x[..., 0:1], dirs[..., 0, :], dirs[..., 1, :], x[..., 7:]), dim=-1)
+        rows = torch.arange(x.shape[-2], device=x.device) >= self.rc.n_prefix
+        new  = torch.where(rows.view(1, -1, 1), new, x)
         return torch.where(fwd[:, None, None], new, x)
 
     @torch.no_grad()
