@@ -108,20 +108,23 @@ class LEGOLtng(ltng.LightningModule):
             bc = self.rc.config.get("base_conf") or {}
             self.base_head = nn.Sequential(
                 nn.Linear(4 + len(self.rc.pdgids_template), 16), nn.Mish(),
-                nn.Linear(16, 3))
+                nn.Linear(16, 4))
             with torch.no_grad():
                 self.base_head[-1].weight.zero_()
                 self.base_head[-1].bias.copy_(torch.tensor(
-                    [float(self.gen_base.sm_scale), 1.0, 1.0]).log())
+                    [float(self.gen_base.sm_scale), 1.0, 1.0,
+                     float(self.gen_base.kappa)]).log())
                 hs = bc.get("base_head")
                 if hs is not None and hs.keys() == self.base_head.state_dict().keys():
                     if hs["2.weight"].shape == self.base_head[-1].weight.shape:
                         self.base_head.load_state_dict(hs)
                     else:
+
+                        n_old = hs["2.weight"].shape[0]
                         self.base_head[0].load_state_dict(
                             {"weight": hs["0.weight"], "bias": hs["0.bias"]})
-                        self.base_head[-1].weight[0:1].copy_(hs["2.weight"])
-                        self.base_head[-1].bias[0:1].copy_(hs["2.bias"])
+                        self.base_head[-1].weight[:n_old].copy_(hs["2.weight"])
+                        self.base_head[-1].bias[:n_old].copy_(hs["2.bias"])
                     self.base_head.requires_grad_(not bc.get("base_head_frozen", False))
             params += [p for p in self.base_head.parameters() if p.requires_grad]
         if self.rc.uncert_weighting:
@@ -246,6 +249,7 @@ class LEGOLtng(ltng.LightningModule):
                     out     = self.base_head(x)
                     s       = out[..., 0:1].exp()
                     mu, sig = out[..., 1:2], out[..., 2:3].exp()
+                    kap     = out[..., 3:4].exp().clamp_min(1e-3)  # divisor in sample()
                     if learn:
                         z   = 2 ** 0.5 * torch.erfinv(torch.linspace(
                             -0.995, 0.995, 100, device=s.device))  # N(0,1) quantile nodes
@@ -261,10 +265,22 @@ class LEGOLtng(ltng.LightningModule):
                         l_edep = (((ed_b.mean(-1) - ed_t) ** 2
                                    + (ed_b.pow(2).mean(-1) - ed_t ** 2) ** 2) * w
                                   ).sum() / w.sum().clamp(min=1)
-                        self._base_dist_loss = l_scale + l_edep
+                        l_kappa = 0.0
+                        if self.gen_base.tanh_theta:
+                            th_b = (z.abs() / kap).tanh().mean(-1)
+                            u_i  = nn.functional.normalize(
+                                ds_t.f.in_cc[..., 0, 1:4], dim=-1).unsqueeze(1)
+                            p_i  = nn.functional.normalize(
+                                ds_t.f.in_cc[..., 0, 4:7], dim=-1).unsqueeze(1)
+                            a_m  = (ds_t.f.out_cc[..., 1:4] * u_i).sum(-1).clamp(-1, 1).acos()
+                            a_p  = (ds_t.f.out_cc[..., 4:7] * p_i).sum(-1).clamp(-1, 1).acos()
+                            th_t = (((a_m + a_p) / 2) * v).sum(-1) / n / torch.pi
+                            l_kappa = ((th_b - th_t) ** 2 * ev).sum() / ev.sum().clamp(min=1)
+                        self._base_dist_loss = l_scale + l_edep + l_kappa
                 self.gen_base.sm_scale = s.detach().unsqueeze(-1)
                 self.gen_base.edep_mu  = mu.detach()
                 self.gen_base.edep_sig = sig.detach()
+                self.gen_base.kappa    = kap.detach()
             base = torch.cat(
                 (ds_t.f.non_cc, self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc)), dim=1,
             )
