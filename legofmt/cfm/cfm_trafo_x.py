@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import warnings
+from functools import partial
 
 import torch
 from torch import Tensor, nn
+from torch.utils.checkpoint import checkpoint
 from x_transformers import ContinuousTransformerWrapper, Encoder
 
 
@@ -40,6 +42,7 @@ class CFMTrafo_x(nn.Module):
         dim_in_out: int | None = None,
         time_cond: bool = True,
         step_cond: bool = False,
+        grad_ckpt: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -72,6 +75,10 @@ class CFMTrafo_x(nn.Module):
                 **kwargs,
             ),
         )
+
+        if grad_ckpt:
+            for _norms, _block, _residual in self.vf.attn_layers.layers:
+                _block.forward = partial(checkpoint, _block.forward, use_reentrant=False)
 
         # Per conditioning source: [:, 0] up-projection, [:, 1] down-projection.
         self.cond_w_mask    = nn.Parameter(torch.empty(nvtypes, 2, h_dim, in_dim))
