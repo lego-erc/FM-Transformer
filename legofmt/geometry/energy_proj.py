@@ -16,8 +16,10 @@ class EnergyProjections:
 
     def to_scalar(self, mom: Tensor, eps: float = 1e-8) -> tuple[Tensor, Tensor]:
         norm = mom.norm(dim=-1, keepdim=True)
-        e = (torch.log(norm.clamp_min(eps) / self.cutoff) / self.log_range).clamp(0.0, 1.0)
-        return mom / norm.clamp_min(eps), e
+        return mom / norm.clamp_min(eps), self.to_scalar_e(norm, eps)
+
+    def to_scalar_e(self, e_mev: Tensor, eps: float = 1e-8) -> Tensor:
+        return (torch.log(e_mev.clamp_min(eps) / self.cutoff) / self.log_range).clamp(0.0, 1.0)
 
     def from_scalar(self, dir_: Tensor, e: Tensor) -> Tensor:
         norm = self.cutoff * (self.max_energy / self.cutoff) ** e.clamp(0.0, 1.0)

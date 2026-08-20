@@ -17,12 +17,14 @@ class DataPrep:
             cutoff_mev = config["dl_conf"]["lds_args"].get("cutoff_mev")
             max_energy = model_conf["max_energy"]
             cond = model_conf.get("cond_scalars", ("Density",))
+            self.energy_kin = model_conf.get("energy_kin", True)
         else:
             self.manifold = build_manifold(config["manifold"])
             self.proj_ray = config.get("proj_ray")
             cutoff_mev = config.get("cutoff_mev")
             max_energy = config.get("max_energy")
             cond = config.get("cond_scalars", ("Density",))
+            self.energy_kin = config.get("energy_kin", True)
         set_layout(cond)
         self.pen = EnergyProjections(cutoff_mev=cutoff_mev, max_energy=max_energy)
         self.ppa = CubeTrace()
@@ -33,15 +35,20 @@ class DataPrep:
     @torch.no_grad()
     def prep(self, batch: tuple) -> Tensor:
         cc_ext, mask, attn_mask, data_add = batch
-        model_in = self.cc_trafo(cc_ext[..., 1:7])
+        e_kin = cc_ext[..., 0:1] if self.energy_kin else None
+        model_in = self.cc_trafo(cc_ext[..., 1:7], e_kin=e_kin)
         cc_ext = torch.cat((model_in, cc_ext[..., 7:]), dim=-1)
         return self.format_add((cc_ext, mask, attn_mask, data_add))
 
     @torch.no_grad()
-    def cc_trafo(self, cc: Tensor) -> Tensor:
+    def cc_trafo(self, cc: Tensor, e_kin: Tensor | None = None) -> Tensor:
         cc = cc.nan_to_num(1)
         mom, pos = cc.split(3, -1)
         dir_, e = self.pen.to_scalar(mom)
+        if e_kin is not None:
+            # kinetic channel: the scalar comes from Geant4's recorded kinetic
+            # energy, not |p| (which saturates for hadrons above T ~ 433 MeV)
+            e = self.pen.to_scalar_e(e_kin.nan_to_num(1))
         e = torch.cat((e[:, :1], 1 - (e[:, 1:] / e[:, :1].clamp_min(1e-6)).clamp(0, 1)), dim=1)
         if self.proj_ray:
             ray = torch.cat((dir_[:, 0], pos[:, 0]), dim=-1)

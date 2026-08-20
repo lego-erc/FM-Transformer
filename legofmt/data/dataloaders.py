@@ -11,12 +11,14 @@ class GetLEGOData:
         cutoff_mev=10.0,
         min_particles=0,
         device="cpu",
+        energy_kin=True,
         **kwargs,
     ):
         self.dev = device
         self.dtype = kwargs.pop("dtype", torch.float32)
         self.min_particles = min_particles
         self.cutoff_mev = cutoff_mev
+        self.energy_kin = energy_kin
 
     def __call__(self, *args, **kwargs):
         return self.dataset_cutoff(*args, **kwargs)
@@ -33,7 +35,8 @@ class GetLEGOData:
         n_events: (int | None) = None,
     ) -> tuple[Tensor, Tensor, Tensor, dict]:
         dataset, data_add = self.dataset_compact(data)
-        mask_valid = dataset[..., 1:4].norm(dim=-1) >= self.cutoff_mev
+        e_valid = dataset[..., 0] if self.energy_kin else dataset[..., 1:4].norm(dim=-1)
+        mask_valid = e_valid >= self.cutoff_mev
         max_valid = mask_valid.sum(dim=-1).max()
         mask_valid_sorted = mask_valid.sort(dim=-1, descending=True).values[:, :max_valid]
         dataset_valid = torch.full_like(dataset[:, :max_valid], torch.nan)
