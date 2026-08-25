@@ -37,6 +37,7 @@ torch.set_float32_matmul_precision(run["matmul_precision"])
 
 epochs = run["epochs"]
 devices = run["devices"]
+nodes = run.get("nodes", 1)
 name = run["name"]
 
 # Coerce the YAML-native values into what the models expect.
@@ -52,7 +53,7 @@ config["dl_conf"]["lds_args"]["data"] = dpath_prefix + config["dl_conf"]["lds_ar
 scheduler = config["opt_conf"].get("scheduler")
 if scheduler is not None and "total_steps" not in scheduler:
     bs = config["dl_conf"]["bs"]
-    scheduler["total_steps"] = epochs * int(run["dataset_size"] / (bs * len(devices)))
+    scheduler["total_steps"] = epochs * int(run["dataset_size"] / (bs * len(devices) * nodes))
 
 if log_conf["comet"]:
     from lightning.pytorch.loggers import CometLogger
@@ -88,6 +89,7 @@ trainer = ltng.Trainer(
     max_epochs=epochs,
     accelerator="gpu",
     devices=devices,
+    num_nodes=nodes,
     precision=run["precision"],
     strategy=run["strategy"],
     logger=logger,

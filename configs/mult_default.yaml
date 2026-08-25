@@ -5,6 +5,7 @@ run:
   train_model: mult          # fm | mult
   name: rp_mult_v1_210726
   devices: [0, 1, 2, 3]
+  nodes: 1                   # number of nodes (SLURM --nodes / Trainer num_nodes); devices are per node
   precision: 32
   matmul_precision: medium
   dtype: float32
