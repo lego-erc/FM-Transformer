@@ -104,3 +104,48 @@ def test_energy_kin_cutoff_uses_kinetic() -> None:
     # default = kinetic
     pp, _, attn, _ = GetLEGOData(cutoff_mev=CUTOFF)(data)
     assert int(attn.sum()) - 1 == 1, attn
+
+
+# --- the channel must be recorded in the model config ---------------------
+# Nothing downstream can tell a kinetic-channel checkpoint from a |p|-channel
+# one by inspection, and confusing them silently halves hadron momenta at
+# decode time. meta.json knows; the resolved config has to carry it forward so
+# it lands in the saved checkpoint.
+
+def test_energy_kin_is_carried_from_meta_into_model_conf(tmp_path) -> None:
+    import json
+    from legofmt.mod_comps.config import resolve_legoltng_config
+
+    (tmp_path / "meta.json").write_text(json.dumps({
+        "ntokens": 8, "particles": [11.0, 22.0, 2212.0],
+        "max_energy": MAX_E, "cutoff_mev": CUTOFF,
+        "cond_scalars": ["Density"], "energy_kin": True,
+    }))
+    cfg = {
+        "dl_conf": {"lds_args": {"data": str(tmp_path), "cutoff_mev": CUTOFF}, "bs": 2},
+        "model_conf": {
+            "manifold": [{"name": "euclidean", "dim": 1},
+                         {"name": "sphere", "dim": 3}, {"name": "sphere", "dim": 3}],
+            "max_energy": MAX_E, "base_pretrain_batches": 0,
+            "model_args": {"h_dim": 8, "in_dim": 7, "nlayers": 1, "nhead": 1},
+        },
+        "opt_conf": {"opt": "schedulefree", "lr": 1e-3},
+    }
+    # resolve_legoltng_config deep-copies its input, so the flag has to be
+    # checked on the resolved config -- which is what scripts/train.py saves
+    # into the checkpoint (`model.rc.config`).
+    rc = resolve_legoltng_config(cfg)
+    assert rc.config["model_conf"].get("energy_kin") is True, (
+        "energy_kin from meta.json did not reach the resolved model_conf; the "
+        "saved checkpoint cannot describe its own energy channel"
+    )
+
+
+# --- E_dep normalisation --------------------------------------------------
+# E_dep is normalised on the fly by DataPrep using the *model's* max_energy,
+# never baked into the stored dataset.
+
+def test_edep_is_normalised_by_model_max_energy() -> None:
+    f, _, _ = _prep(energy_kin=None).prep(_batch())     # E_dep = 50
+    got = float(_F(f).edep.flatten()[0])
+    assert abs(got - 50.0 / MAX_E) < 1e-6, f"E_dep should be 50/{MAX_E}, got {got}"
