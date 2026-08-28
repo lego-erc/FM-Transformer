@@ -219,6 +219,30 @@ class LEGOLtng(ltng.LightningModule):
         return torch.where(fwd[:, None, None], new, x)
 
     @torch.no_grad()
+    def base_head_params(self, ds_t: DataStruct) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        pid     = ds_t.f.in_p[..., 0, -1]
+        idx     = pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)
+        species = nn.functional.one_hot(
+            idx.long().clamp(0, len(self.pdgids_template)),
+            len(self.pdgids_template) + 1).float()
+        Z, A    = ds_t.f.cond("Z"), ds_t.f.cond("A")
+        x0      = 716.4 * A / (Z * (Z + 1) * (287.0 / Z.sqrt()).log())
+        t       = ds_t.f.cond("Size") * ds_t.f.cond("Density") / x0
+        # cord length: full chord through the cube along the incoming
+        # ray (edge lengths); fwd+bwd -> entry/exit-storage invariant
+        inc     = ds_t.f.in_cc[..., 0, 1:7].nan_to_num(1.0)
+        u, pos  = inc[..., :3], inc[..., 3:]
+        p       = pos / pos.abs().amax(-1, keepdim=True).clamp_min(1e-8)
+        ok_u    = u.abs() > 1e-6
+        tf      = torch.where(ok_u, (u.sign() - p) / u, torch.full_like(u, 4.0))
+        tb      = torch.where(ok_u, (p + u.sign()) / u, torch.full_like(u, 4.0))
+        chord   = ((tf.amin(-1) + tb.amin(-1)).clamp(0.0, 3.5) / 2).unsqueeze(-1)
+        x       = torch.cat((ds_t.f.in_cc[..., 0], species, chord,
+                             t.log().unsqueeze(-1)), dim=-1)
+        out     = self.base_head(x)
+        return (out[..., 0:1].exp(), out[..., 1:2], out[..., 2:3].exp(),
+                out[..., 3:4].exp().clamp_min(1e-3))  # kap: divisor in sample()
+
     def gen_base_wrapper(self, ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]") -> Tensor:
         if not isinstance(ds_t, DataStruct):
             ds_t = DataStruct(*ds_t)
@@ -231,29 +255,7 @@ class LEGOLtng(ltng.LightningModule):
             if hasattr(self, "base_head"):
                 learn = self.model.training and self.base_head[-1].weight.requires_grad
                 with torch.set_grad_enabled(learn):
-                    pid     = ds_t.f.in_p[..., 0, -1]
-                    idx     = pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)
-                    species = nn.functional.one_hot(
-                        idx.long().clamp(0, len(self.pdgids_template)),
-                        len(self.pdgids_template) + 1).float()
-                    Z, A    = ds_t.f.cond("Z"), ds_t.f.cond("A")
-                    x0      = 716.4 * A / (Z * (Z + 1) * (287.0 / Z.sqrt()).log())
-                    t       = ds_t.f.cond("Size") * ds_t.f.cond("Density") / x0
-                    # cord length: full chord through the cube along the incoming
-                    # ray (edge lengths); fwd+bwd -> entry/exit-storage invariant
-                    inc     = ds_t.f.in_cc[..., 0, 1:7].nan_to_num(1.0)
-                    u, pos  = inc[..., :3], inc[..., 3:]
-                    p       = pos / pos.abs().amax(-1, keepdim=True).clamp_min(1e-8)
-                    ok_u    = u.abs() > 1e-6
-                    tf      = torch.where(ok_u, (u.sign() - p) / u, torch.full_like(u, 4.0))
-                    tb      = torch.where(ok_u, (p + u.sign()) / u, torch.full_like(u, 4.0))
-                    chord   = ((tf.amin(-1) + tb.amin(-1)).clamp(0.0, 3.5) / 2).unsqueeze(-1)
-                    x       = torch.cat((ds_t.f.in_cc[..., 0], species, chord,
-                                         t.log().unsqueeze(-1)), dim=-1)
-                    out     = self.base_head(x)
-                    s       = out[..., 0:1].exp()
-                    mu, sig = out[..., 1:2], out[..., 2:3].exp()
-                    kap     = out[..., 3:4].exp().clamp_min(1e-3)  # divisor in sample()
+                    s, mu, sig, kap = self.base_head_params(ds_t)
                     if learn:
                         z   = 2 ** 0.5 * torch.erfinv(torch.linspace(
                             -0.995, 0.995, 100, device=s.device))  # N(0,1) quantile nodes
