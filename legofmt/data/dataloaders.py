@@ -63,13 +63,14 @@ class LEGODataset(Dataset):
         if isinstance(data, str):
             path = data if data.endswith(".pt") else data + "/data_prepped.pt"
             data = torch.load(path, map_location="cpu", weights_only=False)
-        if isinstance(data, dict):
-            if prep is None:
-                raise ValueError(
-                    "LEGODataset(dict, ...) requires `prep` (e.g. DataPrep(config)); "
-                    "GetLEGOData yields pre-format_add layout that DataStruct misaligns."
-                )
-            data = prep(GetLEGOData(**kwargs)(data))
+        if prep is None:
+            raise ValueError(
+                "LEGODataset requires `prep` (e.g. DataPrep(config)): a dict needs the "
+                "full prep, and a prepped tuple still has its max_energy-dependent "
+                "channels (incoming energy, E_dep) in MeV."
+            )
+        data = prep(GetLEGOData(**kwargs)(data)) if isinstance(data, dict) \
+            else prep.norm_e(data)
         self.data = DataStruct(*data)
 
         frac = kwargs.get("frac")

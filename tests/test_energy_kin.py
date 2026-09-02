@@ -57,26 +57,40 @@ def _batch():
     return cc, mask, attn, add
 
 
+def _prepped(energy_kin: bool | None):
+    """(stored file, loaded-and-normalised) -- prep() keeps the max_energy-dependent
+    channels in MeV; DataPrep.norm_e puts them on the model scale at load time."""
+    prep = _prep(energy_kin)
+    stored = prep.prep(_batch())
+    return stored[0], prep.norm_e(stored)[0]
+
+
 def test_energy_kin_scalar_from_kinetic_column() -> None:
-    f, _, _ = _prep(energy_kin=True).prep(_batch())
-    got = float(_F(f).in_p[..., 0, 0])
+    stored, loaded = _prepped(energy_kin=True)
+    assert abs(float(_F(stored).in_p[..., 0, 0]) - 100.0) < 1e-4      # MeV in the file
+    got = float(_F(loaded).in_p[..., 0, 0])
     assert abs(got - _scal(100.0)) < 1e-5, (got, _scal(100.0))
-    # outgoing stores 1 - s_out/s_in in KINETIC scalars
+    # outgoing stores 1 - s_out/s_in in KINETIC scalars, and needs no conversion:
+    # log_range cancels in the ratio, so the column is max_energy-independent
     want = 1 - _scal(20.0) / _scal(100.0)
-    got_o = float(_F(f).out_p[..., 0, 0])
-    assert abs(got_o - want) < 1e-5, (got_o, want)
+    for tag, f in (("stored", stored), ("loaded", loaded)):
+        got_o = float(_F(f).out_p[..., 0, 0])
+        assert abs(got_o - want) < 1e-5, (tag, got_o, want)
 
 
 def test_default_is_kinetic() -> None:
-    f, _, _ = _prep(energy_kin=None).prep(_batch())
-    got = float(_F(f).in_p[..., 0, 0])
+    stored, loaded = _prepped(energy_kin=None)
+    assert abs(float(_F(stored).in_p[..., 0, 0]) - 100.0) < 1e-4
+    got = float(_F(loaded).in_p[..., 0, 0])
     assert abs(got - _scal(100.0)) < 1e-5, got
 
 
 def test_explicit_false_is_momentum_based() -> None:
-    f, _, _ = _prep(energy_kin=False).prep(_batch())
-    got = float(_F(f).in_p[..., 0, 0])
-    assert abs(got - _scal(_p_of(100.0, 938.27))) < 1e-5, got
+    stored, loaded = _prepped(energy_kin=False)
+    p = _p_of(100.0, 938.27)
+    assert abs(float(_F(stored).in_p[..., 0, 0]) - p) < 1e-3
+    got = float(_F(loaded).in_p[..., 0, 0])
+    assert abs(got - _scal(p)) < 1e-5, got
 
 
 def test_energy_kin_exothermic_outgoing_clamps_to_zero() -> None:
@@ -142,10 +156,12 @@ def test_energy_kin_is_carried_from_meta_into_model_conf(tmp_path) -> None:
 
 
 # --- E_dep normalisation --------------------------------------------------
-# E_dep is normalised on the fly by DataPrep using the *model's* max_energy,
-# never baked into the stored dataset.
+# E_dep is normalised on load by DataPrep.norm_e using the *model's*
+# max_energy, never baked into the stored dataset.
 
 def test_edep_is_normalised_by_model_max_energy() -> None:
-    f, _, _ = _prep(energy_kin=None).prep(_batch())     # E_dep = 50
-    got = float(_F(f).edep.flatten()[0])
+    stored, loaded = _prepped(energy_kin=None)          # E_dep = 50
+    raw = float(_F(stored).edep.flatten()[0])
+    assert abs(raw - 50.0) < 1e-6, f"the file should keep E_dep in MeV, got {raw}"
+    got = float(_F(loaded).edep.flatten()[0])
     assert abs(got - 50.0 / MAX_E) < 1e-6, f"E_dep should be 50/{MAX_E}, got {got}"

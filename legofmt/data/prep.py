@@ -1,3 +1,5 @@
+import warnings
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor
@@ -19,7 +21,10 @@ class DataPrep:
             cond = model_conf.get("cond_scalars", ("Density",))
             self.energy_kin = model_conf.get("energy_kin", True)
         else:
-            self.manifold = build_manifold(config["manifold"])
+            # manifold is only needed by cc_trafo (the dict path); norm_e-only
+            # users (MultLoader) legitimately have no manifold to give.
+            m = config.get("manifold")
+            self.manifold = build_manifold(m) if m else None
             self.proj_ray = config.get("proj_ray")
             cutoff_mev = config.get("cutoff_mev")
             max_energy = config.get("max_energy")
@@ -44,25 +49,53 @@ class DataPrep:
     def cc_trafo(self, cc: Tensor, e_kin: Tensor | None = None) -> Tensor:
         cc = cc.nan_to_num(1)
         mom, pos = cc.split(3, -1)
-        dir_, e = self.pen.to_scalar(mom)
-        if e_kin is not None:
-            # kinetic channel: the scalar comes from Geant4's recorded kinetic
-            # energy, not |p| (which saturates for hadrons above T ~ 433 MeV)
-            e = self.pen.to_scalar_e(e_kin.nan_to_num(1))
-        e = torch.cat((e[:, :1], 1 - (e[:, 1:] / e[:, :1].clamp_min(1e-6)).clamp(0, 1)), dim=1)
+        dir_ = F.normalize(mom, dim=-1)
+        # Energy in MeV: Geant4's recorded kinetic energy, else |p| (which
+        # saturates for hadrons above T ~ 433 MeV).
+        e_mev = e_kin.nan_to_num(1) if e_kin is not None \
+            else mom.norm(dim=-1, keepdim=True)
+        lg = (e_mev.clamp_min(1e-8) / self.pen.cutoff).log()
+        e = torch.cat(
+            (e_mev[:, :1], 1 - (lg[:, 1:] / lg[:, :1].clamp_min(1e-6)).clamp(0, 1)), dim=1,
+        )
         if self.proj_ray:
             ray = torch.cat((dir_[:, 0], pos[:, 0]), dim=-1)
             pos = pos.clone()
             pos[:, 0] = self.ppa(ray)[..., 3:]
         return self.manifold.projx(
-            torch.cat((e, F.normalize(dir_, dim=-1), F.normalize(pos, dim=-1)), dim=-1)
+            torch.cat((e, dir_, F.normalize(pos, dim=-1)), dim=-1)
         )
+
+    @torch.no_grad()
+    def norm_e(self, batch: tuple) -> tuple:
+        """MeV -> model scale for the two channels that depend on ``max_energy``,
+        so a dataset can be generated without knowing it. The outgoing column is
+        a log ratio: ``cutoff_mev`` only, already final. Returns a new tensor.
+
+        Files written before the split (everything up to ``rp_kin_*``) store both
+        channels already normalised and are passed through: a MeV file has every
+        incoming energy >= ``cutoff_mev`` (``GetLEGOData`` filters on it), a
+        normalised one has all of them in ``[0, 1]``.
+        """
+        f, mask, attn_mask = batch
+        if _F(f).in_cc[..., 0].max() <= 1.0 < self.pen.cutoff:
+            warnings.warn(
+                "dataset already carries the energy normalisation; skipping norm_e. "
+                "Regenerate it to store MeV and decouple it from max_energy.",
+                DeprecationWarning, stacklevel=3,
+            )
+            return batch
+        f = f.clone()
+        in_cc = _F(f).in_cc
+        in_cc[..., 0:1] = self.pen.to_scalar_e(in_cc[..., 0:1])
+        _F(f).edep.div_(self.pen.max_energy)
+        return f, mask, attn_mask
 
     @torch.no_grad()
     def format_add(self, batch: tuple) -> Tensor:
         cc_ext, mask, attn_mask, data_add = batch
         e_dep = torch.ones_like(cc_ext[:, :1])
-        e_dep[..., 0] = data_add["E_dep"].view_as(e_dep[..., 0]) / self.pen.max_energy
+        e_dep[..., 0] = data_add["E_dep"].view_as(e_dep[..., 0])
         cond_rows = []
         for name in cond_scalars():
             row = torch.ones_like(cc_ext[:, :1])

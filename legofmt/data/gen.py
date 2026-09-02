@@ -57,9 +57,11 @@ manifold = [{"name": "euclidean", "dim": 1 }, {"name": "sphere", "dim": 3 }, {"n
 # extra scalars are silently dropped / the slot layout mismatches.
 cond_scalars = ["Density", "Z", "A", "Size"]
 
+# max_energy is not used by DataPrep.prep -- the stored file keeps the
+# max_energy-dependent channels in MeV and DataPrep.norm_e converts them at
+# load time. It goes into meta.json only as the default for a fresh model.
 config = {
     "cutoff_mev": energy_min,
-    "max_energy": energy_max,
     "manifold": manifold,
     "proj_ray": True,
     "cond_scalars": cond_scalars,

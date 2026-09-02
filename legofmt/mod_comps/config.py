@@ -131,7 +131,7 @@ def _resolve_fresh(config: dict) -> ResolvedLEGOConfig:
         torch.tensor(meta["particles"], dtype=torch.int64).sort().values.contiguous()
     )
 
-    max_energy = meta.get("max_energy", model_conf.get("max_energy"))
+    max_energy = model_conf.get("max_energy", meta.get("max_energy"))
     if max_energy is None:
         raise KeyError(
             f"max_energy missing from {dpath}/meta.json and model_conf; "
@@ -324,6 +324,8 @@ def _resolve_fresh_mult(config: dict) -> ResolvedMultConfig:
 
     meta = json.loads(Path(dpath, "meta.json").read_text())
     config.setdefault("additional", {})["data_meta"] = meta
+    if "max_energy" in meta:  # MultLoader's DataPrep needs it for norm_e
+        mm_conf.setdefault("max_energy", meta["max_energy"])
     mm_conf.setdefault("cond_scalars", tuple(meta.get("cond_scalars", ("Density",))))
     set_layout(tuple(mm_conf["cond_scalars"]))  # before MultLoader, which reads layout-dependent accessors
     n_prefix = len(mm_conf["cond_scalars"]) + 1

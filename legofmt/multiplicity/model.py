@@ -8,6 +8,7 @@ from lightning import LightningModule
 from x_transformers import ContinuousTransformerWrapper, Decoder, Encoder
 
 from legofmt.data.dataloaders import LEGODataset
+from legofmt.data.prep import DataPrep
 from legofmt.data.struct import cond_scalars
 from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.geometry.symmetry_projections import CubeSymmetry
@@ -25,7 +26,11 @@ class MultLoader(torch.utils.data.Dataset):
         ptypes_in = mm_conf.get("ptypes_in", torch.tensor([11, 22]))
         self.train_inverse = mm_conf.get("train_inverse", False)
 
-        ds = LEGODataset(**lds_conf).data
+        ds = LEGODataset(**lds_conf, prep=DataPrep({
+            "max_energy": mm_conf["max_energy"],
+            "cutoff_mev": lds_conf.get("cutoff_mev"),
+            "cond_scalars": mm_conf.get("cond_scalars", cond_scalars()),
+        })).data
         ds_f = ds.f
         # in_dim must be len(cond_scalars) + 7
         conds = torch.cat([ds_f.cond(n).unsqueeze(-1) for n in cond_scalars()], dim=-1)

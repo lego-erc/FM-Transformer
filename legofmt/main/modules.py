@@ -21,9 +21,13 @@ _OT_COUPLING_REQUIRES_LAP = (
     "Install it or set model_conf.ot_coupling=False."
 )
 
+# Conditioning scalars base_head_params reads; no base_head without them.
+_BASE_HEAD_SCALARS = ("Z", "A", "Size")
+
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 
 from legofmt.data.dataloaders import LEGODataset
+from legofmt.data.prep import DataPrep
 from legofmt.data.struct import DataStruct, _F
 
 from legofmt.distill.distill import curvature_loss, one_step_euler_loss
@@ -103,9 +107,21 @@ class LEGOLtng(ltng.LightningModule):
 
         self._base_dist_loss = None
         params = list(self.model.parameters())
-        if ((self.rc.base_dist_loss > 0 or self.rc.base_pretrain_batches > 0)
-                and self.gen_base.scale_dist == "sm_norm"):
-            bc = self.rc.config.get("base_conf") or {}
+        bc = self.rc.config.get("base_conf") or {}
+        # base_head_params reads Z/A/Size, so there is no head without them: an
+        # explicit ask (base_dist_loss, or a saved head that would otherwise
+        # vanish silently) is an error, the base_pretrain_batches default is not.
+        asked = self.rc.base_dist_loss > 0 or bc.get("base_head") is not None
+        want = ((asked or self.rc.base_pretrain_batches > 0)
+                and self.gen_base.scale_dist == "sm_norm")
+        if want and not all(s in self.rc.cond_scalars for s in _BASE_HEAD_SCALARS):
+            if asked:
+                raise ValueError(
+                    f"base_head needs the {_BASE_HEAD_SCALARS} conditioning scalars; "
+                    f"got cond_scalars={self.rc.cond_scalars}."
+                )
+            want = False
+        if want:
             self.base_head = nn.Sequential(
                 nn.Linear(4 + len(self.rc.pdgids_template), 16), nn.Mish(),
                 nn.Linear(16, 4))
@@ -499,7 +515,7 @@ class LEGOLtng(ltng.LightningModule):
     def setup(self, stage: str | None = None) -> None:
         if getattr(self, "_val_ds", None) is not None:
             return
-        full  = LEGODataset(**self.rc.dl_conf["lds_args"])
+        full  = LEGODataset(**self.rc.dl_conf["lds_args"], prep=DataPrep(self.rc.config))
         n_val = max(1, int(len(full) * self.rc.val_conf.get("val_frac", 0.01)))
         gen   = torch.Generator().manual_seed(self.rc.val_conf.get("seed", 0))
         self._train_ds, self._val_ds = random_split(
