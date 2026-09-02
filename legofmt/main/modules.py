@@ -218,7 +218,6 @@ class LEGOLtng(ltng.LightningModule):
         new  = torch.where(rows.view(1, -1, 1), new, x)
         return torch.where(fwd[:, None, None], new, x)
 
-    @torch.no_grad()
     def base_head_params(self, ds_t: DataStruct) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         pid     = ds_t.f.in_p[..., 0, -1]
         idx     = pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)
