@@ -295,6 +295,9 @@ class LEGOLtng(ltng.LightningModule):
                     raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
                 base = base.where(ds_t.am.full.unsqueeze(-1), data)
                 inf_cond = ds_t.am.out_p.unsqueeze(-1).logical_xor(ds_t.am.out_p.unsqueeze(-2))
+                if self.rc.ot_same_pdgid:
+                    pid = ds_t.f.out_p[..., -1]
+                    inf_cond = inf_cond | (pid.unsqueeze(-1) != pid.unsqueeze(-2))
                 out = _F(base).out_p
                 if self.rc.ot_e_only:
                     nt = ds_t.f.out_cc[..., 0:1]

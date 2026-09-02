@@ -59,6 +59,7 @@ class ResolvedLEGOConfig:
     t_dist_shift: float
     ot_coupling: bool
     ot_e_only: bool
+    ot_same_pdgid: bool
     base_dist_loss: float
     base_pretrain_batches: int
     base_pretrain_bs: int | None
@@ -228,6 +229,7 @@ def _build_resolved(
         t_dist_shift=model_conf.get("t_dist_shift", 1.0),
         ot_coupling=model_conf.get("ot_coupling", False),
         ot_e_only=model_conf.get("ot_e_only", False),
+        ot_same_pdgid=model_conf.get("ot_same_pdgid", False),
         base_dist_loss=model_conf.get("base_dist_loss", 0.0),
         base_pretrain_batches=model_conf.get("base_pretrain_batches", 300),
         base_pretrain_bs=model_conf.get("base_pretrain_bs"),
