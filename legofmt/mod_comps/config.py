@@ -125,6 +125,7 @@ def _resolve_fresh(config: dict) -> ResolvedLEGOConfig:
     config["dl_conf"].setdefault("data_path", f"{dpath}/data_prepped.pt")
 
     meta = json.loads(Path(dpath, "meta.json").read_text())
+    config.setdefault("additional", {})["data_meta"] = meta
     max_seq_l = meta["ntokens"]
     pdgids = (
         torch.tensor(meta["particles"], dtype=torch.int64).sort().values.contiguous()
@@ -322,6 +323,7 @@ def _resolve_fresh_mult(config: dict) -> ResolvedMultConfig:
         raise KeyError("Fresh-training mult config requires dl_conf.lds_args.data")
 
     meta = json.loads(Path(dpath, "meta.json").read_text())
+    config.setdefault("additional", {})["data_meta"] = meta
     mm_conf.setdefault("cond_scalars", tuple(meta.get("cond_scalars", ("Density",))))
     set_layout(tuple(mm_conf["cond_scalars"]))  # before MultLoader, which reads layout-dependent accessors
     n_prefix = len(mm_conf["cond_scalars"]) + 1
