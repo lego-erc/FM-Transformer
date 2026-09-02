@@ -73,12 +73,13 @@ class DataPrep:
         a log ratio: ``cutoff_mev`` only, already final. Returns a new tensor.
 
         Files written before the split (everything up to ``rp_kin_*``) store both
-        channels already normalised and are passed through: a MeV file has every
-        incoming energy >= ``cutoff_mev`` (``GetLEGOData`` filters on it), a
-        normalised one has all of them in ``[0, 1]``.
+        channels already normalised and are passed through. A normalised file has
+        every incoming energy in ``[0, 1]``; a MeV file reaches ``max_energy``, so
+        the two only collide when the whole incoming spectrum sits below 1 MeV --
+        which ``max_energy > 1`` rules out.
         """
         f, mask, attn_mask = batch
-        if _F(f).in_cc[..., 0].max() <= 1.0 < self.pen.cutoff:
+        if _F(f).in_cc[..., 0].max() <= 1.0 < self.pen.max_energy:
             warnings.warn(
                 "dataset already carries the energy normalisation; skipping norm_e. "
                 "Regenerate it to store MeV and decouple it from max_energy.",
