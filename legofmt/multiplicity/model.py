@@ -222,7 +222,7 @@ class MultModel(LightningModule):
         if self.inv is None:
             self.log_dict(
                 {"train_loss": loss_count, "loss/counts": loss_count.detach()},
-                prog_bar=True, sync_dist=True,
+                prog_bar=True, sync_dist=False,  # per-step all-reduce only for logging stalled DDP ranks
             )
             return loss_count
 
@@ -231,7 +231,7 @@ class MultModel(LightningModule):
         loss = loss_count + loss_inv
         self.log_dict(
             {"train_loss": loss, "loss/counts": loss_count.detach(), "loss/pid_in": loss_inv.detach()},
-            prog_bar=True, sync_dist=True,
+            prog_bar=True, sync_dist=False,  # per-step all-reduce only for logging stalled DDP ranks
         )
         return loss
 
