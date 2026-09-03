@@ -6,8 +6,10 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from importlib.metadata import version as _dist_version
 
 import torch
+from packaging.version import Version
 from flow_matching.utils.manifolds import Euclidean, Sphere
 
 from ..data.struct import set_layout
@@ -101,6 +103,26 @@ class ResolvedLEGOConfig:
     reflow_start_epoch: int
 
 
+# x-transformers < 2.25.5 applied ``attn_qk_norm_scale`` (default 10) to q, to k
+# *and* as the kernel scale, so attention logits were scale**3 * cos(theta);
+# 2.25.5+ applies it once. Checkpoints record the library they were trained
+# under so old ones keep their effective scale when loaded by a newer library.
+_XT_VERSION = Version(_dist_version("x-transformers"))
+_XT_QK_NORM_FIX = Version("2.25.5")
+
+
+def _qk_norm_scale_compat(model_args: dict, additional: dict) -> None:
+    saved = additional.get("x_transformers_version")
+    old_ckpt = saved is None or Version(saved) < _XT_QK_NORM_FIX
+    if model_args.get("attn_qk_norm") and old_ckpt and _XT_VERSION >= _XT_QK_NORM_FIX:
+        model_args["attn_qk_norm_scale"] = model_args.get("attn_qk_norm_scale", 10) ** 3
+    elif model_args.get("attn_qk_norm") and not old_ckpt and _XT_VERSION < _XT_QK_NORM_FIX:
+        raise RuntimeError(
+            f"checkpoint trained with x-transformers {saved} (single qk_norm scale) "
+            f"cannot be loaded by {_XT_VERSION}; use x-transformers >= {_XT_QK_NORM_FIX}."
+        )
+
+
 def resolve_legoltng_config(full_config: dict) -> ResolvedLEGOConfig:
     full = copy.deepcopy(full_config)
     state_dict = full.get("state_dict")
@@ -126,6 +148,7 @@ def _resolve_fresh(config: dict) -> ResolvedLEGOConfig:
 
     meta = json.loads(Path(dpath, "meta.json").read_text())
     config.setdefault("additional", {})["data_meta"] = meta
+    config["additional"]["x_transformers_version"] = str(_XT_VERSION)
     max_seq_l = meta["ntokens"]
     pdgids = (
         torch.tensor(meta["particles"], dtype=torch.int64).sort().values.contiguous()
@@ -171,6 +194,9 @@ def _resolve_from_checkpoint(config: dict, state_dict: dict) -> ResolvedLEGOConf
         model_args["max_seq_l"] = model_args.pop("ntokens")
 
     _apply_legacy_projection_in_out(model_args, state_dict)
+    additional = config.setdefault("additional", {})
+    _qk_norm_scale_compat(model_args, additional)
+    additional["x_transformers_version"] = str(_XT_VERSION)
 
     return _build_resolved(
         config, model_conf, model_args,
@@ -324,6 +350,7 @@ def _resolve_fresh_mult(config: dict) -> ResolvedMultConfig:
 
     meta = json.loads(Path(dpath, "meta.json").read_text())
     config.setdefault("additional", {})["data_meta"] = meta
+    config["additional"]["x_transformers_version"] = str(_XT_VERSION)
     if "max_energy" in meta:  # MultLoader's DataPrep needs it for norm_e
         mm_conf.setdefault("max_energy", meta["max_energy"])
     mm_conf.setdefault("cond_scalars", tuple(meta.get("cond_scalars", ("Density",))))
@@ -345,6 +372,12 @@ def _resolve_from_checkpoint_mult(
     mm_conf = config.setdefault("mm_conf", {})
     dl_conf = config.setdefault("dl_conf", {})
     mm_conf.setdefault("max_count", mm_conf.get("max_out_particles"))
+    additional = config.setdefault("additional", {})
+    model_args = mm_conf.get("model_args", {})
+    inv_model_args = mm_conf.get("inv_model_args", model_args)
+    for args in {id(d): d for d in (model_args, inv_model_args)}.values():  # may be one dict
+        _qk_norm_scale_compat(args, additional)
+    additional["x_transformers_version"] = str(_XT_VERSION)
 
     ptypes = mm_conf.get("ptypes")
     max_count = mm_conf.get("max_count")
