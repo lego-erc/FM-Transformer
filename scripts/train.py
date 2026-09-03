@@ -117,7 +117,7 @@ if resume_from:
     incompat = target.load_state_dict(prev["state_dict"], strict=False)
     assert not incompat.unexpected_keys, f"resume_from arch mismatch: {incompat}"
 
-if train_model == "fm" and compile_mode == "model":
+if compile_mode == "model":  # fm: the ProjectModel; mult: the count Decoder wrapper
     model.model = torch.compile(model.model, dynamic=False)
 
 trainer.fit(model=model)
@@ -144,6 +144,8 @@ if train_model == "fm":
     vf = model.model._orig_mod.vf if compile_mode == "model" else model.model.vf
     state_dict = vf.state_dict()
 else:
+    if compile_mode == "model":
+        model.model = model.model._orig_mod  # keep state_dict keys free of the compile wrapper
     state_dict = model.state_dict()
 
 torch.save(
