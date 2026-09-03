@@ -280,12 +280,13 @@ class LEGOLtng(ltng.LightningModule):
                         u_t = (ds_t.f.out_cc[..., 0] * v).sum(-1) / n
                         ev  = (v.sum(-1) > 0).float()
                         l_scale = ((u_b - u_t) ** 2 * ev).sum() / ev.sum().clamp(min=1)
-                        ed_b = self.gen_base.e_dep_max * torch.sigmoid(mu + sig * z)
                         ed_t = ds_t.f.edep
-                        w    = fwd.float()
-                        l_edep = (((ed_b.mean(-1) - ed_t) ** 2
-                                   + (ed_b.pow(2).mean(-1) - ed_t ** 2) ** 2) * w
-                                  ).sum() / w.sum().clamp(min=1)
+                        w    = fwd.float() * (ed_t > 0)
+                        ly   = torch.logit(
+                            (ed_t / self.gen_base.e_dep_max).clamp(1e-4, 1 - 1e-4))
+                        mu1, sig1 = mu.squeeze(-1), sig.squeeze(-1)
+                        l_edep = ((sig1.log() + (ly - mu1) ** 2 / (2 * sig1 ** 2))
+                                  * w).sum() / w.sum().clamp(min=1)
                         l_kappa = 0.0
                         if self.gen_base.tanh_theta:
                             th_b = (z.abs() / kap).tanh().mean(-1)
