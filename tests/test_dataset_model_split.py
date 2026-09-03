@@ -87,9 +87,32 @@ def test_norm_e_does_not_mutate_the_caller(dataset_dir) -> None:
     assert torch.equal(stored[0], before)
 
 
-def test_loading_without_prep_is_refused(dataset_dir) -> None:
-    with pytest.raises(ValueError, match="MeV"):
-        LEGODataset(data=str(dataset_dir / "data_prepped.pt"))
+@pytest.mark.parametrize("prep", [None, lambda x: x])
+def test_loading_without_a_dataprep_gives_the_file_verbatim(dataset_dir, prep) -> None:
+    # inspection / plotting callers legitimately want the stored tensors
+    d = LEGODataset(data=str(dataset_dir / "data_prepped.pt"), prep=prep).data
+    assert float(_F(d.f.full).in_p[..., 0, 0][0]) == pytest.approx(E_IN)   # MeV
+    assert float(_F(d.f.full).edep[0]) == pytest.approx(E_DEP)
+
+
+def test_setup_normalises_the_training_data(dataset_dir) -> None:
+    """LEGOLtng.setup must pass a DataPrep -- forgetting it is how the stored
+    file silently reached the model in MeV before."""
+    from legofmt.main.modules import LEGOLtng
+    cfg = {"dl_conf": {"lds_args": {"data": str(dataset_dir), "cutoff_mev": CUTOFF},
+                       "bs": 2, "num_workers": 0},
+           "val_conf": {"val_frac": 0.5, "seed": 0},
+           "base_conf": {"kappa": 8.0, "base_dist": "poles", "scale_dist": "uniform"},
+           "model_conf": {"manifold": MANIFOLD, "max_energy": 300.0,
+                          "model_args": {"h_dim": 16, "nlayers": 1, "nhead": 2,
+                                         "in_dim": 7, "ff_mult": 1, "dropout": 0.0}},
+           "opt_conf": {"opt": "schedulefree", "lr": 1e-3}}
+    model = LEGOLtng(cfg)
+    model.setup()
+    f = model._train_ds.dataset.data.f
+    assert float(_F(f.full).in_p[..., 0, 0][0]) == pytest.approx(
+        math.log(E_IN / CUTOFF) / math.log(300.0 / CUTOFF), abs=1e-5)
+    assert float(_F(f.full).edep[0]) == pytest.approx(E_DEP / 300.0, abs=1e-6)
 
 
 
