@@ -65,6 +65,10 @@ if log_conf["comet"]:
         mode="get_or_create",
         name=name,
     )
+elif log_conf.get("csv_dir"):
+    from lightning.pytorch.loggers import CSVLogger
+
+    logger = CSVLogger(save_dir=log_conf["csv_dir"], name=name)
 else:
     logger = False
 
@@ -72,7 +76,7 @@ config["additional"]["epochs"] = epochs
 config["additional"]["precision"] = (
     str(run["precision"]) + ", " + torch.get_float32_matmul_precision()
 )
-config["additional"]["comet_exp_key"] = logger._experiment_key if logger else None
+config["additional"]["comet_exp_key"] = getattr(logger, "_experiment_key", None) if logger else None
 try:
     git_rev = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
@@ -83,6 +87,7 @@ config["additional"]["git_rev"] = git_rev
 
 if logger:
     logger.log_hyperparams(config)
+if log_conf["comet"]:
     logger.experiment.log_asset(str(cfg_path), file_name=cfg_path.name)
 
 trainer = ltng.Trainer(

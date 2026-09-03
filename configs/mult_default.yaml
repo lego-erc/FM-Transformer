@@ -20,6 +20,7 @@ run:
 
 logging:
   comet: true
+  csv_dir: null              # when comet is false: directory for a lightning CSVLogger (metrics.csv); null = no logging
   project: lego_pdgid        # api key / workspace come from .env
 
 config:
