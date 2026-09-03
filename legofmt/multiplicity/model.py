@@ -7,6 +7,8 @@ from lightning import LightningModule
 
 from x_transformers import ContinuousTransformerWrapper, Decoder, Encoder
 
+from legofmt.cfm.cfm_trafo_x import fp32_attention, needs_fp32_attention
+
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.data.prep import DataPrep
 from legofmt.data.struct import cond_scalars
@@ -92,6 +94,8 @@ class InvModel(nn.Module):
                 **rc.inv_model_args,
             ),
         )
+        if needs_fp32_attention(rc.inv_model_args):
+            fp32_attention(self.model)
 
         self.proj_in_ = nn.Linear(rc.in_dim, rc.inv_h_dim)
         self.embd_out_ = nn.Embedding(rc.ptypes.shape[0], rc.inv_h_dim)
@@ -140,6 +144,8 @@ class MultModel(LightningModule):
                 **rc.model_args,
             ),
         )
+        if needs_fp32_attention(rc.model_args):
+            fp32_attention(self.model)
 
         self.proj_in_ = torch.nn.Linear(rc.in_dim, rc.h_dim)
 

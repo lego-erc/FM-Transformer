@@ -6,7 +6,7 @@ run:
   name: rp_fm_v3_ddtv_220726
   devices: [1, 2, 4, 6, 7]
   nodes: 1                   # number of nodes (SLURM --nodes / Trainer num_nodes); devices are per node
-  precision: 32
+  precision: bf16-mixed      # ~20% faster than 32 at equal metrics; pre-2.25.5 (qk scale 1000) checkpoints get fp32 attention automatically
   matmul_precision: medium
   dtype: float32
   epochs: 10

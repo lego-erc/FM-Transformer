@@ -7,6 +7,31 @@ import torch
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 from x_transformers import ContinuousTransformerWrapper, Encoder
+from x_transformers.attend import Attend
+
+
+# bf16 rounding of unit q, k perturbs cos(theta) by ~2**-8, i.e. the logits by
+# ~qk_norm_scale/256: negligible at the library default 10, but O(1) for the
+# pre-2.25.5 checkpoints whose effective scale is 1000 (0.27 -> 0.03 rel. error
+# on kin_020926 with fp32 attention). Only those get the fp32 kernel.
+FP32_ATTN_QK_SCALE = 100
+
+
+def needs_fp32_attention(model_args: dict) -> bool:
+    return bool(model_args.get("attn_qk_norm")) and model_args.get("attn_qk_norm_scale", 10) > FP32_ATTN_QK_SCALE
+
+
+def fp32_attention(module: nn.Module) -> None:
+    """Run every ``Attend`` in fp32 even under autocast (see ``needs_fp32_attention``)."""
+    def _wrap(fwd):
+        def forward(q, k, v, *args, **kwargs):
+            with torch.autocast(q.device.type, enabled=False):
+                return fwd(q.float(), k.float(), v.float(), *args, **kwargs)
+        return forward
+
+    for m in module.modules():
+        if isinstance(m, Attend):
+            m.forward = _wrap(m.forward)
 
 
 # Pre-refactor parameter names -> current names.
@@ -75,6 +100,8 @@ class CFMTrafo_x(nn.Module):
                 **kwargs,
             ),
         )
+        if needs_fp32_attention(kwargs):
+            fp32_attention(self.vf)
 
         if grad_ckpt:
             for _norms, _block, _residual in self.vf.attn_layers.layers:
