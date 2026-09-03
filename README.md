@@ -284,6 +284,12 @@ All remaining `model_args` keys flow into `x-transformers` `Encoder`, e.g.
 `ff_glu`, `ff_no_bias`, `gate_residual`, `attn_qk_norm`, `attn_value_rmsnorm`,
 `attn_flash`, `rotary_xpos`, …. See `x-transformers` docs for the full list.
 
+`attn_qk_norm_scale` is version-dependent: x-transformers < 2.25.5 applied it
+three times (logits `scale³·cosθ`, i.e. `1000·cosθ` at the default 10), newer
+versions once. Every config records `additional.x_transformers_version`; a
+checkpoint without it (or with an older one) gets its scale cubed at load so it
+reproduces exactly, while fresh configs use the library default of 10.
+
 ### `mm_conf` — multiplicity model
 
 | Key | Default | Effect |
