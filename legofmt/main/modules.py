@@ -732,14 +732,17 @@ class LEGOLtng(ltng.LightningModule):
                 time_grid = torch.arange(
                     0, 1 + step_size, step=step_size, device=self.device
                 ).clamp_max(1)
-            sols = self.solve(
-                ds_t, x_init=base,
-                split_size=cfg.get("split_size"),
-                step_size=step_size,
-                method=cfg.get("method", "midpoint"),
-                time_grid=time_grid,
-                return_intermediates=cfg.get("return_timesteps", False),
-            )
+            amp = self.rc.amp_dtype
+            with torch.autocast(base.device.type, dtype=amp, enabled=amp is not None):
+                sols = self.solve(
+                    ds_t, x_init=base,
+                    split_size=cfg.get("split_size"),
+                    step_size=step_size,
+                    method=cfg.get("method", "midpoint"),
+                    time_grid=time_grid,
+                    return_intermediates=cfg.get("return_timesteps", False),
+                )
+            sols = sols.float()
             sols = sols.masked_fill_(~am, torch.nan)
             filter_pdgid = cfg.get("filter_pdgid")
             if filter_pdgid is not None:

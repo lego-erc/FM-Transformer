@@ -2,8 +2,6 @@
 flattened 4-D weights, AdamW on 1-D, decoupled weight decay) up to bf16
 Newton-Schulz rounding, on the parameter shapes the vector field actually has."""
 
-import copy
-
 import pytest
 import torch
 from pytorch_optimizer import Muon

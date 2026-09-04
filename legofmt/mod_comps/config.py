@@ -88,6 +88,7 @@ class ResolvedLEGOConfig:
 
     max_energy: float
     cutoff_mev: float
+    amp_dtype: torch.dtype | None
 
     dl_conf: dict
     opt_conf: dict
@@ -121,6 +122,15 @@ def _qk_norm_scale_compat(model_args: dict, additional: dict) -> None:
             f"checkpoint trained with x-transformers {saved} (single qk_norm scale) "
             f"cannot be loaded by {_XT_VERSION}; use x-transformers >= {_XT_QK_NORM_FIX}."
         )
+
+
+def _amp_dtype(precision) -> "torch.dtype | None":
+    head = str(precision).split(",")[0].strip().lower()
+    if head.startswith("bf16"):
+        return torch.bfloat16
+    if head.startswith("16"):
+        return torch.float16
+    return None
 
 
 def resolve_legoltng_config(full_config: dict) -> ResolvedLEGOConfig:
@@ -281,6 +291,7 @@ def _build_resolved(
         mask_conf=model_conf.get("mask_conf", {}),
         max_energy=model_conf["max_energy"],
         cutoff_mev=config["dl_conf"]["lds_args"]["cutoff_mev"],
+        amp_dtype=_amp_dtype((config.get("additional") or {}).get("precision")),
         dl_conf=config["dl_conf"],
         opt_conf=config["opt_conf"],
         odeint_conf=config.get("odeint_conf", {}),
