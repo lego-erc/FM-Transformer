@@ -35,6 +35,11 @@ d_dtype = getattr(torch, run["dtype"])
 torch.set_default_dtype(d_dtype)
 torch.set_float32_matmul_precision(run["matmul_precision"])
 
+if run.get("compile"):
+    import torch._dynamo
+
+    torch._dynamo.config.recompile_limit = 32
+
 epochs = run["epochs"]
 devices = run["devices"]
 nodes = run.get("nodes", 1)

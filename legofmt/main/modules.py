@@ -1,3 +1,4 @@
+import contextlib
 from dataclasses import replace
 
 import torch
@@ -422,10 +423,12 @@ class LEGOLtng(ltng.LightningModule):
                     torch.cat((tgt, ds_t.f.pdgids), dim=-1), ds_t.m.full, ds_t.am.full,
                 )
             ps_ = self.ps.sample(base, ds_t.f.model_in, t)
+        step_extras = ({"d": torch.zeros_like(ps_.t)}
+                       if getattr(self.model.vf, "step_cond", False) else {})
         v_out = self.model(
             ps_.x_t, ps_.t,
             mask=ds_t.m.full, attn_mask=ds_t.am.full,
-            types=self.types_embd, pdgids=pdgid_idx,
+            types=self.types_embd, pdgids=pdgid_idx, **step_extras,
         )
         if self.rc.loss_sc_fac > 0:
             am = ds_t.am.full
@@ -733,7 +736,8 @@ class LEGOLtng(ltng.LightningModule):
                     0, 1 + step_size, step=step_size, device=self.device
                 ).clamp_max(1)
             amp = self.rc.amp_dtype
-            with torch.autocast(base.device.type, dtype=amp, enabled=amp is not None):
+            with (contextlib.nullcontext() if amp is None
+                  else torch.autocast(base.device.type, dtype=amp)):
                 sols = self.solve(
                     ds_t, x_init=base,
                     split_size=cfg.get("split_size"),
