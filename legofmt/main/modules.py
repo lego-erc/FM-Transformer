@@ -39,7 +39,7 @@ from legofmt.geometry.path_sample_mult import ProductPathSampler, ProductManifol
 from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.geometry.symmetry_projections import CubeSymmetry
 
-from legofmt.mod_comps.config import resolve_legoltng_config
+from legofmt.mod_comps.config import _amp_dtype, resolve_legoltng_config
 from legofmt.mod_comps.optimizers import build_optimizer
 
 from legofmt.log_metrics.val_metrics import ShowerValMetrics
@@ -735,7 +735,8 @@ class LEGOLtng(ltng.LightningModule):
                 time_grid = torch.arange(
                     0, 1 + step_size, step=step_size, device=self.device
                 ).clamp_max(1)
-            amp = self.rc.amp_dtype
+            amp = (_amp_dtype(cfg["amp"]) if "amp" in cfg
+                   else self.rc.amp_dtype)
             with (contextlib.nullcontext() if amp is None
                   else torch.autocast(base.device.type, dtype=amp)):
                 sols = self.solve(

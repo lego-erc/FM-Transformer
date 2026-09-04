@@ -125,6 +125,8 @@ def _qk_norm_scale_compat(model_args: dict, additional: dict) -> None:
 
 
 def _amp_dtype(precision) -> "torch.dtype | None":
+    if isinstance(precision, torch.dtype):
+        return None if precision is torch.float32 else precision
     head = str(precision).split(",")[0].strip().lower()
     if head.startswith("bf16"):
         return torch.bfloat16
