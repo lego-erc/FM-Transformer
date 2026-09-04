@@ -39,7 +39,7 @@ from legofmt.geometry.path_sample_mult import ProductPathSampler, ProductManifol
 from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.geometry.symmetry_projections import CubeSymmetry
 
-from legofmt.mod_comps.config import resolve_legoltng_config
+from legofmt.mod_comps.config import _amp_dtype, resolve_legoltng_config
 from legofmt.mod_comps.optimizers import build_optimizer
 
 from legofmt.log_metrics.val_metrics import ShowerValMetrics
@@ -735,7 +735,16 @@ class LEGOLtng(ltng.LightningModule):
                 time_grid = torch.arange(
                     0, 1 + step_size, step=step_size, device=self.device
                 ).clamp_max(1)
-            amp = self.rc.amp_dtype
+            # `amp` in odeint_conf overrides the training stamp, with the
+            # same placement and precedence as `fwd_compile`: the solve's
+            # precision is a solver setting, not a property of how the
+            # checkpoint was trained. An fp32-trained checkpoint runs bf16
+            # here at equal accuracy and ~1.5x (measured 2x2 of checkpoint
+            # against inference dtype, 80 NFE, rho=3: 0.0100 -> 0.0097 MMD).
+            # Accepts a dtype, a Lightning-style string ("bf16", "32"), or
+            # None to force fp32; absent means "use the stamp".
+            amp = (_amp_dtype(cfg["amp"]) if "amp" in cfg
+                   else self.rc.amp_dtype)
             with (contextlib.nullcontext() if amp is None
                   else torch.autocast(base.device.type, dtype=amp)):
                 sols = self.solve(

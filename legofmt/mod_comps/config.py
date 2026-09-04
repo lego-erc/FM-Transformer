@@ -125,6 +125,13 @@ def _qk_norm_scale_compat(model_args: dict, additional: dict) -> None:
 
 
 def _amp_dtype(precision) -> "torch.dtype | None":
+    """Autocast dtype from ``additional.precision`` (as ``train.py`` stamps it,
+    ``"<run.precision>, <matmul_precision>"``) or from an explicit
+    ``odeint_conf["amp"]``. A ``torch.dtype`` passes through so callers may set
+    the dtype directly; ``float32`` and anything unrecognised mean no autocast.
+    """
+    if isinstance(precision, torch.dtype):
+        return None if precision is torch.float32 else precision
     head = str(precision).split(",")[0].strip().lower()
     if head.startswith("bf16"):
         return torch.bfloat16
