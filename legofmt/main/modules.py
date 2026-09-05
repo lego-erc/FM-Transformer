@@ -682,7 +682,7 @@ class LEGOLtng(ltng.LightningModule):
         man = self.model.manifold
         for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
             dt     = t_b - t_a
-            v1     = self.model(x, t_a, **extras)
+            v1     = self.model(x, t_a, d=dt / 2, **extras)
             x_half = man.expmap(x, dt / 2 * v1)
             v2     = self.model(x_half, t_a + dt / 2, **extras)
             x      = man.expmap(x, dt * man.proju(x, v2))
