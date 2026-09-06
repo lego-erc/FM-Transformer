@@ -65,35 +65,41 @@ class BatchedMuon(torch.optim.Optimizer):
             grads = [p.grad for p in ps]
             lr, wd = group["lr"], group["weight_decay"]
             group["step"] += 1
-            if wd > 0:
-                if group["weight_decouple"]:
-                    torch._foreach_mul_(ps, 1.0 - lr * wd)
-                else:
-                    torch._foreach_add_(grads, ps, alpha=wd)
+            if wd > 0 and group["weight_decouple"]:
+                torch._foreach_mul_(ps, 1.0 - lr * wd)
+            elif wd > 0:
+                torch._foreach_add_(grads, ps, alpha=wd)
             if group["use_muon"]:
-                bufs = [self.state[p].setdefault("momentum_buffer", torch.zeros_like(p)) for p in ps]
-                torch._foreach_lerp_(bufs, grads, 1.0 - group["momentum"])
-                updates = torch._foreach_lerp(grads, bufs, group["momentum"]) if group["nesterov"] else bufs
-                for idx, ratio in self._groups_by_shape(group, ps):
-                    stacked = torch.stack([updates[i].view(len(updates[i]), -1) for i in idx])
-                    o = zero_power_via_newton_schulz_5(stacked, num_steps=group["ns_steps"])
-                    o = o.contiguous().to(ps[idx[0]].dtype)  # one cast for the whole group; unbind/view below are free
-                    torch._foreach_add_(
-                        [ps[i] for i in idx], [oi.view(ps[i].shape) for i, oi in zip(idx, o.unbind(0))], alpha=-lr * ratio,
-                    )
+                self._muon_update(group, ps, grads, lr)
             else:
-                b1, b2 = group["betas"]
-                st = group["step"]
-                exp_avg    = [self.state[p].setdefault("exp_avg", torch.zeros_like(p)) for p in ps]
-                exp_avg_sq = [self.state[p].setdefault("exp_avg_sq", torch.zeros_like(p)) for p in ps]
-                torch._foreach_lerp_(exp_avg, grads, 1.0 - b1)
-                torch._foreach_mul_(exp_avg_sq, b2)
-                torch._foreach_addcmul_(exp_avg_sq, grads, grads, value=1.0 - b2)
-                denom = torch._foreach_sqrt(exp_avg_sq)
-                torch._foreach_add_(denom, group["eps"])
-                # p -= lr * (m / bc1) / ((sqrt(v) + eps) / sqrt(bc2)), constants folded into `value`
-                torch._foreach_addcdiv_(ps, exp_avg, denom, value=-lr * (1.0 - b2 ** st) ** 0.5 / (1.0 - b1 ** st))
+                self._adamw_update(group, ps, grads, lr)
         return loss
+
+    def _muon_update(self, group, ps, grads, lr) -> None:
+        bufs = [self.state[p].setdefault("momentum_buffer", torch.zeros_like(p)) for p in ps]
+        torch._foreach_lerp_(bufs, grads, 1.0 - group["momentum"])
+        updates = torch._foreach_lerp(grads, bufs, group["momentum"]) if group["nesterov"] else bufs
+        for idx, ratio in self._groups_by_shape(group, ps):
+            stacked = torch.stack([updates[i].view(len(updates[i]), -1) for i in idx])
+            o = zero_power_via_newton_schulz_5(stacked, num_steps=group["ns_steps"])
+            o = o.contiguous().to(ps[idx[0]].dtype)  # one cast for the whole group; unbind/view below are free
+            torch._foreach_add_(
+                [ps[i] for i in idx], [oi.view(ps[i].shape) for i, oi in zip(idx, o.unbind(0))], alpha=-lr * ratio,
+            )
+
+    def _adamw_update(self, group, ps, grads, lr) -> None:
+        """1-D params (gates, biases, scales): plain AdamW."""
+        b1, b2 = group["betas"]
+        st = group["step"]
+        exp_avg    = [self.state[p].setdefault("exp_avg", torch.zeros_like(p)) for p in ps]
+        exp_avg_sq = [self.state[p].setdefault("exp_avg_sq", torch.zeros_like(p)) for p in ps]
+        torch._foreach_lerp_(exp_avg, grads, 1.0 - b1)
+        torch._foreach_mul_(exp_avg_sq, b2)
+        torch._foreach_addcmul_(exp_avg_sq, grads, grads, value=1.0 - b2)
+        denom = torch._foreach_sqrt(exp_avg_sq)
+        torch._foreach_add_(denom, group["eps"])
+        # p -= lr * (m / bc1) / ((sqrt(v) + eps) / sqrt(bc2)), constants folded into `value`
+        torch._foreach_addcdiv_(ps, exp_avg, denom, value=-lr * (1.0 - b2 ** st) ** 0.5 / (1.0 - b1 ** st))
 
 
 def muon_factory(params, **kw):
