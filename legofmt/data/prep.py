@@ -16,6 +16,7 @@ from legofmt.geometry.energy_proj import EnergyProjections
 from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.mod_comps.config import build_manifold
 
+
 class DataPrep:
     def __init__(self, config):
         config = config.get("config", config)

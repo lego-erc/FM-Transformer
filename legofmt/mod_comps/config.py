@@ -30,6 +30,7 @@ _MANIFOLDS: dict[str, type] = {
     "sphere": Sphere,
 }
 
+
 def build_manifold(spec: str | list) -> ProductManifold:
     if isinstance(spec, str):
         return build_manifold_from_string(spec)

@@ -54,10 +54,9 @@ class GenerateBase:
 
     @torch.no_grad()
     def poles(self, shape, incoming_rt, iso_pos=False, **kwargs):
-        e_in = incoming_rt[..., 0:1]
         p_cc = F.normalize(incoming_rt[..., 1:4], dim=-1)
         loc_cc = incoming_rt[..., -3:]
-        e_sc = self.rd_scale(shape, torch.ones_like(e_in))
+        e_sc = self.rd_scale(shape, torch.ones_like(incoming_rt[..., 0:1]))
         if iso_pos:
             x = self.geom_trafos.sample_iso(shape, 1, device=incoming_rt.device)
         else:
@@ -70,8 +69,7 @@ class GenerateBase:
     def iso_dirs(self, shape, incoming_rt, **kwargs):
         # naive base: isotropic momentum/position directions; energy scale unchanged
         # (rd_scale, i.e. sm_norm) and e_dep base inherited from insert_add.
-        e_in = incoming_rt[..., 0:1]
-        e_sc = self.rd_scale(shape, torch.ones_like(e_in))
+        e_sc = self.rd_scale(shape, torch.ones_like(incoming_rt[..., 0:1]))
         p_ = self.geom_trafos.sample_iso(shape, 1, device=incoming_rt.device)
         x  = self.geom_trafos.sample_iso(shape, 1, device=incoming_rt.device)
         base = torch.cat((e_sc, p_, x), dim=-1)

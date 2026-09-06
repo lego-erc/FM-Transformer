@@ -23,7 +23,10 @@ class GenerateOut(torch.nn.Module):
 
     flow_cls = LEGOLtng
 
-    def __init__(self, flow_conf_path: str, mult_conf_path: str, device="cpu", couple_in_out_pdgids=False):
+    def __init__(
+        self, flow_conf_path: str, mult_conf_path: str,
+        device="cpu", couple_in_out_pdgids=False,
+    ):
         super().__init__()
         flow_conf = torch.load(flow_conf_path, map_location=device, weights_only=False)
         self.model = self.flow_cls(flow_conf).to(device)
