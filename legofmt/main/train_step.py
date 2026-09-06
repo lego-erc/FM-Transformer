@@ -10,7 +10,7 @@ tests, which drive ``_step`` directly.
 its caller, so the reduction can be exercised without a Trainer attached.
 
 Members resolved through ``self`` and owned by ``LEGOLtng``: ``rc``, ``model``,
-``ps``, ``sym``, ``loss_fn``, ``lv``, ``lv_flow``, ``gen_base``, ``val_metrics``,
+``ps``, ``sym``, ``lv``, ``lv_flow``, ``gen_base``, ``val_metrics``,
 ``reflow_teacher``, ``convert_pdgids``, ``_canon_dirs``, ``gen_base_wrapper``,
 ``_base_dist_loss``.
 """
@@ -20,7 +20,7 @@ from torch import Tensor
 
 from legofmt.data.struct import DataStruct, _F
 
-from legofmt.distill.distill import curvature_loss, one_step_euler_loss
+from legofmt.distill.distill import one_step_euler_loss
 
 
 class TrainStep:
@@ -38,7 +38,7 @@ class TrainStep:
         return DataStruct(f, ds_t.m.full, ds_t.am.full)
 
     def reduce_loss(
-        self, sq: Tensor, ds_t: DataStruct, loss_sc, t: Tensor | None = None,
+        self, sq: Tensor, ds_t: DataStruct, t: Tensor | None = None,
     ) -> tuple[Tensor, dict]:
         """The weighted training loss, and the scalars the caller should log."""
         g        = ((ds_t.m.full == 1) & (ds_t.am.full == 1)).unsqueeze(-1)
@@ -70,17 +70,15 @@ class TrainStep:
             logs = {"uncert/var_energy": v[0], "uncert/var_dir": v[1], "uncert/var_pos": v[2]}
         out_logs = {}
         if self.training:
-            log_sc = loss_sc.detach() if torch.is_tensor(loss_sc) else loss_sc
             out_logs = {
                 # unweighted, so these stay comparable across uncert settings
                 "loss/energy": loss_e.detach(),
                 "loss/out_dir": loss_dir.detach(),
                 "loss/out_pos": loss_x.detach(),
                 "loss/raw": (loss_e + loss_dir + loss_x).detach(),
-                "loss/sc": log_sc,
                 **logs,
             }
-        return total + self.rc.loss_sc_fac * loss_sc, out_logs
+        return total, out_logs
 
     @torch.no_grad()
     def _sample_mask(self, ds_t: DataStruct) -> Tensor:
@@ -131,14 +129,8 @@ class TrainStep:
             mask=ds_t.m.full, attn_mask=ds_t.am.full,
             types=self.types_embd, pdgids=pdgid_idx, **step_extras,
         )
-        if self.rc.loss_sc_fac > 0:
-            am = ds_t.am.full
-            pred = ((1 - ps_.t)[..., None] * v_out[..., 0:1] + ps_.x_t[..., 0:1]).squeeze(-1)
-            loss_sc = self.loss_fn(pred * am, ds_t.f.energy.squeeze(-1) * am)
-        else:
-            loss_sc = 0.0
         sq = (v_out - ps_.dx_t) ** 2
-        loss, logs = self.reduce_loss(sq, ds_t, loss_sc, t=t)
+        loss, logs = self.reduce_loss(sq, ds_t, t=t)
         if logs:
             self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
 
@@ -162,14 +154,6 @@ class TrainStep:
                     logs["uncert/var_flow"] = lvf.detach().exp()
                 self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
             loss = loss + w * sc
-
-        if self.rc.curv_fac > 0 and self.training and self.global_step % self.rc.curv_every == 0:
-            w    = self.rc.curv_warmup
-            ramp = 1.0 if w <= 0 else min(1.0, self.global_step / w)
-            if ramp > 0:
-                cv = curvature_loss(self, ps_.x_t, ps_.t, v_out, ds_t, pdgid_idx)
-                self.log("loss/curvature", cv.detach(), on_step=True, on_epoch=False, logger=True, sync_dist=False)
-                loss = loss + self.rc.curv_fac * self.rc.curv_every * ramp * cv
 
         if (ot := self._base_dist_loss) is not None:
             loss = loss + self.rc.base_dist_loss * ot

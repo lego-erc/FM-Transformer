@@ -62,14 +62,9 @@ class ResolvedLEGOConfig:
     base_pretrain_batches: int
     base_pretrain_bs: int | None
     pdgid_is_idx: bool
-    loss_sc_fac: float
     one_step_euler_fac: float
     one_step_euler_sections: int
     one_step_euler_every: int
-    curv_fac: float
-    curv_every: int
-    curv_eps: float
-    curv_warmup: int
     uncert_weighting: bool
     uncert_bins: int
     uncert_min: float
@@ -239,14 +234,9 @@ def _build_resolved(
         base_pretrain_batches=model_conf.get("base_pretrain_batches", 300),
         base_pretrain_bs=model_conf.get("base_pretrain_bs"),
         pdgid_is_idx=model_conf.get("pdgid_is_idx", False),
-        loss_sc_fac=model_conf.get("loss_sc", 0.0),
         one_step_euler_fac=model_conf.get("one_step_euler_fac", 0.0),
         one_step_euler_sections=sections,
         one_step_euler_every=model_conf.get("one_step_euler_every", 1),
-        curv_fac=model_conf.get("curv_fac", 0.0),
-        curv_every=model_conf.get("curv_every", 4),
-        curv_eps=model_conf.get("curv_eps", 0.05),
-        curv_warmup=model_conf.get("curv_warmup", 500),
         uncert_weighting=model_conf.get("uncert_weighting", False),
         uncert_bins=model_conf.get("uncert_bins", 16),
         uncert_min=model_conf.get("uncert_min", -6.0),

@@ -94,13 +94,8 @@ class LEGOLtngDirect(LEGOLtng):
             mask=ds_t.m.full, attn_mask=ds_t.am.full,
             types=self.types_embd, pdgids=pdgid_idx,
         )
-        if self.rc.loss_sc_fac > 0:
-            m_gen = (ds_t.m.full == 1).to(pred.dtype)
-            loss_sc = self.loss_fn(pred[..., 0] * m_gen, target[..., 0] * m_gen)
-        else:
-            loss_sc = 0.0
         sq = (pred - target) ** 2
-        loss, logs = self.reduce_loss(sq, ds_t, loss_sc)
+        loss, logs = self.reduce_loss(sq, ds_t)
         if logs:
             self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
         return loss

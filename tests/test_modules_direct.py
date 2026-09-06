@@ -597,7 +597,7 @@ def test_uncert_lv_receives_grad_and_tracks_loss_scale() -> None:
         sq[..., 0:1] = 4.0      # energy block: large loss
         sq[..., 1:4] = 1.0      # dir block:    medium
         sq[..., 4:7] = 0.25     # pos block:    small
-        loss, _ = model.reduce_loss(sq, ds, 0.0, t=torch.full((8,), 0.5))
+        loss, _ = model.reduce_loss(sq, ds, t=torch.full((8,), 0.5))
         loss.backward()
         opt.step()
         scales = model.lv.detach().exp()
@@ -618,7 +618,7 @@ def test_uncert_floor_caps_the_weight() -> None:
     for _ in range(200):
         opt.zero_grad()
         loss, _ = model.reduce_loss(
-            torch.full((8, 5, 7), 1e-8), ds, 0.0, t=torch.full((8,), 0.5))
+            torch.full((8, 5, 7), 1e-8), ds, t=torch.full((8,), 0.5))
         loss.backward()
         opt.step()
     used = model.lv.detach().clamp(min=-2.0)

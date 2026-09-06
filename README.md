@@ -260,7 +260,6 @@ Top-level FM options:
 | `cond_cube` | `False` | When solving on the manifold, pass the cube-projected version of the position block as conditioning to the vector field. The integrated state itself stays on the manifold. |
 | `t_dist` | `"uniform"` | Time sampling for the loss: `"uniform"`, `"sm_norm"` (`sigmoid(s · N(0,1))`), `"sd3"` (SD3 logit-normal mix `1-u + s/3·((π/2·u).sin()² - u)`), or `"sd3_grid"` (50/50 mix of `"sd3"` with a discrete grid `{0, 0.4, 0.8, 0.9}` — sampled with weights `.1/.2/.3/.4` and jittered by `0.02·N(0,1)`). |
 | `t_dist_scale` | `1.4` | Scale `s` for `sm_norm` / `sd3`. |
-| `loss_sc` | `0.0` | Weight of an auxiliary "predict-x1" MSE on the momentum 3-vector (`pred = x_t + (1-t)·v`). `0` disables it. |
 | `pdgid_is_idx` | `False` | If `True`, the pdgid column is treated as an already-indexed vocab id (skipping `convert_pdgids`). Flipped on by `GenerateOut` at inference. |
 
 `model_conf.model_args` is passed straight to `CFMTrafo_x` and on to the

@@ -55,7 +55,6 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         self.gen_base    = GenerateBase(self.rc.config)
         self.sym         = CubeSymmetry() if self.rc.canon_sym else None
         self.val_metrics = ShowerValMetrics()
-        self.loss_fn     = nn.MSELoss()
         self.ps          = ProductPathSampler(self.rc.manifold)
 
         self._base_dist_loss = None
