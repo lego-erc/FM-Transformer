@@ -84,17 +84,13 @@ class CornerHist:
         )
         axes_fig = self.fig[1] if self.cube else self.fig
 
-        def is_t(x):
-            return isinstance(x, torch.Tensor)
-
         def is_t_tup(x):
-            return isinstance(x, tuple) and all(is_t(t) for t in x)
+            return isinstance(x, tuple) and all(isinstance(t, torch.Tensor) for t in x)
 
         if is_t_tup(batch) and truth is not None and is_t_tup(truth):
 
             def anim_wrapper_(i):
-                for axis in axes_fig.get_axes():
-                    axis.clear()
+                self._clear_axes(axes_fig)
                 return self.plot_tensors(batch[i], truth[i])
 
             return self._make_anim(anim_wrapper_, len(batch))
@@ -103,8 +99,7 @@ class CornerHist:
             if batch[0].ndim > 3:  # sequence of batches
 
                 def anim_wrapper_(i):
-                    for axis in axes_fig.get_axes():
-                        axis.clear()
+                    self._clear_axes(axes_fig)
                     prepped = self.prep(batch[i])
                     self.fig_sup.suptitle(
                         rf"$\mathrm{{Density:\;}}{self.sols_density.item():.2f}"
@@ -117,18 +112,23 @@ class CornerHist:
                 return self._make_anim(anim_wrapper_, len(batch))
             return self.prep(batch)
 
-        if is_t(batch) and not self.anim_intermediates:
+        if isinstance(batch, torch.Tensor) and not self.anim_intermediates:
             return self.plot_tensors(batch, truth)
 
         if self.anim_intermediates:
             sols, _, _ = self.model(batch)
 
             def anim_wrapper_(i):
-                for axis in axes_fig.get_axes():
-                    axis.clear()
+                self._clear_axes(axes_fig)
                 return self.prep(batch, sols=sols[i])
 
             return self._make_anim(anim_wrapper_, len(sols))
+
+    @staticmethod
+    def _clear_axes(axes_fig) -> None:
+        """Blank the previous frame; the plot helpers draw a fresh axes grid."""
+        for axis in axes_fig.get_axes():
+            axis.clear()
 
     def _make_anim(self, func, frames):
         anim = FuncAnimation(

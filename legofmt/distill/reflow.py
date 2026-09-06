@@ -76,18 +76,21 @@ class LEGOLtngDirect(LEGOLtng):
             rc.manifold,
         )
 
+    def _reflow_target(self, ds_t: DataStruct, base: Tensor) -> Tensor:
+        """The teacher's transport of ``base``, or the data target without one."""
+        if self.reflow_teacher is None:
+            return ds_t.f.model_in
+        solve_kwargs = dict(self.rc.reflow_kwargs)
+        if solve_kwargs.get("method", "midpoint") == "midpoint":
+            solve_kwargs.setdefault("time_grid", base.new_tensor([0.0, 1.0]))
+        return self.reflow_teacher.solve(ds_t, x_init=base, **solve_kwargs)
+
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
         with torch.no_grad():
             ds_t = DataStruct(ds_t.f.full, self._sample_mask(ds_t), ds_t.am.full)
             base = self.gen_base_wrapper(ds_t)
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
-            if self.reflow_teacher is not None:
-                solve_kwargs = dict(self.rc.reflow_kwargs)
-                if solve_kwargs.get("method", "midpoint") == "midpoint":
-                    solve_kwargs.setdefault("time_grid", base.new_tensor([0.0, 1.0]))
-                target = self.reflow_teacher.solve(ds_t, x_init=base, **solve_kwargs)
-            else:
-                target = ds_t.f.model_in
+            target = self._reflow_target(ds_t, base)
         pred = self.model(
             base,
             mask=ds_t.m.full, attn_mask=ds_t.am.full,

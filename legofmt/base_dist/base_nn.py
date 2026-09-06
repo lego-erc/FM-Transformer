@@ -45,21 +45,22 @@ def build_base_head(rc, gen_base) -> nn.Sequential | None:
     attribute is what ``gen_base_wrapper`` and ``setup`` test with ``hasattr``.
     """
     bc = rc.config.get("base_conf") or {}
+    hs = bc.get("base_head")
     # base_head_params reads Z/A/Size, so there is no head without them: an
     # explicit ask (base_dist_loss, or a saved head that would otherwise
     # vanish silently) is an error, the base_pretrain_batches default is not.
-    asked = rc.base_dist_loss > 0 or bc.get("base_head") is not None
-    want = ((asked or rc.base_pretrain_batches > 0)
-            and gen_base.scale_dist == "sm_norm")
-    if want and not all(s in rc.cond_scalars for s in _BASE_HEAD_SCALARS):
+    asked = rc.base_dist_loss > 0 or hs is not None
+    if not ((asked or rc.base_pretrain_batches > 0)
+            and gen_base.scale_dist == "sm_norm"):
+        return None
+    if not all(s in rc.cond_scalars for s in _BASE_HEAD_SCALARS):
         if asked:
             raise ValueError(
                 f"base_head needs the {_BASE_HEAD_SCALARS} conditioning scalars; "
                 f"got cond_scalars={rc.cond_scalars}."
             )
-        want = False
-    if not want:
         return None
+
     head = nn.Sequential(
         nn.Linear(4 + len(rc.pdgids_template), 16), nn.Mish(),
         nn.Linear(16, 4))
@@ -68,13 +69,13 @@ def build_base_head(rc, gen_base) -> nn.Sequential | None:
         head[-1].bias.copy_(torch.tensor(
             [float(gen_base.sm_scale), 1.0, 1.0,
              float(gen_base.kappa)]).log())
-        hs = bc.get("base_head")
-        if hs is not None and hs.keys() == head.state_dict().keys():
-            if hs["2.weight"].shape == head[-1].weight.shape:
-                head.load_state_dict(hs)
-            else:
-                load_legacy_base_head(head, hs)
-            head.requires_grad_(not bc.get("base_head_frozen", False))
+        if hs is None or hs.keys() != head.state_dict().keys():
+            return head  # fresh head: zero-init output layer, priors in the bias
+        if hs["2.weight"].shape == head[-1].weight.shape:
+            head.load_state_dict(hs)
+        else:
+            load_legacy_base_head(head, hs)
+        head.requires_grad_(not bc.get("base_head_frozen", False))
     return head
 
 
