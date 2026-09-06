@@ -6,7 +6,7 @@ from lightning import LightningModule
 
 from x_transformers import ContinuousTransformerWrapper, Decoder, Encoder
 
-from legofmt.cfm.cfm_trafo_x import fp32_attention, needs_fp32_attention
+from legofmt.compat import fp32_attention, needs_fp32_attention
 
 from legofmt.data.dataloaders import LEGODataset, make_loader
 from legofmt.data.prep import DataPrep

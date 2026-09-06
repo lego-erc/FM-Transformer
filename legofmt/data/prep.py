@@ -1,9 +1,9 @@
-import warnings
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from ..compat import dataset_already_normalised
 from ..geometry.energy_proj import EnergyProjections
 from ..geometry.raytracing_proj import CubeTrace
 from ..mod_comps.config import build_manifold
@@ -72,19 +72,11 @@ class DataPrep:
         so a dataset can be generated without knowing it. The outgoing column is
         a log ratio: ``cutoff_mev`` only, already final. Returns a new tensor.
 
-        Files written before the split (everything up to ``rp_kin_*``) store both
-        channels already normalised and are passed through. A normalised file has
-        every incoming energy in ``[0, 1]``; a MeV file reaches ``max_energy``, so
-        the two only collide when the whole incoming spectrum sits below 1 MeV --
-        which ``max_energy > 1`` rules out.
+        Datasets written before the energy split are passed through; see
+        ``compat.dataset_already_normalised``.
         """
         f, mask, attn_mask = batch
-        if _F(f).in_cc[..., 0].max() <= 1.0 < self.pen.max_energy:
-            warnings.warn(
-                "dataset already carries the energy normalisation; skipping norm_e. "
-                "Regenerate it to store MeV and decouple it from max_energy.",
-                DeprecationWarning, stacklevel=3,
-            )
+        if dataset_already_normalised(f, self.pen.max_energy):
             return batch
         f = f.clone()
         in_cc = _F(f).in_cc

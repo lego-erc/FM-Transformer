@@ -7,7 +7,7 @@ import torch
 from x_transformers.attend import Attend
 
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
-from legofmt.mod_comps import config as cfg_mod
+from legofmt import compat
 from legofmt.mod_comps.config import resolve_legoltng_config, resolve_mult_config
 
 from test_modules_direct import _tiny_config
@@ -21,16 +21,16 @@ def _ckpt(xt_version: str | None):
     return c
 
 
-@pytest.mark.skipif(cfg_mod._XT_VERSION < cfg_mod._XT_QK_NORM_FIX, reason="needs x-transformers >= 2.25.5")
+@pytest.mark.skipif(compat.XT_VERSION < compat.XT_QK_NORM_FIX, reason="needs x-transformers >= 2.25.5")
 def test_old_checkpoint_gets_cubed_qk_norm_scale():
     rc = resolve_legoltng_config(_ckpt(None))
     assert rc.model_args["attn_qk_norm_scale"] == 1000
-    assert rc.config["additional"]["x_transformers_version"] == str(cfg_mod._XT_VERSION)
+    assert rc.config["additional"]["x_transformers_version"] == str(compat.XT_VERSION)
 
 
-@pytest.mark.skipif(cfg_mod._XT_VERSION < cfg_mod._XT_QK_NORM_FIX, reason="needs x-transformers >= 2.25.5")
+@pytest.mark.skipif(compat.XT_VERSION < compat.XT_QK_NORM_FIX, reason="needs x-transformers >= 2.25.5")
 def test_new_checkpoint_keeps_qk_norm_scale():
-    c = _ckpt(str(cfg_mod._XT_VERSION))
+    c = _ckpt(str(compat.XT_VERSION))
     c["config"]["model_conf"]["model_args"]["attn_qk_norm_scale"] = 10
     rc = resolve_legoltng_config(c)
     assert rc.model_args["attn_qk_norm_scale"] == 10
@@ -43,7 +43,7 @@ def test_no_qk_norm_untouched():
     assert "attn_qk_norm_scale" not in rc.model_args
 
 
-@pytest.mark.skipif(cfg_mod._XT_VERSION < cfg_mod._XT_QK_NORM_FIX, reason="needs x-transformers >= 2.25.5")
+@pytest.mark.skipif(compat.XT_VERSION < compat.XT_QK_NORM_FIX, reason="needs x-transformers >= 2.25.5")
 def test_mult_checkpoint_shared_model_args_cubed_once():
     mm = {"attn_qk_norm": True}
     mm_conf = {"model_args": mm, "h_dim": 8, "ptypes": torch.tensor([11, 22]), "ptypes_in": torch.tensor([11]),

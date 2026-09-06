@@ -21,6 +21,7 @@ from torch import Tensor, nn
 
 from flow_matching.utils.manifolds import Sphere
 
+from legofmt.compat import load_legacy_base_head
 from legofmt.data.struct import DataStruct, _F
 
 try:
@@ -72,12 +73,7 @@ def build_base_head(rc, gen_base) -> nn.Sequential | None:
             if hs["2.weight"].shape == head[-1].weight.shape:
                 head.load_state_dict(hs)
             else:
-
-                n_old = hs["2.weight"].shape[0]
-                head[0].load_state_dict(
-                    {"weight": hs["0.weight"], "bias": hs["0.bias"]})
-                head[-1].weight[:n_old].copy_(hs["2.weight"])
-                head[-1].bias[:n_old].copy_(hs["2.bias"])
+                load_legacy_base_head(head, hs)
             head.requires_grad_(not bc.get("base_head_frozen", False))
     return head
 

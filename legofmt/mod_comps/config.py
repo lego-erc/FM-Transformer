@@ -2,42 +2,30 @@ from __future__ import annotations
 
 import copy
 import json
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from importlib.metadata import version as _dist_version
 
 import torch
-from packaging.version import Version
 from flow_matching.utils.manifolds import Euclidean, Sphere
 
 from ..data.struct import set_layout
 
 from legofmt.geometry.path_sample_mult import ProductManifold
+from legofmt.compat import (
+    XT_QK_NORM_FIX, XT_VERSION, apply_legacy_projection_in_out,
+    build_manifold_from_string, migrate_legacy_mult_heads,
+    qk_norm_scale_compat, rename_ntokens,
+)
 
 _MANIFOLDS: dict[str, type] = {
     "euclidean": Euclidean,
     "sphere": Sphere,
 }
 
-# Restricted eval namespace for the legacy string spec form.
-_MANIFOLD_EVAL_NS: dict[str, Any] = {
-    "ProductManifold": ProductManifold,
-    "Euclidean": Euclidean,
-    "Sphere": Sphere,
-}
-
-
 def build_manifold(spec: str | list) -> ProductManifold:
     if isinstance(spec, str):
-        warnings.warn(
-            "String manifold specs are deprecated; use a list of factor dicts "
-            "([{'name': 'euclidean', 'dim': 3}, ...]).",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return eval(spec, {"__builtins__": {}}, _MANIFOLD_EVAL_NS)
+        return build_manifold_from_string(spec)
 
     if isinstance(spec, list):
         manifolds = [_MANIFOLDS[p["name"].lower()]() for p in spec]
@@ -104,26 +92,6 @@ class ResolvedLEGOConfig:
     reflow_start_epoch: int
 
 
-# x-transformers < 2.25.5 applied ``attn_qk_norm_scale`` (default 10) to q, to k
-# *and* as the kernel scale, so attention logits were scale**3 * cos(theta);
-# 2.25.5+ applies it once. Checkpoints record the library they were trained
-# under so old ones keep their effective scale when loaded by a newer library.
-_XT_VERSION = Version(_dist_version("x-transformers"))
-_XT_QK_NORM_FIX = Version("2.25.5")
-
-
-def _qk_norm_scale_compat(model_args: dict, additional: dict) -> None:
-    saved = additional.get("x_transformers_version")
-    old_ckpt = saved is None or Version(saved) < _XT_QK_NORM_FIX
-    if model_args.get("attn_qk_norm") and old_ckpt and _XT_VERSION >= _XT_QK_NORM_FIX:
-        model_args["attn_qk_norm_scale"] = model_args.get("attn_qk_norm_scale", 10) ** 3
-    elif model_args.get("attn_qk_norm") and not old_ckpt and _XT_VERSION < _XT_QK_NORM_FIX:
-        raise RuntimeError(
-            f"checkpoint trained with x-transformers {saved} (single qk_norm scale) "
-            f"cannot be loaded by {_XT_VERSION}; use x-transformers >= {_XT_QK_NORM_FIX}."
-        )
-
-
 def _amp_dtype(precision) -> "torch.dtype | None":
     if isinstance(precision, torch.dtype):
         return None if precision is torch.float32 else precision
@@ -160,7 +128,7 @@ def _resolve_fresh(config: dict) -> ResolvedLEGOConfig:
 
     meta = json.loads(Path(dpath, "meta.json").read_text())
     config.setdefault("additional", {})["data_meta"] = meta
-    config["additional"]["x_transformers_version"] = str(_XT_VERSION)
+    config["additional"]["x_transformers_version"] = str(XT_VERSION)
     max_seq_l = meta["ntokens"]
     pdgids = (
         torch.tensor(meta["particles"], dtype=torch.int64).sort().values.contiguous()
@@ -201,27 +169,17 @@ def _resolve_from_checkpoint(config: dict, state_dict: dict) -> ResolvedLEGOConf
     model_conf = config["model_conf"]
     model_args = model_conf["model_args"]
 
-    # Legacy field rename: pre-refactor checkpoints used "ntokens".
-    if "ntokens" in model_args:
-        model_args["max_seq_l"] = model_args.pop("ntokens")
-
-    _apply_legacy_projection_in_out(model_args, state_dict)
+    rename_ntokens(model_args)
+    apply_legacy_projection_in_out(model_args, state_dict)
     additional = config.setdefault("additional", {})
-    _qk_norm_scale_compat(model_args, additional)
-    additional["x_transformers_version"] = str(_XT_VERSION)
+    qk_norm_scale_compat(model_args, additional)
+    additional["x_transformers_version"] = str(XT_VERSION)
 
     return _build_resolved(
         config, model_conf, model_args,
         model_args["max_seq_l"], model_conf["pdgids"],
         state_dict=state_dict,
     )
-
-
-def _apply_legacy_projection_in_out(model_args: dict, state_dict: dict) -> None:
-    # Legacy checkpoints carry vf.project_in/out linears; rebuild them by
-    # setting dim_in_out so load_state_dict finds matching layers.
-    if any(k.startswith("vf.project_in.") for k in state_dict):
-        model_args["dim_in_out"] = model_args["h_dim"]
 
 
 def _build_resolved(
@@ -363,7 +321,7 @@ def _resolve_fresh_mult(config: dict) -> ResolvedMultConfig:
 
     meta = json.loads(Path(dpath, "meta.json").read_text())
     config.setdefault("additional", {})["data_meta"] = meta
-    config["additional"]["x_transformers_version"] = str(_XT_VERSION)
+    config["additional"]["x_transformers_version"] = str(XT_VERSION)
     if "max_energy" in meta:  # MultLoader's DataPrep needs it for norm_e
         mm_conf.setdefault("max_energy", meta["max_energy"])
     mm_conf.setdefault("cond_scalars", tuple(meta.get("cond_scalars", ("Density",))))
@@ -389,8 +347,8 @@ def _resolve_from_checkpoint_mult(
     model_args = mm_conf.get("model_args", {})
     inv_model_args = mm_conf.get("inv_model_args", model_args)
     for args in {id(d): d for d in (model_args, inv_model_args)}.values():  # may be one dict
-        _qk_norm_scale_compat(args, additional)
-    additional["x_transformers_version"] = str(_XT_VERSION)
+        qk_norm_scale_compat(args, additional)
+    additional["x_transformers_version"] = str(XT_VERSION)
 
     ptypes = mm_conf.get("ptypes")
     max_count = mm_conf.get("max_count")
@@ -398,41 +356,11 @@ def _resolve_from_checkpoint_mult(
         max_seq_len = (
             ptypes.shape[0] if torch.is_tensor(ptypes) else len(ptypes)
         )
-        state_dict = _migrate_legacy_mult_heads(
+        state_dict = migrate_legacy_mult_heads(
             state_dict, max_seq_len=max_seq_len, max_particles=max_count,
         )
 
     return _build_resolved_mult(config, mm_conf, dl_conf, state_dict=state_dict)
-
-
-def _migrate_legacy_mult_heads(
-    state_dict: dict, max_seq_len: int, max_particles: int
-) -> dict:
-    # Pre-fusion checkpoints stored per-position ModuleLists (embd_in_.{i},
-    # proj_out_.{i}); remap them onto the fused single-table layout.
-    has_legacy_proj = "proj_out_.0.weight" in state_dict
-    has_legacy_embd = "embd_in_.0.weight" in state_dict
-    if not (has_legacy_proj or has_legacy_embd):
-        return state_dict
-
-    out = {
-        k: v for k, v in state_dict.items()
-        if not (k.startswith("proj_out_.") or k.startswith("embd_in_."))
-    }
-
-    if has_legacy_proj:
-        weights = [state_dict[f"proj_out_.{i}.weight"] for i in range(max_seq_len)]
-        biases = [state_dict[f"proj_out_.{i}.bias"] for i in range(max_seq_len)]
-        out["proj_out_w"] = torch.stack([w.t().contiguous() for w in weights], dim=0)
-        out["proj_out_b"] = torch.stack(biases, dim=0)
-
-    if has_legacy_embd:
-        embd_weights = [
-            state_dict[f"embd_in_.{i}.weight"] for i in range(max_seq_len - 1)
-        ]
-        out["embd_in_.weight"] = torch.cat(embd_weights, dim=0)
-
-    return out
 
 
 def _build_resolved_mult(

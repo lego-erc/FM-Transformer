@@ -12,7 +12,7 @@ derives the autocast dtype from it. Checkpoints with no stamp (every pre-2026-09
 one) resolve to ``None`` and keep running fp32, so nothing changes for them.
 
 The dangerous case is handled elsewhere and deliberately not re-gated here:
-``cfm_trafo_x.fp32_attention`` already forces attention back to fp32 whenever
+``compat.fp32_attention`` already forces attention back to fp32 whenever
 ``attn_qk_norm_scale > 100``, i.e. exactly the pre-2.25.5 checkpoints whose
 attention logits are ``1000*cos`` and where bf16 rounding is O(1).
 """
