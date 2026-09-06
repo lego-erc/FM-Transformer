@@ -1,17 +1,24 @@
+"""``CornerHist``: corner plots and per-step animations of model output.
+
+Calls the LightningModule directly, so ``odeint_conf.return_timesteps`` decides
+whether the animation has intermediate frames to draw.
+"""
+
+import shutil
+
 import corner
 import matplotlib.pyplot as plt
-import shutil
 import numpy as np
 import torch
 from flow_matching.utils.manifolds import Euclidean, Sphere
 from matplotlib.animation import FuncAnimation
 from matplotlib.lines import Line2D
 
-from ..main.modules import LEGOLtng
-from ..geometry.path_sample_mult import ProductManifold
-from ..geometry.geom_trafos import GeomTrafos
-from ..data.struct import _F
-from .plot_geom import PlotGeom
+from legofmt.data.struct import _F
+from legofmt.geometry.geom_trafos import GeomTrafos
+from legofmt.geometry.path_sample_mult import ProductManifold
+from legofmt.main.modules import LEGOLtng
+from legofmt.viz.plot_geom import PlotGeom
 
 plt.rcParams.update(
     {
@@ -100,7 +107,9 @@ class CornerHist:
                         axis.clear()
                     prepped = self.prep(batch[i])
                     self.fig_sup.suptitle(
-                        rf"$\mathrm{{Density:\;}}{self.sols_density.item():.2f}\mathrm{{,\;Deposited\;Energy\;Mean:\;}}{self.sols_e_dep.item():.3f}$",
+                        rf"$\mathrm{{Density:\;}}{self.sols_density.item():.2f}"
+                        rf"\mathrm{{,\;Deposited\;Energy\;Mean:\;}}"
+                        rf"{self.sols_e_dep.item():.3f}$",
                         fontsize=20,
                     )
                     return prepped

@@ -1,3 +1,12 @@
+"""Reflow, and the one-step ``Direct`` variants.
+
+Reflow re-couples the base to a frozen teacher's transport of it; with no
+``reflow_path`` the student snapshots itself as its own teacher each epoch.
+It is gated solely by ``reflow_start_epoch > 0`` -- there is no on/off flag.
+``LEGOLtngDirect`` / ``GenerateOutDirect`` drop time conditioning and predict
+the residual ``target - base`` in a single forward.
+"""
+
 import copy
 import warnings
 from pathlib import Path

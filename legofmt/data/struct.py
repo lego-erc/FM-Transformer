@@ -1,3 +1,11 @@
+"""The padded ``(B, L, 8)`` sequence layout, and the accessors that hide it.
+
+Slot roles depend on ``cond_scalars``, so never index the sequence directly --
+use ``_F`` (``d``, ``edep``, ``cond(name)``, ``in_p``, ``out_p``, ``model_in``,
+``energy``, ``pdgids``) and ``DataStruct``. The layout is process-global module
+state set by ``set_layout``, so constructing a model mutates it.
+"""
+
 import torch
 from torch import Tensor
 from torch.utils.data._utils.collate import default_collate_fn_map

@@ -1,3 +1,9 @@
+"""``ProductManifold`` and the path sampler the flow trains against.
+
+Each factor's map is applied to its own slice of the last dimension, so the
+factor dims must sum to the model's ``in_dim``.
+"""
+
 import torch
 from flow_matching.path import GeodesicProbPath
 from flow_matching.path.scheduler import CondOTScheduler, Scheduler

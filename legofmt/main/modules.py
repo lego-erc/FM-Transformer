@@ -1,3 +1,11 @@
+"""``LEGOLtng``: the Riemannian flow-matching LightningModule.
+
+Holds construction, the Lightning hooks, and the helpers shared across its
+mixins. The behaviour lives alongside: ``TrainStep`` (training step and loss),
+``BaseDist`` (base distribution and its learned head), and ``Solvers`` (ODE
+solving, likelihood, and ``forward``).
+"""
+
 import torch
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, random_split

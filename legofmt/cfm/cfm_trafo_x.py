@@ -1,3 +1,12 @@
+"""The flow's vector field: an x-transformers Encoder over the padded sequence.
+
+Each token is embedded by a per-(mask, type, pdgid) conditional linear map --
+three index-selected weight tensors summed and contracted with ``x`` in one
+einsum -- and the output projection mirrors it. Time, and with ``step_cond``
+the step size, enter as sinusoidal embeddings passed to x-transformers as
+``condition=`` for adaptive RMSNorm.
+"""
+
 from __future__ import annotations
 
 from functools import partial

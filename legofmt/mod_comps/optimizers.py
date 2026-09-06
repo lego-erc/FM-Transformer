@@ -1,3 +1,12 @@
+"""Optimizer construction, and ``BatchedMuon``.
+
+``BatchedMuon`` reimplements ``pytorch_optimizer.Muon``'s update with
+``torch._foreach`` ops and one Newton-Schulz call per group of equal-shape
+matrices; both models' steps are kernel-launch-bound, so the library version's
+per-matrix Python loop dominated the step. ``opt_train`` / ``opt_eval`` are the
+schedule-free train/eval switch, shared by both LightningModules.
+"""
+
 from collections import defaultdict
 
 import torch

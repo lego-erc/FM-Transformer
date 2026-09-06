@@ -1,3 +1,9 @@
+"""``CubeSymmetry``: canonicalise directions onto a reference cube face.
+
+Six rotations indexed by the face the position points at. Applied before the
+flow and undone after it, and again in ``MultModel.proj_in``.
+"""
+
 import torch
 
 

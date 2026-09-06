@@ -1,3 +1,12 @@
+"""Path-straightening losses; both take the LightningModule as first argument.
+
+``curvature_loss`` penalises ``d/dt v`` along the predicted velocity.
+``one_step_euler_loss`` is flow-map self-distillation: the target for step ``d``
+is two no-grad half-steps at ``d/2``, averaged through ``logmap`` rather than
+Euclidean-ly because the factors are spheres. Its bootstrap ladder is anchored
+at ``d=0`` deliberately -- without that the bottom rung supervises nothing.
+"""
+
 import torch
 from torch import Tensor
 

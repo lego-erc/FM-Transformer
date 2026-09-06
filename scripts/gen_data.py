@@ -1,6 +1,8 @@
+"""Prepare raw shower data for training.
+
+Writes ``data_prepped.pt`` (the prepped tensors) and ``meta.json`` (the metadata
+the fresh-training config path reads) into the data directory.
 """
-This script will create a data_prepped.pt pickle file with prepared data as well as a meta.json file containing metadata.
-These files will (/should) be placed in the same folder as this script."""
 
 import json
 import os

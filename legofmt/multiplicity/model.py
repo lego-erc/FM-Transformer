@@ -1,3 +1,11 @@
+"""``MultModel``: the autoregressive per-pdgid count predictor.
+
+An x-transformers Decoder over one slot per outgoing PDG id, conditioned on the
+incoming particle and the per-event scalars, trained with cross-entropy.
+``mm_conf.train_inverse`` adds ``InvModel``, which predicts the incoming PID
+from the outgoing set and backs ``GenerateIn``.
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

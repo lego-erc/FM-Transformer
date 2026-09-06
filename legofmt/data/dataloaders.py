@@ -1,10 +1,18 @@
+"""Reading prepped shower data: the Dataset objects and the DataLoader factory.
+
+``GetLEGOData`` turns a raw per-particle/per-event dict into the padded
+``(features, mask, attn_mask)`` triple, dropping particles below ``cutoff_mev``
+and events left with too few survivors. ``LEGODataset`` serves an already-prepped
+tensor; ``make_loader`` is the worker plumbing both LightningModules share.
+"""
+
 import torch
 from torch import Tensor
 from torch.utils.data import (
     BatchSampler, DataLoader, Dataset, RandomSampler, SequentialSampler,
 )
 
-from .struct import DataStruct
+from legofmt.data.struct import DataStruct
 
 
 class GetLEGOData:

@@ -1,13 +1,22 @@
+"""``GenerateOut``: the multiplicity and flow checkpoints composed into a generator.
+
+``gen_batch`` runs the multiplicity model to size the output slots and build the
+padded ``(cond_fm, mask, attn_mask)`` tuple, then ``LEGOLtng.forward`` flows the
+base distribution to particles. The conditioning momentum must be energy-scaled
+rather than unit-norm, or the event conditions on a ~1 MeV particle. ``GenerateIn``
+is the reverse direction and needs a ``train_inverse`` multiplicity checkpoint.
+"""
+
 from dataclasses import replace
 
 import torch
 import torch.nn.functional as F
 
-from ..main.modules import LEGOLtng
-from ..multiplicity.model import MultModel
-from ..geometry.raytracing_proj import CubeTrace
-from ..geometry.energy_proj import EnergyProjections
-from ..data.struct import _F, DataStruct, set_layout
+from legofmt.data.struct import _F, DataStruct, set_layout
+from legofmt.geometry.energy_proj import EnergyProjections
+from legofmt.geometry.raytracing_proj import CubeTrace
+from legofmt.main.modules import LEGOLtng
+from legofmt.multiplicity.model import MultModel
 
 
 class GenerateOut(torch.nn.Module):

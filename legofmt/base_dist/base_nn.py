@@ -90,7 +90,7 @@ class BaseDist:
         Z, A    = ds_t.f.cond("Z"), ds_t.f.cond("A")
         x0      = 716.4 * A / (Z * (Z + 1) * (287.0 / Z.sqrt()).log())
         t       = ds_t.f.cond("Size") * ds_t.f.cond("Density") / x0
-        # cord length: full chord through the cube along the incoming
+        # chord length: full chord through the cube along the incoming
         # ray (edge lengths); fwd+bwd -> entry/exit-storage invariant
         inc     = ds_t.f.in_cc[..., 0, 1:7].nan_to_num(1.0)
         u, pos  = inc[..., :3], inc[..., 3:]

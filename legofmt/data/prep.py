@@ -1,13 +1,20 @@
+"""``DataPrep``: raw MeV particles -> the model's normalised column layout.
+
+Applies the energy normalisation, the cube ray-trace, and the outgoing-relative
+energy transform (``cc_trafo``). Accepts either a full config or the flat dict
+``MultLoader`` passes, which carries no manifold.
+"""
+
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from ..compat import dataset_already_normalised
-from ..geometry.energy_proj import EnergyProjections
-from ..geometry.raytracing_proj import CubeTrace
-from ..mod_comps.config import build_manifold
-from .struct import _F, cond_scalars, set_layout
+from legofmt.compat import dataset_already_normalised
+from legofmt.data.struct import _F, cond_scalars, set_layout
+from legofmt.geometry.energy_proj import EnergyProjections
+from legofmt.geometry.raytracing_proj import CubeTrace
+from legofmt.mod_comps.config import build_manifold
 
 class DataPrep:
     def __init__(self, config):

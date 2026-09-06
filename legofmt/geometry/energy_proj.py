@@ -1,3 +1,11 @@
+"""Energy <-> model-scalar conversion.
+
+``to_scalar`` maps MeV to ``log(|p|/cutoff) / log(max_energy/cutoff)`` clamped to
+``[0, 1]``. For outgoing rows ``DataPrep.cc_trafo`` then stores ``1 - e_out/e_in``
+-- inverted and relative to the incoming particle -- which is why ``to_mev``
+reads ``(1 - e_model) * e_in``.
+"""
+
 import torch
 from torch import Tensor
 

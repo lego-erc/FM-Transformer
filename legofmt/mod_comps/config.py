@@ -1,3 +1,11 @@
+"""Config resolution: raw YAML, or a checkpoint dict, -> a ``Resolved*Config``.
+
+Normalises model args, builds the manifold, and stamps the x-transformers
+version into every config. Both entry points mutate the dict they are handed
+(via ``set_layout`` and ``setdefault``), and ``set_layout`` is global state.
+Support for older artefacts lives in ``legofmt.compat``.
+"""
+
 from __future__ import annotations
 
 import copy
@@ -9,14 +17,13 @@ from typing import Any
 import torch
 from flow_matching.utils.manifolds import Euclidean, Sphere
 
-from ..data.struct import set_layout
-
-from legofmt.geometry.path_sample_mult import ProductManifold
 from legofmt.compat import (
     XT_QK_NORM_FIX, XT_VERSION, apply_legacy_projection_in_out,
     build_manifold_from_string, migrate_legacy_mult_heads,
     qk_norm_scale_compat, rename_ntokens,
 )
+from legofmt.data.struct import set_layout
+from legofmt.geometry.path_sample_mult import ProductManifold
 
 _MANIFOLDS: dict[str, type] = {
     "euclidean": Euclidean,

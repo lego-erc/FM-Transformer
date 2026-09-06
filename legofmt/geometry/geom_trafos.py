@@ -1,3 +1,9 @@
+"""Cartesian <-> spherical conversion, direction sampling, and the cube map.
+
+``to_cube`` is an L-infinity normalisation (sphere -> cube surface); it rescales
+only the position half of a ``(mom, pos)`` 6-vector, and momentum passes through.
+"""
+
 import torch
 import torch.nn.functional as F
 

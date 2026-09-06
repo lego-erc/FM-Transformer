@@ -1,3 +1,11 @@
+"""Samplers for the flow's base distribution -- the ``x_0`` it integrates from.
+
+``base_dist`` picks the direction prior (``poles`` concentrates around the
+incoming direction; ``iso`` / ``iso_pos`` do not), ``scale_dist`` the energy
+prior, and ``insert_add`` fills the edep row. The sampler must match the
+manifold the flow integrates on.
+"""
+
 import torch
 import torch.nn.functional as F
 

@@ -1,3 +1,9 @@
+"""``CubeTrace``: project positions onto the cube surface along the momentum ray.
+
+Applied at prep time (``proj_ray``) and again in ``GenerateOut``. It is not
+recorded in the checkpoint, so ``no_raytrace`` models must stub ``gen.proj_ray``.
+"""
+
 import torch
 
 
