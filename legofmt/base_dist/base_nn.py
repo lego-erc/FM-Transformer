@@ -162,19 +162,14 @@ class BaseDist:
                     pid = ds_t.f.out_p[..., -1]
                     inf_cond = inf_cond | (pid.unsqueeze(-1) != pid.unsqueeze(-2))
                 out = _F(base).out_p
-                if self.rc.ot_e_only:
-                    nt = ds_t.f.out_cc[..., 0:1]
-                    nb = out[..., 0].unsqueeze(-2)
-                    cost = (nt - nb).abs() + inf_cond * 1e6
-                else:
-                    man = self.rc.manifold
-                    tgt = ds_t.f.out_cc.unsqueeze(-2).split(man.ambient_dims, dim=-1)
-                    ref = out.unsqueeze(-3).split(man.ambient_dims, dim=-1)
-                    cost = sum(
-                        ((a * b).sum(-1).clamp(-1 + 1e-6, 1 - 1e-6).acos()
-                         if isinstance(mf, Sphere) else (a - b).norm(dim=-1)) ** 2
-                        for mf, a, b in zip(man.manifolds, tgt, ref)
-                    ) + inf_cond * 1e6
+                man = self.rc.manifold
+                tgt = ds_t.f.out_cc.unsqueeze(-2).split(man.ambient_dims, dim=-1)
+                ref = out.unsqueeze(-3).split(man.ambient_dims, dim=-1)
+                cost = sum(
+                    ((a * b).sum(-1).clamp(-1 + 1e-6, 1 - 1e-6).acos()
+                     if isinstance(mf, Sphere) else (a - b).norm(dim=-1)) ** 2
+                    for mf, a, b in zip(man.manifolds, tgt, ref)
+                ) + inf_cond * 1e6
                 assign = slap(cost, cost.device).long()
                 out[:] = torch.take_along_dim(out, assign.unsqueeze(-1), dim=1)
             base = self.gen_base.insert_add(base)

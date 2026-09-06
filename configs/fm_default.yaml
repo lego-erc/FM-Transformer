@@ -51,7 +51,6 @@ config:
       - { name: sphere, dim: 3 }
       - { name: sphere, dim: 3 }
     ot_coupling: true
-    ot_e_only: false
     max_energy: 300.0
     t_dist: sd3
     t_dist_scale: 0.0
@@ -60,7 +59,6 @@ config:
     reflow_kwargs: {method: midpoint, step_size: 0.5}
     reflow_start_epoch: 2
     reflow_every: 4
-    t_zero_frac: 0.
     base_dist_loss: 1.
     base_pretrain_batches: 1000
     base_pretrain_bs: 16384

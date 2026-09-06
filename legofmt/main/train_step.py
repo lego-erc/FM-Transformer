@@ -108,8 +108,6 @@ class TrainStep:
                 t = 1 - u + self.rc.t_dist_scale / 3 * ((torch.pi / 2 * u).sin() ** 2 - u)
             else:
                 raise ValueError(f"unknown t_dist: {self.rc.t_dist!r}")
-            if self.rc.t_zero_frac > 0:
-                t = t * (torch.rand_like(t) >= self.rc.t_zero_frac)
             if self.rc.t_dist_shift != 1.0:
                 t = t.clamp(min=0) ** (1.0 / self.rc.t_dist_shift)
             if (
