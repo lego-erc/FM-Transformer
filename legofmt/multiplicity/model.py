@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
 
 from lightning import LightningModule
 
@@ -9,13 +8,15 @@ from x_transformers import ContinuousTransformerWrapper, Decoder, Encoder
 
 from legofmt.cfm.cfm_trafo_x import fp32_attention, needs_fp32_attention
 
-from legofmt.data.dataloaders import LEGODataset
+from legofmt.data.dataloaders import LEGODataset, make_loader
 from legofmt.data.prep import DataPrep
 from legofmt.data.struct import cond_scalars
 from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.geometry.symmetry_projections import CubeSymmetry
 from legofmt.mod_comps.config import resolve_mult_config
-from legofmt.mod_comps.optimizers import build_optimizer, schedulefree_adamw
+from legofmt.mod_comps.optimizers import (
+    build_optimizer, opt_eval, opt_is_schedulefree, opt_train, schedulefree_adamw,
+)
 
 
 class MultLoader(torch.utils.data.Dataset):
@@ -182,7 +183,7 @@ class MultModel(LightningModule):
             self._sched = None
         else:
             self.opt, self._sched = build_optimizer(self.parameters(), rc.opt_conf)
-        self._opt_is_sf = hasattr(self.opt, "train") and callable(getattr(self.opt, "train", None))
+        self._opt_is_sf = opt_is_schedulefree(self.opt)
 
     def proj_in(self, x):
         x = x.clone()
@@ -194,12 +195,10 @@ class MultModel(LightningModule):
         return self.proj_in_(x)
 
     def _opt_train(self):
-        if self._opt_is_sf:
-            self.opt.train()
+        opt_train(self.opt)
 
     def _opt_eval(self):
-        if self._opt_is_sf:
-            self.opt.eval()
+        opt_eval(self.opt)
 
     def on_fit_start(self):
         self._opt_train()
@@ -241,16 +240,11 @@ class MultModel(LightningModule):
         return {"optimizer": self.opt, "lr_scheduler": self._sched}
 
     def train_dataloader(self):
-        dataset_train = MultLoader(self.rc.config)
-        num_workers = self.rc.dl_conf.get("num_workers", 4)
-        return DataLoader(
-            dataset_train,
-            batch_size=self.rc.mm_conf.get("bs", 2**12),
+        return make_loader(
+            MultLoader(self.rc.config),
+            bs=self.rc.mm_conf.get("bs", 2**12),
             shuffle=True,
-            num_workers=num_workers,
-            pin_memory=True,
-            persistent_workers=num_workers > 0,
-            multiprocessing_context="fork" if num_workers > 0 else None,
+            num_workers=self.rc.dl_conf.get("num_workers", 4),
         )
 
     @torch.no_grad()

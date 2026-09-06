@@ -127,3 +127,18 @@ def build_optimizer(params, opt_conf):
     cls = _get(SCHEDULERS, sc.pop("cls"))
     interval = sc.pop("interval", "step")
     return opt, {"scheduler": cls(opt, **sc), "interval": interval}
+
+
+def opt_is_schedulefree(opt) -> bool:
+    """Whether ``opt`` needs the explicit train/eval switch schedule-free carries."""
+    return callable(getattr(opt, "train", None))
+
+
+def opt_train(opt) -> None:
+    if opt_is_schedulefree(opt):
+        opt.train()
+
+
+def opt_eval(opt) -> None:
+    if opt_is_schedulefree(opt):
+        opt.eval()

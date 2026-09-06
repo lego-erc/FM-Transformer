@@ -1,6 +1,8 @@
 import torch
 from torch import Tensor
-from torch.utils.data import Dataset
+from torch.utils.data import (
+    BatchSampler, DataLoader, Dataset, RandomSampler, SequentialSampler,
+)
 
 from .struct import DataStruct
 
@@ -85,3 +87,27 @@ class LEGODataset(Dataset):
 
     def __getitem__(self, idx: int | Tensor) -> DataStruct:
         return self.data[idx]
+
+
+def make_loader(dataset, *, bs, shuffle, num_workers=4, batched_sampler=False):
+    """The worker plumbing both LightningModules share.
+
+    ``batched_sampler`` hands the dataset a tensor of indices per call
+    (``batch_size=None``, no default collate), which is how ``LEGODataset`` is
+    read; the plain path is torch's per-item fetch and collate.
+    """
+    common = dict(
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=num_workers > 0,
+        multiprocessing_context="fork" if num_workers > 0 else None,
+    )
+    if batched_sampler:
+        sampler = (RandomSampler if shuffle else SequentialSampler)(dataset)
+        return DataLoader(
+            dataset,
+            sampler=BatchSampler(sampler, bs, drop_last=False),
+            batch_size=None,
+            **common,
+        )
+    return DataLoader(dataset, batch_size=bs, shuffle=shuffle, **common)

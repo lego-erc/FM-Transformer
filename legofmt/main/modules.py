@@ -1,8 +1,6 @@
 import torch
 from torch import Tensor, nn
-from torch.utils.data import (
-    BatchSampler, DataLoader, RandomSampler, SequentialSampler, random_split,
-)
+from torch.utils.data import DataLoader, random_split
 
 import lightning as ltng
 
@@ -18,7 +16,7 @@ from legofmt.cfm.solvers import Solvers
 
 from legofmt.main.train_step import TrainStep
 
-from legofmt.data.dataloaders import LEGODataset
+from legofmt.data.dataloaders import LEGODataset, make_loader
 from legofmt.data.prep import DataPrep
 from legofmt.data.struct import DataStruct
 
@@ -27,7 +25,9 @@ from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.geometry.symmetry_projections import CubeSymmetry
 
 from legofmt.mod_comps.config import resolve_legoltng_config
-from legofmt.mod_comps.optimizers import build_optimizer
+from legofmt.mod_comps.optimizers import (
+    build_optimizer, opt_eval, opt_is_schedulefree, opt_train,
+)
 
 from legofmt.log_metrics.val_metrics import ShowerValMetrics
 
@@ -64,7 +64,7 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
                 params += [self.lv_flow]
 
         self.opt, self._lr_sched = build_optimizer(params, self.rc.opt_conf)
-        self._opt_is_sf = callable(getattr(self.opt, "train", None))
+        self._opt_is_sf = opt_is_schedulefree(self.opt)  # read by lego_eval
 
         if self.rc.state_dict is not None:
             self.model.vf.load_state_dict(self.rc.state_dict, strict=False)
@@ -83,12 +83,10 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         )
 
     def _opt_train(self) -> None:
-        if getattr(self, "_opt_is_sf", False):
-            self.opt.train()
+        opt_train(self.opt)
 
     def _opt_eval(self) -> None:
-        if getattr(self, "_opt_is_sf", False):
-            self.opt.eval()
+        opt_eval(self.opt)
 
     def on_validation_model_eval(self) -> None:
         super().on_validation_model_eval()
@@ -153,20 +151,12 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         self._pretrain_base_if_needed()
 
     def _make_loader(self, dataset, *, shuffle: bool, bs: int | None = None) -> DataLoader:
-        num_workers = self.rc.dl_conf.get("num_workers", 4)
-        sampler = (RandomSampler if shuffle else SequentialSampler)(dataset)
-        return DataLoader(
+        return make_loader(
             dataset,
-            sampler=BatchSampler(
-                sampler,
-                bs if bs is not None else self.rc.dl_conf.get("bs", 2**12),
-                drop_last=False,
-            ),
-            batch_size=None,
-            num_workers=num_workers,
-            pin_memory=True,
-            persistent_workers=num_workers > 0,
-            multiprocessing_context="fork" if num_workers > 0 else None,
+            bs=bs if bs is not None else self.rc.dl_conf.get("bs", 2**12),
+            shuffle=shuffle,
+            num_workers=self.rc.dl_conf.get("num_workers", 4),
+            batched_sampler=True,
         )
 
     def train_dataloader(self) -> DataLoader:
