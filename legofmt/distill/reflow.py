@@ -90,7 +90,10 @@ class LEGOLtngDirect(LEGOLtng):
         else:
             loss_sc = 0.0
         sq = (pred - target) ** 2
-        return self._reduce_and_log(sq, ds_t, loss_sc)
+        loss, logs = self.reduce_loss(sq, ds_t, loss_sc)
+        if logs:
+            self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
+        return loss
 
     @torch.no_grad()
     def solve(

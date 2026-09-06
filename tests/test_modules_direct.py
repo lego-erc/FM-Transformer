@@ -413,7 +413,7 @@ def test_flow_map_under_uncert_weighting() -> None:
     import legofmt.distill.distill as D
     const = 0.05
     with patch.object(D, "one_step_euler_loss", lambda *a, **k: torch.tensor(const)):
-        with patch("legofmt.main.modules.one_step_euler_loss",
+        with patch("legofmt.main.train_step.one_step_euler_loss",
                    lambda *a, **k: torch.tensor(const)):
             opt = torch.optim.Adam([model.lv_flow], lr=0.1)
             for _ in range(400):
@@ -597,7 +597,7 @@ def test_uncert_lv_receives_grad_and_tracks_loss_scale() -> None:
         sq[..., 0:1] = 4.0      # energy block: large loss
         sq[..., 1:4] = 1.0      # dir block:    medium
         sq[..., 4:7] = 0.25     # pos block:    small
-        loss = model._reduce_and_log(sq, ds, 0.0, t=torch.full((8,), 0.5))
+        loss, _ = model.reduce_loss(sq, ds, 0.0, t=torch.full((8,), 0.5))
         loss.backward()
         opt.step()
         scales = model.lv.detach().exp()
@@ -617,7 +617,7 @@ def test_uncert_floor_caps_the_weight() -> None:
     opt = torch.optim.Adam([model.lv], lr=0.5)
     for _ in range(200):
         opt.zero_grad()
-        loss = model._reduce_and_log(
+        loss, _ = model.reduce_loss(
             torch.full((8, 5, 7), 1e-8), ds, 0.0, t=torch.full((8,), 0.5))
         loss.backward()
         opt.step()
