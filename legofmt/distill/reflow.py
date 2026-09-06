@@ -8,7 +8,8 @@ from torch import Tensor, nn
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt.data.struct import DataStruct
 from legofmt.main.generate import GenerateOut
-from legofmt.main.modules import LEGOLtng, ProjectModel
+from legofmt.cfm.project_model import ProjectModel
+from legofmt.main.modules import LEGOLtng
 
 
 def _teacher_from_state(config: dict, state_dict: dict) -> nn.Module:

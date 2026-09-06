@@ -1,5 +1,3 @@
-import contextlib
-
 import torch
 from torch import Tensor, nn
 from torch.utils.data import (
@@ -15,66 +13,23 @@ from legofmt.base_dist.base_nn import (
 from legofmt.base_dist.gen_base import GenerateBase
 
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
+from legofmt.cfm.project_model import ProjectModel
 from legofmt.cfm.solvers import Solvers
 
 from legofmt.main.train_step import TrainStep
 
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.data.prep import DataPrep
-from legofmt.data.struct import DataStruct, _F
+from legofmt.data.struct import DataStruct
 
-from legofmt.geometry.geom_trafos import GeomTrafos
-from legofmt.geometry.path_sample_mult import ProductPathSampler, ProductManifold
+from legofmt.geometry.path_sample_mult import ProductPathSampler
 from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.geometry.symmetry_projections import CubeSymmetry
 
-from legofmt.mod_comps.config import _amp_dtype, resolve_legoltng_config
+from legofmt.mod_comps.config import resolve_legoltng_config
 from legofmt.mod_comps.optimizers import build_optimizer
 
 from legofmt.log_metrics.val_metrics import ShowerValMetrics
-
-
-class ProjectModel(nn.Module):
-    """Projection Wrapper for Riemannian FM Model."""
-
-    def __init__(self, vf: nn.Module, manifold: ProductManifold, **kwargs) -> None:
-        super().__init__()
-        self.vf          = vf
-        self.manifold    = manifold
-        self.geom_trafos = GeomTrafos()
-        self.cond_cube   = kwargs.get("cond_cube", False)
-        self.no_detach   = kwargs.get("no_detach", False)
-
-    def _prep_x(self, x: Tensor, attn_mask: Tensor) -> tuple[Tensor, Tensor]:
-        x_proj = self.manifold.projx(x)
-        x_att  = torch.where(attn_mask.unsqueeze(-1), x_proj, x)
-        if not self.no_detach:
-            x_att.detach_()
-        if self.cond_cube:
-            x_att = x_att.clone()
-            in_p  = _F(x_att).in_p
-            in_p.copy_(self.geom_trafos.to_cube(in_p))
-        return x_proj, x_att
-
-    def forward(
-        self,
-        x: Tensor,
-        t: Tensor,
-        mask: Tensor,
-        attn_mask: Tensor,
-        types: Tensor,
-        pdgids: Tensor | None = None,
-        d: Tensor | None = None,
-    ) -> Tensor:
-        x_proj, x_att = self._prep_x(x, attn_mask)
-        t = torch.atleast_2d(t).expand_as(attn_mask)
-        t = torch.where(mask == 1, t, 1.0)  # conditions get t=1
-        if getattr(self.vf, "step_cond", False):
-            d = torch.zeros_like(t) if d is None else torch.atleast_2d(d).expand_as(attn_mask)
-            d = torch.where(mask == 1, d, 0.0)  # conditions are not transported
-        v = self.vf(x_att, mask, attn_mask, types, pdgids, t=t, d=d)
-        v_proj = self.manifold.proju(x_proj, v)
-        return torch.where(attn_mask.unsqueeze(-1), v_proj, v)
 
 
 class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
@@ -219,65 +174,3 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
 
     def val_dataloader(self) -> DataLoader:
         return self._make_loader(self._val_ds, shuffle=False)
-
-    @torch.no_grad()
-    def forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None) -> tuple:
-        if self.model.training:
-            self.model.eval()
-            self._opt_eval()
-
-        cfg = self.rc.odeint_conf
-        if cfg.get("fwd_compile", False) and not (
-            hasattr(self.model, "_orig_mod") or hasattr(self.model.vf, "_orig_mod")
-        ):
-            self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=False)
-
-        ds_t = DataStruct(*batch) if isinstance(batch, tuple) else batch
-        if self.sym is not None:
-            fwd  = ds_t.m.full[:, self.rc.n_prefix] == 0
-            face = self.sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
-            ds_t = DataStruct(self._canon_dirs(ds_t.f.full, face, fwd), ds_t.m.full, ds_t.am.full)
-        base = self.gen_base_wrapper(ds_t)
-
-        pdgids = ds_t.f.pdgids
-        am     = ds_t.am.full.unsqueeze(-1)
-
-        if cfg.get("return_base", False):
-            sols = base.masked_fill(~am, torch.nan)
-        else:
-            step_size = cfg.get("step_size", 0.04)
-            time_grid = cfg.get("time_grid")
-            if time_grid is None:
-                time_grid = torch.arange(
-                    0, 1 + step_size, step=step_size, device=self.device
-                ).clamp_max(1)
-            amp = (_amp_dtype(cfg["amp"]) if "amp" in cfg
-                   else self.rc.amp_dtype)
-            with (contextlib.nullcontext() if amp is None
-                  else torch.autocast(base.device.type, dtype=amp)):
-                sols = self.solve(
-                    ds_t, x_init=base,
-                    split_size=cfg.get("split_size"),
-                    step_size=step_size,
-                    method=cfg.get("method", "midpoint"),
-                    time_grid=time_grid,
-                    return_intermediates=cfg.get("return_timesteps", False),
-                )
-            sols = sols.float()
-            sols = sols.masked_fill_(~am, torch.nan)
-            filter_pdgid = cfg.get("filter_pdgid")
-            if filter_pdgid is not None:
-                pdgids_idx = pdgids.int() if self.rc.pdgid_is_idx else self.convert_pdgids(pdgids)
-                keep = torch.isin(pdgids_idx, self.convert_pdgids(filter_pdgid)) | (pdgids_idx == 0)
-                sols.masked_fill_(~keep, torch.nan)
-                pdgids = pdgids.masked_fill(~keep, 0)
-
-        if self.sym is not None:
-            if sols.dim() == 4:
-                sols = torch.stack([self._canon_dirs(s, face, fwd, inverse=True) for s in sols])
-            else:
-                sols = self._canon_dirs(sols, face, fwd, inverse=True)
-
-        if sols.dim() == 4:
-            pdgids = pdgids.unsqueeze(0).expand(sols.shape[0], -1, -1, -1)
-        return torch.cat((sols, pdgids), dim=-1), ds_t.m.full, ds_t.am.full

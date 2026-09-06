@@ -1,4 +1,5 @@
-"""ODE solving / sampling for the Riemannian FM model.
+"""ODE solving / sampling for the Riemannian FM model, and the ``forward``
+that drives it from ``odeint_conf``.
 
 Split out of ``main/modules.py``. These are mixin methods rather than a
 standalone solver object on purpose: ``lego_eval`` version-probes them with
@@ -9,12 +10,16 @@ Members resolved through ``self`` and owned by ``LEGOLtng``: ``model``,
 ``types_embd``, ``rc``, ``gen_base_wrapper``, ``convert_pdgids``, ``_opt_eval``.
 """
 
+import contextlib
+
 import torch
 from torch import Tensor
 
 from flow_matching.solver import ODESolver
 
 from legofmt.data.struct import DataStruct, _F
+
+from legofmt.mod_comps.config import _amp_dtype
 
 
 class Solvers:
@@ -157,3 +162,65 @@ class Solvers:
             if return_intermediates:
                 xs.append(x)
         return torch.stack(xs) if return_intermediates else x
+
+    @torch.no_grad()
+    def forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None) -> tuple:
+        if self.model.training:
+            self.model.eval()
+            self._opt_eval()
+
+        cfg = self.rc.odeint_conf
+        if cfg.get("fwd_compile", False) and not (
+            hasattr(self.model, "_orig_mod") or hasattr(self.model.vf, "_orig_mod")
+        ):
+            self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=False)
+
+        ds_t = DataStruct(*batch) if isinstance(batch, tuple) else batch
+        if self.sym is not None:
+            fwd  = ds_t.m.full[:, self.rc.n_prefix] == 0
+            face = self.sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
+            ds_t = DataStruct(self._canon_dirs(ds_t.f.full, face, fwd), ds_t.m.full, ds_t.am.full)
+        base = self.gen_base_wrapper(ds_t)
+
+        pdgids = ds_t.f.pdgids
+        am     = ds_t.am.full.unsqueeze(-1)
+
+        if cfg.get("return_base", False):
+            sols = base.masked_fill(~am, torch.nan)
+        else:
+            step_size = cfg.get("step_size", 0.04)
+            time_grid = cfg.get("time_grid")
+            if time_grid is None:
+                time_grid = torch.arange(
+                    0, 1 + step_size, step=step_size, device=self.device
+                ).clamp_max(1)
+            amp = (_amp_dtype(cfg["amp"]) if "amp" in cfg
+                   else self.rc.amp_dtype)
+            with (contextlib.nullcontext() if amp is None
+                  else torch.autocast(base.device.type, dtype=amp)):
+                sols = self.solve(
+                    ds_t, x_init=base,
+                    split_size=cfg.get("split_size"),
+                    step_size=step_size,
+                    method=cfg.get("method", "midpoint"),
+                    time_grid=time_grid,
+                    return_intermediates=cfg.get("return_timesteps", False),
+                )
+            sols = sols.float()
+            sols = sols.masked_fill_(~am, torch.nan)
+            filter_pdgid = cfg.get("filter_pdgid")
+            if filter_pdgid is not None:
+                pdgids_idx = pdgids.int() if self.rc.pdgid_is_idx else self.convert_pdgids(pdgids)
+                keep = torch.isin(pdgids_idx, self.convert_pdgids(filter_pdgid)) | (pdgids_idx == 0)
+                sols.masked_fill_(~keep, torch.nan)
+                pdgids = pdgids.masked_fill(~keep, 0)
+
+        if self.sym is not None:
+            if sols.dim() == 4:
+                sols = torch.stack([self._canon_dirs(s, face, fwd, inverse=True) for s in sols])
+            else:
+                sols = self._canon_dirs(sols, face, fwd, inverse=True)
+
+        if sols.dim() == 4:
+            pdgids = pdgids.unsqueeze(0).expand(sols.shape[0], -1, -1, -1)
+        return torch.cat((sols, pdgids), dim=-1), ds_t.m.full, ds_t.am.full
