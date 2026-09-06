@@ -13,7 +13,7 @@ from torch import Tensor, nn
 from legofmt.data.struct import _F
 
 from legofmt.geometry.geom_trafos import GeomTrafos
-from legofmt.geometry.path_sample_mult import ProductManifold
+from legofmt.geometry.product_manifold import ProductManifold
 
 
 class ProjectModel(nn.Module):

@@ -29,7 +29,7 @@ from flow_matching.utils.manifolds import Euclidean, Sphere
 from x_transformers.attend import Attend
 
 from legofmt.data.struct import _F
-from legofmt.geometry.path_sample_mult import ProductManifold
+from legofmt.geometry.product_manifold import ProductManifold
 
 
 # ---------------------------------------------------------------------------

@@ -23,7 +23,7 @@ from legofmt.compat import (
     qk_norm_scale_compat, rename_ntokens,
 )
 from legofmt.data.struct import set_layout
-from legofmt.geometry.path_sample_mult import ProductManifold
+from legofmt.geometry.product_manifold import ProductManifold
 
 _MANIFOLDS: dict[str, type] = {
     "euclidean": Euclidean,

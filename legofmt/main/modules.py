@@ -28,7 +28,7 @@ from legofmt.data.dataloaders import LEGODataset, make_loader
 from legofmt.data.prep import DataPrep
 from legofmt.data.struct import DataStruct
 
-from legofmt.geometry.path_sample_mult import ProductPathSampler
+from legofmt.cfm.path_sampler import ProductPathSampler
 from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.geometry.symmetry_projections import CubeSymmetry
 
