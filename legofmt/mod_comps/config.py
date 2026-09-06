@@ -66,8 +66,6 @@ class ResolvedLEGOConfig:
     uncert_bins: int
     uncert_min: float
     overflow_delta: float
-    edep_overflow_delta: float
-    cond_cube: bool
     canon_sym: bool
     cond_scalars: tuple[str, ...]
     n_prefix: int
@@ -210,11 +208,6 @@ def _build_resolved(
     if overflow_delta < 0:
         raise ValueError(f"overflow_delta must be >= 0, got {overflow_delta}.")
 
-    edep_overflow_delta = model_conf.get("edep_overflow_delta", 0.0)
-    if edep_overflow_delta < 0:
-        raise ValueError(
-            f"edep_overflow_delta must be >= 0, got {edep_overflow_delta}."
-        )
     return ResolvedLEGOConfig(
         max_seq_l=max_seq_l,
         pdgids_template=pdgids.contiguous(),
@@ -235,8 +228,6 @@ def _build_resolved(
         uncert_bins=model_conf.get("uncert_bins", 16),
         uncert_min=model_conf.get("uncert_min", -6.0),
         overflow_delta=overflow_delta,
-        edep_overflow_delta=edep_overflow_delta,
-        cond_cube=model_conf.get("cond_cube", False),
         canon_sym=model_conf.get("canon_sym", False),
         cond_scalars=cond_scalars,
         n_prefix=n_prefix,

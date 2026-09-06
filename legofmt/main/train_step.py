@@ -28,13 +28,11 @@ class TrainStep:
 
     def _shift_overflow_targets(self, ds_t: DataStruct) -> DataStruct:
         f = ds_t.f.full.clone()
-        if self.rc.overflow_delta > 0:
-            op = _F(f).out_p
-            op[..., 0].masked_fill_((op[..., 0] == 0) & ds_t.am.out_p.bool(),
-                                    -self.rc.overflow_delta)
-        if self.rc.edep_overflow_delta > 0:
-            edep = _F(f).edep
-            edep.masked_fill_(edep == 0, -self.rc.edep_overflow_delta)
+        delta = self.rc.overflow_delta
+        op = _F(f).out_p
+        op[..., 0].masked_fill_((op[..., 0] == 0) & ds_t.am.out_p.bool(), -delta)
+        edep = _F(f).edep
+        edep.masked_fill_(edep == 0, -delta)
         return DataStruct(f, ds_t.m.full, ds_t.am.full)
 
     def reduce_loss(
@@ -93,7 +91,7 @@ class TrainStep:
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
         with torch.no_grad():
             ds_t = DataStruct(ds_t.f.full, self._sample_mask(ds_t), ds_t.am.full)
-            if self.rc.overflow_delta > 0 or self.rc.edep_overflow_delta > 0:
+            if self.rc.overflow_delta > 0:
                 ds_t = self._shift_overflow_targets(ds_t)
             if self.sym is not None:
                 fwd  = ds_t.m.full[:, self.rc.n_prefix] == 0

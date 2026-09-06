@@ -256,7 +256,6 @@ Top-level FM options:
 | `proj_ray` | `True` (read by `DataPrep` only) | At prep-time, ray-trace incoming/outgoing positions onto the unit-cube surface via `CubeTrace`. Ignored when loading already-prepped data from disk. |
 | `proj_en` | `False` | Energy normalisation applied in `DataPrep`. Allowed values: `False` / `"identity"` (no-op), `"in_frac"` (divide outgoing momenta by incoming magnitude), `"log"`, `"in_frac_log"`, `"exp"`. (`exp_mult` / `in_mult` exist on `EnergyProjections` but take two arguments and are not callable from this hook.) |
 | `ot_coupling` | `False` | At training time, Hungarian-assign base→data per event for OT-style coupling. Requires the optional `torch_lap_cuda_lib` package; otherwise this raises at first call. |
-| `cond_cube` | `False` | When solving on the manifold, pass the cube-projected version of the position block as conditioning to the vector field. The integrated state itself stays on the manifold. |
 | `t_dist` | `"uniform"` | Time sampling for the loss: `"uniform"`, `"sm_norm"` (`sigmoid(s · N(0,1))`), `"sd3"` (SD3 logit-normal mix `1-u + s/3·((π/2·u).sin()² - u)`), or `"sd3_grid"` (50/50 mix of `"sd3"` with a discrete grid `{0, 0.4, 0.8, 0.9}` — sampled with weights `.1/.2/.3/.4` and jittered by `0.02·N(0,1)`). |
 | `t_dist_scale` | `1.4` | Scale `s` for `sm_norm` / `sd3`. |
 | `pdgid_is_idx` | `False` | If `True`, the pdgid column is treated as an already-indexed vocab id (skipping `convert_pdgids`). Flipped on by `GenerateOut` at inference. |

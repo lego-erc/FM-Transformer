@@ -9,7 +9,7 @@ the proper scoring rule for exactly the density the sampler draws from
 (``E_dep = e_dep_max * sigmoid(mu + sig*z)``) and the same formula
 ``lego_eval/likelihood.py`` scores with. Zero-deposit events are excluded:
 the logit-normal has no atom, and the zero-deposit atom is the flow's job
-(``edep_overflow_delta``).
+(``overflow_delta``).
 """
 
 from __future__ import annotations
