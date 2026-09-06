@@ -84,6 +84,7 @@ class DataStruct:
         return type(self)(self.f.full[idx], self.m.full[idx], self.am.full[idx])
 
     def to(self, *args, **kwargs) -> "DataStruct":
+        kwargs.setdefault("non_blocking", True)
         return type(self)(
             self.f.full.to(*args, **kwargs),
             self.m.full.to(*args, **kwargs),
