@@ -95,8 +95,7 @@ class Solvers:
     ) -> Tensor:
         ds_t, pdgids_idx = self._prep_solve(ds_t)
         am = ds_t.am.full.unsqueeze(-1)
-        cc = ds_t.f.model_in.where(am, ds_t.f.in_cc)
-        if x_init is not None and x_init.shape == cc.shape:
+        if x_init is not None and x_init.shape == ds_t.f.model_in.shape:
             x_init = x_init.where(am, _F(x_init).in_p)
         if x_init is None:
             x_init = self.gen_base_wrapper(ds_t)
