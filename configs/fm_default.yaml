@@ -63,7 +63,6 @@ config:
     base_pretrain_batches: 1000
     base_pretrain_bs: 16384
     mask_conf: { p_forward: 1. }
-    cond_cube: false
     canon_sym: true
     model_args:
       h_dim: 256

@@ -74,7 +74,6 @@ class LEGOLtngDirect(LEGOLtng):
         return ProjectModelDirect(
             CFMTrafo_x(**rc.model_args, time_cond=False),
             rc.manifold,
-            cond_cube=rc.cond_cube,
         )
 
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:

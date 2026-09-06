@@ -86,7 +86,6 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         return ProjectModel(
             CFMTrafo_x(**rc.model_args),
             rc.manifold,
-            cond_cube=rc.cond_cube,
         )
 
     def _opt_train(self) -> None:

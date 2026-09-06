@@ -10,9 +10,6 @@ appear in a checkpoint.
 import torch
 from torch import Tensor, nn
 
-from legofmt.data.struct import _F
-
-from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.geometry.product_manifold import ProductManifold
 
 
@@ -21,21 +18,15 @@ class ProjectModel(nn.Module):
 
     def __init__(self, vf: nn.Module, manifold: ProductManifold, **kwargs) -> None:
         super().__init__()
-        self.vf          = vf
-        self.manifold    = manifold
-        self.geom_trafos = GeomTrafos()
-        self.cond_cube   = kwargs.get("cond_cube", False)
-        self.no_detach   = kwargs.get("no_detach", False)
+        self.vf        = vf
+        self.manifold  = manifold
+        self.no_detach = kwargs.get("no_detach", False)
 
     def _prep_x(self, x: Tensor, attn_mask: Tensor) -> tuple[Tensor, Tensor]:
         x_proj = self.manifold.projx(x)
         x_att  = torch.where(attn_mask.unsqueeze(-1), x_proj, x)
         if not self.no_detach:
             x_att.detach_()
-        if self.cond_cube:
-            x_att = x_att.clone()
-            in_p  = _F(x_att).in_p
-            in_p.copy_(self.geom_trafos.to_cube(in_p))
         return x_proj, x_att
 
     def forward(
