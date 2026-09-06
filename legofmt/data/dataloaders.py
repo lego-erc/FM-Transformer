@@ -85,7 +85,7 @@ class LEGODataset(Dataset):
         self.data = DataStruct(*data)
 
         frac = kwargs.get("frac")
-        if frac:
+        if frac and frac < 1.0:
             n = int(len(self.data) * frac)
             idxs = torch.randperm(len(self.data), device=self.device)[:n]
             self.data = self.data[idxs]
