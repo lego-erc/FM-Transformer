@@ -16,7 +16,7 @@ import itertools
 
 import torch
 
-import legofmt.main.modules as modules
+from legofmt.base_dist import base_nn
 from legofmt.data.struct import DataStruct, _F
 from legofmt.main.modules import LEGOLtng
 from test_modules_direct import _tiny_config
@@ -72,8 +72,8 @@ class _BruteLap:
 
 def _run(model_conf: dict) -> tuple[_BruteLap, torch.Tensor]:
     lap = _BruteLap()
-    orig = modules.slap
-    modules.slap = lap
+    orig = base_nn.slap
+    base_nn.slap = lap
     try:
         model = LEGOLtng(_config(**model_conf))
         model.on_fit_start()
@@ -81,7 +81,7 @@ def _run(model_conf: dict) -> tuple[_BruteLap, torch.Tensor]:
         torch.manual_seed(0)
         model.gen_base_wrapper(_batch())
     finally:
-        modules.slap = orig
+        base_nn.slap = orig
     pid = _batch().f.out_p[..., -1]
     return lap, pid
 
