@@ -88,6 +88,43 @@ class TrainStep:
         pick = torch.rand(fwd.shape[0], device=fwd.device) < self.rc.mask_conf.get("p_forward", 0.5)
         return torch.where(pick.unsqueeze(-1), fwd, inv.long())
 
+    def _sample_t(self, ds_t: DataStruct) -> Tensor:
+        if self.rc.t_dist == "sm_norm":
+            t = torch.sigmoid(self.rc.t_dist_scale * torch.randn_like(ds_t.f.d))
+        elif self.rc.t_dist == "sd3":
+            u = torch.rand_like(ds_t.f.d)
+            t = 1 - u + self.rc.t_dist_scale / 3 * ((torch.pi / 2 * u).sin() ** 2 - u)
+        else:
+            raise ValueError(f"unknown t_dist: {self.rc.t_dist!r}")
+        if self.rc.t_dist_shift != 1.0:
+            t = t.clamp(min=0) ** (1.0 / self.rc.t_dist_shift)
+        return t
+
+    def _flow_map_loss(
+        self, loss: Tensor, base: Tensor, ds_t: DataStruct, pdgid_idx: Tensor,
+    ) -> Tensor:
+        fac = self.rc.one_step_euler_fac
+        if fac <= 0:
+            return loss
+        every = self.rc.one_step_euler_every
+        lvf = None
+        if hasattr(self, "lv_flow"):
+            lvf = self.lv_flow.clamp(min=self.rc.uncert_min).squeeze()
+            loss = loss + fac * lvf
+        if self.training and self.global_step % every != 0:
+            return loss
+
+        sc = one_step_euler_loss(self, base, ds_t, pdgid_idx)
+        w = fac * (every if self.training else 1)
+        if lvf is not None:
+            w = w * torch.exp(-lvf)
+        if self.training:
+            fm_logs = {"loss/one_step_euler": sc.detach()}
+            if lvf is not None:
+                fm_logs["uncert/var_flow"] = lvf.detach().exp()
+            self.log_dict(fm_logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
+        return loss + w * sc
+
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
         with torch.no_grad():
             ds_t = DataStruct(ds_t.f.full, self._sample_mask(ds_t), ds_t.am.full)
@@ -99,15 +136,7 @@ class TrainStep:
                 ds_t = DataStruct(self._canon_dirs(ds_t.f.full, face, fwd), ds_t.m.full, ds_t.am.full)
             base      = self.gen_base_wrapper(ds_t)
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
-            if self.rc.t_dist == "sm_norm":
-                t = torch.sigmoid(self.rc.t_dist_scale * torch.randn_like(ds_t.f.d))
-            elif self.rc.t_dist == "sd3":
-                u = torch.rand_like(ds_t.f.d)
-                t = 1 - u + self.rc.t_dist_scale / 3 * ((torch.pi / 2 * u).sin() ** 2 - u)
-            else:
-                raise ValueError(f"unknown t_dist: {self.rc.t_dist!r}")
-            if self.rc.t_dist_shift != 1.0:
-                t = t.clamp(min=0) ** (1.0 / self.rc.t_dist_shift)
+            t = self._sample_t(ds_t)
             if (
                 self.reflow_teacher is not None and self.training
                 and self.global_step % self.rc.reflow_every == 0
@@ -130,26 +159,7 @@ class TrainStep:
         if logs:
             self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
 
-        every = self.rc.one_step_euler_every
-        fac   = self.rc.one_step_euler_fac
-        lvf   = None
-        if fac > 0 and hasattr(self, "lv_flow"):
-            # Barrier every step, data term only when the gate fires: the
-            # expectations still meet at exp(lv_flow) = E[L_flow], and lv_flow
-            # never leaves the graph (DDP find_unused_parameters=False).
-            lvf  = self.lv_flow.clamp(min=self.rc.uncert_min).squeeze()
-            loss = loss + fac * lvf
-        if fac > 0 and (not self.training or self.global_step % every == 0):
-            sc = one_step_euler_loss(self, base, ds_t, pdgid_idx)
-            w = fac * (every if self.training else 1)
-            if lvf is not None:
-                w = w * torch.exp(-lvf)
-            if self.training:
-                logs = {"loss/one_step_euler": sc.detach()}
-                if lvf is not None:
-                    logs["uncert/var_flow"] = lvf.detach().exp()
-                self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
-            loss = loss + w * sc
+        loss = self._flow_map_loss(loss, base, ds_t, pdgid_idx)
 
         if (ot := self._base_dist_loss) is not None:
             loss = loss + self.rc.base_dist_loss * ot

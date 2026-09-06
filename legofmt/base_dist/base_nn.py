@@ -105,6 +105,69 @@ class BaseDist:
         return (out[..., 0:1].exp(), out[..., 1:2], out[..., 2:3].exp(),
                 out[..., 3:4].exp().clamp_min(1e-3))  # kap: divisor in sample()
 
+    def _base_moment_loss(self, ds_t, fwd, s, mu, sig, kap) -> Tensor:
+        z  = 2 ** 0.5 * torch.erfinv(torch.linspace(
+            -0.995, 0.995, 100, device=s.device))  # N(0,1) quantile nodes
+        v  = (ds_t.am.out_p & fwd.unsqueeze(-1)).float()
+        n  = v.sum(-1).clamp(min=1)
+        ev = (v.sum(-1) > 0).float()
+
+        u_b = 1 - (z.abs() * s).tanh().mean(-1)
+        u_t = (ds_t.f.out_cc[..., 0] * v).sum(-1) / n
+        l_scale = ((u_b - u_t) ** 2 * ev).sum() / ev.sum().clamp(min=1)
+
+        ed_t = ds_t.f.edep
+        w    = fwd.float() * (ed_t > 0)
+        ly   = torch.logit((ed_t / self.gen_base.e_dep_max).clamp(1e-4, 1 - 1e-4))
+        mu1, sig1 = mu.squeeze(-1), sig.squeeze(-1)
+        l_edep = ((sig1.log() + (ly - mu1) ** 2 / (2 * sig1 ** 2))
+                  * w).sum() / w.sum().clamp(min=1)
+
+        if not self.gen_base.tanh_theta:
+            return l_scale + l_edep
+
+        th_b = (z.abs() / kap).tanh().mean(-1)
+        u_i  = nn.functional.normalize(ds_t.f.in_cc[..., 0, 1:4], dim=-1).unsqueeze(1)
+        p_i  = nn.functional.normalize(ds_t.f.in_cc[..., 0, 4:7], dim=-1).unsqueeze(1)
+        a_m  = (ds_t.f.out_cc[..., 1:4] * u_i).sum(-1).clamp(-1, 1).acos()
+        a_p  = (ds_t.f.out_cc[..., 4:7] * p_i).sum(-1).clamp(-1, 1).acos()
+        th_t = (((a_m + a_p) / 2) * v).sum(-1) / n / torch.pi
+        l_kappa = ((th_b - th_t) ** 2 * ev).sum() / ev.sum().clamp(min=1)
+        return l_scale + l_edep + l_kappa
+
+    def _fit_base_head(self, ds_t, fwd) -> None:
+        learn = self.model.training and self.base_head[-1].weight.requires_grad
+        with torch.set_grad_enabled(learn):
+            s, mu, sig, kap = self.base_head_params(ds_t)
+            if learn:
+                self._base_dist_loss = self._base_moment_loss(ds_t, fwd, s, mu, sig, kap)
+        self.gen_base.sm_scale = s.detach().unsqueeze(-1)
+        self.gen_base.edep_mu  = mu.detach()
+        self.gen_base.edep_sig = sig.detach()
+        self.gen_base.kappa    = kap.detach()
+
+    def _ot_couple(self, base: Tensor, ds_t, data: Tensor) -> Tensor:
+        if slap is None:
+            raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
+        base = base.where(ds_t.am.full.unsqueeze(-1), data)
+        pid  = ds_t.f.out_p[..., -1]
+        blocked = (
+            ds_t.am.out_p.unsqueeze(-1).logical_xor(ds_t.am.out_p.unsqueeze(-2))
+            | (pid.unsqueeze(-1) != pid.unsqueeze(-2))
+        )
+        out = _F(base).out_p
+        man = self.rc.manifold
+        tgt = ds_t.f.out_cc.unsqueeze(-2).split(man.ambient_dims, dim=-1)
+        ref = out.unsqueeze(-3).split(man.ambient_dims, dim=-1)
+        cost = sum(
+            ((a * b).sum(-1).clamp(-1 + 1e-6, 1 - 1e-6).acos()
+             if isinstance(mf, Sphere) else (a - b).norm(dim=-1)) ** 2
+            for mf, a, b in zip(man.manifolds, tgt, ref)
+        ) + blocked * 1e6
+        assign = slap(cost, cost.device).long()
+        out[:] = torch.take_along_dim(out, assign.unsqueeze(-1), dim=1)
+        return base
+
     def gen_base_wrapper(self, ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]") -> Tensor:
         if not isinstance(ds_t, DataStruct):
             ds_t = DataStruct(*ds_t)
@@ -113,68 +176,18 @@ class BaseDist:
         m     = ds_t.m.full
         fwd   = m[:, self.rc.n_prefix] == 0  # incoming slot conditions => forward event
         noise = None if fwd.all() else self.gen_base.iso(m.shape, data.device)
-        if fwd.any():
-            if hasattr(self, "base_head"):
-                learn = self.model.training and self.base_head[-1].weight.requires_grad
-                with torch.set_grad_enabled(learn):
-                    s, mu, sig, kap = self.base_head_params(ds_t)
-                    if learn:
-                        z   = 2 ** 0.5 * torch.erfinv(torch.linspace(
-                            -0.995, 0.995, 100, device=s.device))  # N(0,1) quantile nodes
-                        u_b = 1 - (z.abs() * s).tanh().mean(-1)
-                        v   = (ds_t.am.out_p & fwd.unsqueeze(-1)).float()
-                        n   = v.sum(-1).clamp(min=1)
-                        u_t = (ds_t.f.out_cc[..., 0] * v).sum(-1) / n
-                        ev  = (v.sum(-1) > 0).float()
-                        l_scale = ((u_b - u_t) ** 2 * ev).sum() / ev.sum().clamp(min=1)
-                        ed_t = ds_t.f.edep
-                        w    = fwd.float() * (ed_t > 0)
-                        ly   = torch.logit(
-                            (ed_t / self.gen_base.e_dep_max).clamp(1e-4, 1 - 1e-4))
-                        mu1, sig1 = mu.squeeze(-1), sig.squeeze(-1)
-                        l_edep = ((sig1.log() + (ly - mu1) ** 2 / (2 * sig1 ** 2))
-                                  * w).sum() / w.sum().clamp(min=1)
-                        l_kappa = 0.0
-                        if self.gen_base.tanh_theta:
-                            th_b = (z.abs() / kap).tanh().mean(-1)
-                            u_i  = nn.functional.normalize(
-                                ds_t.f.in_cc[..., 0, 1:4], dim=-1).unsqueeze(1)
-                            p_i  = nn.functional.normalize(
-                                ds_t.f.in_cc[..., 0, 4:7], dim=-1).unsqueeze(1)
-                            a_m  = (ds_t.f.out_cc[..., 1:4] * u_i).sum(-1).clamp(-1, 1).acos()
-                            a_p  = (ds_t.f.out_cc[..., 4:7] * p_i).sum(-1).clamp(-1, 1).acos()
-                            th_t = (((a_m + a_p) / 2) * v).sum(-1) / n / torch.pi
-                            l_kappa = ((th_b - th_t) ** 2 * ev).sum() / ev.sum().clamp(min=1)
-                        self._base_dist_loss = l_scale + l_edep + l_kappa
-                self.gen_base.sm_scale = s.detach().unsqueeze(-1)
-                self.gen_base.edep_mu  = mu.detach()
-                self.gen_base.edep_sig = sig.detach()
-                self.gen_base.kappa    = kap.detach()
-            base = torch.cat(
-                (ds_t.f.non_cc, self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc)), dim=1,
-            )
-            if self.rc.ot_coupling and self.model.training:
-                if slap is None:
-                    raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
-                base = base.where(ds_t.am.full.unsqueeze(-1), data)
-                pid = ds_t.f.out_p[..., -1]
-                inf_cond = (
-                    ds_t.am.out_p.unsqueeze(-1).logical_xor(ds_t.am.out_p.unsqueeze(-2))
-                    | (pid.unsqueeze(-1) != pid.unsqueeze(-2))
-                )
-                out = _F(base).out_p
-                man = self.rc.manifold
-                tgt = ds_t.f.out_cc.unsqueeze(-2).split(man.ambient_dims, dim=-1)
-                ref = out.unsqueeze(-3).split(man.ambient_dims, dim=-1)
-                cost = sum(
-                    ((a * b).sum(-1).clamp(-1 + 1e-6, 1 - 1e-6).acos()
-                     if isinstance(mf, Sphere) else (a - b).norm(dim=-1)) ** 2
-                    for mf, a, b in zip(man.manifolds, tgt, ref)
-                ) + inf_cond * 1e6
-                assign = slap(cost, cost.device).long()
-                out[:] = torch.take_along_dim(out, assign.unsqueeze(-1), dim=1)
-            base = self.gen_base.insert_add(base)
-            noise = base if noise is None else torch.where(fwd.view(-1, 1, 1), base, noise)
+        if not fwd.any():
+            return torch.where((m == 1).unsqueeze(-1), noise, data)
+
+        if hasattr(self, "base_head"):
+            self._fit_base_head(ds_t, fwd)
+        base = torch.cat(
+            (ds_t.f.non_cc, self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc)), dim=1,
+        )
+        if self.rc.ot_coupling and self.model.training:
+            base = self._ot_couple(base, ds_t, data)
+        base = self.gen_base.insert_add(base)
+        noise = base if noise is None else torch.where(fwd.view(-1, 1, 1), base, noise)
         return torch.where((m == 1).unsqueeze(-1), noise, data)
 
     def pretrain_base(self, batches, lr: float = 1e-2) -> float:

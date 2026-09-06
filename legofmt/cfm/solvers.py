@@ -35,14 +35,17 @@ class Solvers:
         out = [fn(*chunk) for chunk in zip(*(t.split(split_size, dim) for t in tensors))]
         return torch.cat(out, dim=cat_dim)
 
+    def _to_eval(self) -> None:
+        if self.model.training:
+            self.model.eval()
+            self._opt_eval()
+
     def _prep_solve(
         self, ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]",
     ) -> tuple[DataStruct, Tensor]:
         if not isinstance(ds_t, DataStruct):
             ds_t = DataStruct(*ds_t)
-        if self.model.training:
-            self.model.eval()
-            self._opt_eval()
+        self._to_eval()
         pdgids     = ds_t.f.pdgids
         pdgids_idx = pdgids.int() if self.rc.pdgid_is_idx else self.convert_pdgids(pdgids)
         return ds_t, pdgids_idx
@@ -167,9 +170,7 @@ class Solvers:
 
     @torch.no_grad()
     def forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None) -> tuple:
-        if self.model.training:
-            self.model.eval()
-            self._opt_eval()
+        self._to_eval()
 
         cfg = self.rc.odeint_conf
         if cfg.get("fwd_compile", False) and not (

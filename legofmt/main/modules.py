@@ -63,6 +63,7 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         if head is not None:
             self.base_head = head
             params += [p for p in self.base_head.parameters() if p.requires_grad]
+
         if self.rc.uncert_weighting:
             self.lv = nn.Parameter(torch.zeros(self.rc.uncert_bins * 3))
             params += [self.lv]
