@@ -11,7 +11,7 @@ from legofmt.base_dist.base_nn import (
 from legofmt.base_dist.gen_base import GenerateBase
 
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
-from legofmt.cfm.project_model import ProjectModel
+from legofmt.cfm.project_model import ProjectModel, uncompiled
 from legofmt.cfm.solvers import Solvers
 
 from legofmt.main.train_step import TrainStep
@@ -110,14 +110,14 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         start = self.rc.reflow_start_epoch
         if start <= 0 or self.current_epoch + 1 < start:
             return
-        vf = (self.model._orig_mod if hasattr(self.model, "_orig_mod") else self.model).vf
+        vf = uncompiled(self.model).vf
         if self.reflow_teacher is None:  # self-reflow: teacher = snapshot of the student
             from legofmt.distill.reflow import _teacher_from_state  # avoids import cycle
             teacher = _teacher_from_state(self.rc.config, vf.state_dict())
             object.__setattr__(self, "reflow_teacher", teacher.to(self.device))
         else:  # refresh: teacher = last epoch's student
             t_m = self.reflow_teacher.model
-            (t_m._orig_mod if hasattr(t_m, "_orig_mod") else t_m).vf.load_state_dict(vf.state_dict())
+            uncompiled(t_m).vf.load_state_dict(vf.state_dict())
 
     @torch.no_grad()
     def convert_pdgids(self, pdgids: Tensor) -> Tensor:

@@ -19,6 +19,8 @@ from flow_matching.solver import ODESolver
 
 from legofmt.data.struct import DataStruct, _F
 
+from legofmt.cfm.project_model import is_compiled
+
 from legofmt.mod_comps.config import _amp_dtype
 
 
@@ -171,7 +173,7 @@ class Solvers:
 
         cfg = self.rc.odeint_conf
         if cfg.get("fwd_compile", False) and not (
-            hasattr(self.model, "_orig_mod") or hasattr(self.model.vf, "_orig_mod")
+            is_compiled(self.model) or is_compiled(self.model.vf)
         ):
             self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=False)
 

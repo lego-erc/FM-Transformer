@@ -28,6 +28,7 @@ if log_conf["comet"]:
 
 import lightning as ltng
 import torch
+from legofmt.cfm.project_model import uncompiled
 from legofmt.main.modules import LEGOLtng
 from legofmt.multiplicity.model import MultModel
 
@@ -146,11 +147,11 @@ os.makedirs(ckpt_dir, exist_ok=True)
 
 model._opt_eval()
 if train_model == "fm":
-    vf = model.model._orig_mod.vf if compile_mode == "model" else model.model.vf
+    vf = uncompiled(model.model).vf
     state_dict = vf.state_dict()
 else:
     if compile_mode == "model":
-        model.model = model.model._orig_mod  # keep state_dict keys free of the compile wrapper
+        model.model = uncompiled(model.model)  # keep state_dict keys free of the compile wrapper
     state_dict = model.state_dict()
 
 torch.save(

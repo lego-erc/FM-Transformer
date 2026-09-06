@@ -57,3 +57,12 @@ class ProjectModel(nn.Module):
         v = self.vf(x_att, mask, attn_mask, types, pdgids, t=t, d=d)
         v_proj = self.manifold.proju(x_proj, v)
         return torch.where(attn_mask.unsqueeze(-1), v_proj, v)
+
+
+def uncompiled(module: nn.Module) -> nn.Module:
+    """The module underneath a ``torch.compile`` wrapper, or the module itself."""
+    return getattr(module, "_orig_mod", module)
+
+
+def is_compiled(module: nn.Module) -> bool:
+    return hasattr(module, "_orig_mod")
