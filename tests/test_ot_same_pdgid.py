@@ -1,4 +1,4 @@
-"""``ot_same_pdgid``: restrict the OT coupling to within one particle species.
+"""OT coupling is restricted to within one particle species, always.
 
 The OT cost is species-blind, so the training assignment can hand a slot's
 base draw to a *different* species -- systematically, since the leading
@@ -6,7 +6,7 @@ particle always claims the most compatible draw. The (species, draw) pairs
 that never occur in training then occur constantly at sampling, where there is
 no assignment, and the field acts ~identity there (per-species energy spectra
 collapse toward the species-blind base; verified against abl_1gev_no_ot).
-``ot_same_pdgid: true`` blocks cross-species pairs in the cost the same way
+Cross-species pairs are blocked in the cost the same way
 ``inf_cond`` already blocks valid<->pad pairs.
 """
 
@@ -87,7 +87,7 @@ def _run(model_conf: dict) -> tuple[_BruteLap, torch.Tensor]:
 
 
 def test_cost_blocks_cross_species_pairs() -> None:
-    lap, pid = _run({"ot_same_pdgid": True})
+    lap, pid = _run({})
     cross = pid.unsqueeze(-1) != pid.unsqueeze(-2)
     assert lap.cost is not None, "OT branch never ran"
     assert (lap.cost[cross] >= 1e5).all(), "cross-species pair not blocked"
@@ -95,16 +95,9 @@ def test_cost_blocks_cross_species_pairs() -> None:
 
 
 def test_assignment_stays_within_species() -> None:
-    lap, pid = _run({"ot_same_pdgid": True})
+    lap, pid = _run({})
     B, n, _ = lap.cost.shape
     assign = _BruteLap.__call__(lap, lap.cost, "cpu")
     picked = torch.take_along_dim(pid, assign, dim=1)
     assert torch.equal(picked, pid), f"assignment crossed species:\n{pid}\n{picked}"
 
-
-def test_flag_off_is_unrestricted_and_default() -> None:
-    lap, pid = _run({})
-    cross = pid.unsqueeze(-1) != pid.unsqueeze(-2)
-    assert (lap.cost[cross] < 1e5).all(), "species blocking active with flag off"
-    model = LEGOLtng(_tiny_config())
-    assert model.rc.ot_same_pdgid is False

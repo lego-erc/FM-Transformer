@@ -157,10 +157,11 @@ class BaseDist:
                 if slap is None:
                     raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
                 base = base.where(ds_t.am.full.unsqueeze(-1), data)
-                inf_cond = ds_t.am.out_p.unsqueeze(-1).logical_xor(ds_t.am.out_p.unsqueeze(-2))
-                if self.rc.ot_same_pdgid:
-                    pid = ds_t.f.out_p[..., -1]
-                    inf_cond = inf_cond | (pid.unsqueeze(-1) != pid.unsqueeze(-2))
+                pid = ds_t.f.out_p[..., -1]
+                inf_cond = (
+                    ds_t.am.out_p.unsqueeze(-1).logical_xor(ds_t.am.out_p.unsqueeze(-2))
+                    | (pid.unsqueeze(-1) != pid.unsqueeze(-2))
+                )
                 out = _F(base).out_p
                 man = self.rc.manifold
                 tgt = ds_t.f.out_cc.unsqueeze(-2).split(man.ambient_dims, dim=-1)
