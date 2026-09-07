@@ -12,6 +12,7 @@ from dataclasses import replace
 import torch
 import torch.nn.functional as F
 
+from legofmt.cfm.project_model import is_compiled
 from legofmt.data.struct import _F, DataStruct, set_layout
 from legofmt.geometry.energy_proj import EnergyProjections
 from legofmt.geometry.raytracing_proj import CubeTrace
@@ -37,6 +38,11 @@ class GenerateOut(torch.nn.Module):
 
         mult_conf = torch.load(mult_conf_path, map_location=device, weights_only=False)
         self.gen_mult = MultModel(mult_conf).to(device)
+
+        if mult_conf["config"]["mm_conf"].get("fwd_compile", False) and not is_compiled(
+            self.gen_mult.model
+        ):
+            self.gen_mult.model = torch.compile(self.gen_mult.model, dynamic=False)
 
         self.pdgid_in = mult_conf["config"]["mm_conf"]["ptypes_in"].to(device)
         self.ptypes = mult_conf["config"]["mm_conf"]["ptypes"].to(device)

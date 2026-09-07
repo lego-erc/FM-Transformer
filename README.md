@@ -307,6 +307,7 @@ reproduces exactly, while fresh configs use the library default of 10.
 | `use_abs_pos_emb` | `True` | Forwarded to `ContinuousTransformerWrapper`. Note the `use_` prefix. |
 | `model_args` | `{}` | Forwarded to `x-transformers` `Decoder` (same flag set as the FM encoder). |
 | `opt_conf` | `None` | Same schema as the FM-level `opt_conf` below (resolved by `build_optimizer`). If set, the flat `lr` / `weight_decay` / `warmup_steps` keys above are ignored and a `warnings.warn` is emitted for each. |
+| `fwd_compile` | `False` | Re-apply `torch.compile` to the count Decoder when a saved checkpoint is loaded by `GenerateOut`. `train.py` compiles it during training but unwraps it before saving, so generation otherwise runs eager. Plain compile, not `mode="reduce-overhead"` — the AR loop reuses its KV cache across steps and CUDA-graph capture rejects that. Measured 1.28x on the multiplicity phase at bs 8192; counts bit-identical under a fixed seed. |
 
 ### `opt_conf` — optimizer (FM model)
 
