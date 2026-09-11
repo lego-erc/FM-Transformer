@@ -28,6 +28,7 @@ class DataPrep:
             max_energy = model_conf["max_energy"]
             cond = model_conf.get("cond_scalars", ("Density",))
             self.energy_kin = model_conf.get("energy_kin", True)
+            self.edep_log_min = model_conf.get("edep_log_min")
         else:
             # manifold is only needed by cc_trafo (the dict path); norm_e-only
             # users (MultLoader) legitimately have no manifold to give.
@@ -38,6 +39,7 @@ class DataPrep:
             max_energy = config.get("max_energy")
             cond = config.get("cond_scalars", ("Density",))
             self.energy_kin = config.get("energy_kin", True)
+            self.edep_log_min = config.get("edep_log_min")
         set_layout(cond)
         self.pen = EnergyProjections(cutoff_mev=cutoff_mev, max_energy=max_energy)
         self.ppa = CubeTrace()
@@ -89,8 +91,44 @@ class DataPrep:
         f = f.clone()
         in_cc = _F(f).in_cc
         in_cc[..., 0:1] = self.pen.to_scalar_e(in_cc[..., 0:1])
-        _F(f).edep.div_(self.pen.max_energy)
+        _F(f).edep.copy_(self.norm_edep(_F(f).edep))
         return f, mask, attn_mask
+
+    def norm_edep(self, edep: Tensor) -> Tensor:
+        """MeV -> model scale for the edep row.
+
+        Linear ``edep / max_energy`` by default. With ``edep_log_min`` (MeV) it
+        is logarithmic instead, like every particle energy channel.
+
+        Why: under the linear scale neutron ``n_out == 1`` deposits span
+        1.8e-5 to 3.9e-2 -- 3.3 decades inside 4% of the axis, 40% of it below
+        the ``1e-4`` clamp ``base_nn`` fits the edep prior through -- while the
+        ``-overflow_delta`` atom sits at -0.1, and the flow cannot resolve the
+        two. It is the only population with sub-clamp mass (<=0.8% for every
+        other species/``n_out`` bucket), and the only species whose E_dep the
+        model gets wrong. At ``1e-6`` that population moves to 0.47..0.84.
+
+        Zero maps to zero, so the sentinel is untouched. ``edep_log_min`` also
+        acts as a physical floor: on ``rp_had_060926`` the 44 smallest nonzero
+        deposits in 3.16M are ~1e-25 MeV -- Geant4 float junk, not physics, with
+        nothing between 1e-10 and 1e-6 -- so ``1e-6`` folds exactly those into
+        the atom and keeps every real deposit (min 2.9e-4 MeV -> 0.27).
+        """
+        if not self.edep_log_min:
+            return edep / self.pen.max_energy
+        lo = self.edep_log_min
+        rng = torch.tensor(self.pen.max_energy / lo).log().item()
+        return ((edep / lo).clamp_min(1.0).log() / rng).clamp(0.0, 1.0)
+
+    def denorm_edep(self, edep: Tensor) -> Tensor:
+        """Model scale -> MeV, the inverse of ``norm_edep``. Zero maps to zero
+        either way, so a decoded sentinel stays a zero deposit."""
+        if not self.edep_log_min:
+            return edep * self.pen.max_energy
+        lo = self.edep_log_min
+        rng = torch.tensor(self.pen.max_energy / lo).log().item()
+        return torch.where(edep > 0, lo * (edep.clamp(0.0, 1.0) * rng).exp(),
+                           torch.zeros_like(edep))
 
     @torch.no_grad()
     def format_add(self, batch: tuple) -> Tensor:
