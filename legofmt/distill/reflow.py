@@ -1,3 +1,12 @@
+"""Reflow, and the one-step ``Direct`` variants.
+
+Reflow re-couples the base to a frozen teacher's transport of it; with no
+``reflow_path`` the student snapshots itself as its own teacher each epoch.
+It is gated solely by ``reflow_start_epoch > 0`` -- there is no on/off flag.
+``LEGOLtngDirect`` / ``GenerateOutDirect`` drop time conditioning and predict
+the residual ``target - base`` in a single forward.
+"""
+
 import copy
 import warnings
 from pathlib import Path
@@ -8,7 +17,8 @@ from torch import Tensor, nn
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt.data.struct import DataStruct
 from legofmt.main.generate import GenerateOut
-from legofmt.main.modules import LEGOLtng, ProjectModel
+from legofmt.cfm.project_model import ProjectModel
+from legofmt.main.modules import LEGOLtng
 
 
 def _teacher_from_state(config: dict, state_dict: dict) -> nn.Module:
@@ -64,33 +74,33 @@ class LEGOLtngDirect(LEGOLtng):
         return ProjectModelDirect(
             CFMTrafo_x(**rc.model_args, time_cond=False),
             rc.manifold,
-            cond_cube=rc.cond_cube,
         )
+
+    def _reflow_target(self, ds_t: DataStruct, base: Tensor) -> Tensor:
+        """The teacher's transport of ``base``, or the data target without one."""
+        if self.reflow_teacher is None:
+            return ds_t.f.model_in
+        solve_kwargs = dict(self.rc.reflow_kwargs)
+        if solve_kwargs.get("method", "midpoint") == "midpoint":
+            solve_kwargs.setdefault("time_grid", base.new_tensor([0.0, 1.0]))
+        return self.reflow_teacher.solve(ds_t, x_init=base, **solve_kwargs)
 
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
         with torch.no_grad():
             ds_t = DataStruct(ds_t.f.full, self._sample_mask(ds_t), ds_t.am.full)
             base = self.gen_base_wrapper(ds_t)
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
-            if self.reflow_teacher is not None:
-                solve_kwargs = dict(self.rc.reflow_kwargs)
-                if solve_kwargs.get("method", "midpoint") == "midpoint":
-                    solve_kwargs.setdefault("time_grid", base.new_tensor([0.0, 1.0]))
-                target = self.reflow_teacher.solve(ds_t, x_init=base, **solve_kwargs)
-            else:
-                target = ds_t.f.model_in
+            target = self._reflow_target(ds_t, base)
         pred = self.model(
             base,
             mask=ds_t.m.full, attn_mask=ds_t.am.full,
             types=self.types_embd, pdgids=pdgid_idx,
         )
-        if self.rc.loss_sc_fac > 0:
-            m_gen = (ds_t.m.full == 1).to(pred.dtype)
-            loss_sc = self.loss_fn(pred[..., 0] * m_gen, target[..., 0] * m_gen)
-        else:
-            loss_sc = 0.0
         sq = (pred - target) ** 2
-        return self._reduce_and_log(sq, ds_t, loss_sc)
+        loss, logs = self.reduce_loss(sq, ds_t)
+        if logs:
+            self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
+        return loss
 
     @torch.no_grad()
     def solve(

@@ -1,8 +1,18 @@
+"""Reading prepped shower data: the Dataset objects and the DataLoader factory.
+
+``GetLEGOData`` turns a raw per-particle/per-event dict into the padded
+``(features, mask, attn_mask)`` triple, dropping particles below ``cutoff_mev``
+and events left with too few survivors. ``LEGODataset`` serves an already-prepped
+tensor; ``make_loader`` is the worker plumbing both LightningModules share.
+"""
+
 import torch
 from torch import Tensor
-from torch.utils.data import Dataset
+from torch.utils.data import (
+    BatchSampler, DataLoader, Dataset, RandomSampler, SequentialSampler,
+)
 
-from .struct import DataStruct
+from legofmt.data.struct import DataStruct
 
 
 class GetLEGOData:
@@ -11,12 +21,14 @@ class GetLEGOData:
         cutoff_mev=10.0,
         min_particles=0,
         device="cpu",
+        energy_kin=True,
         **kwargs,
     ):
         self.dev = device
         self.dtype = kwargs.pop("dtype", torch.float32)
         self.min_particles = min_particles
         self.cutoff_mev = cutoff_mev
+        self.energy_kin = energy_kin
 
     def __call__(self, *args, **kwargs):
         return self.dataset_cutoff(*args, **kwargs)
@@ -33,7 +45,8 @@ class GetLEGOData:
         n_events: (int | None) = None,
     ) -> tuple[Tensor, Tensor, Tensor, dict]:
         dataset, data_add = self.dataset_compact(data)
-        mask_valid = dataset[..., 1:4].norm(dim=-1) >= self.cutoff_mev
+        e_valid = dataset[..., 0] if self.energy_kin else dataset[..., 1:4].norm(dim=-1)
+        mask_valid = e_valid >= self.cutoff_mev
         max_valid = mask_valid.sum(dim=-1).max()
         mask_valid_sorted = mask_valid.sort(dim=-1, descending=True).values[:, :max_valid]
         dataset_valid = torch.full_like(dataset[:, :max_valid], torch.nan)
@@ -67,10 +80,12 @@ class LEGODataset(Dataset):
                     "GetLEGOData yields pre-format_add layout that DataStruct misaligns."
                 )
             data = prep(GetLEGOData(**kwargs)(data))
+        elif prep is not None:
+            data = getattr(prep, "norm_e", prep)(data)
         self.data = DataStruct(*data)
 
         frac = kwargs.get("frac")
-        if frac:
+        if frac and frac < 1.0:
             n = int(len(self.data) * frac)
             idxs = torch.randperm(len(self.data), device=self.device)[:n]
             self.data = self.data[idxs]
@@ -80,3 +95,27 @@ class LEGODataset(Dataset):
 
     def __getitem__(self, idx: int | Tensor) -> DataStruct:
         return self.data[idx]
+
+
+def make_loader(dataset, *, bs, shuffle, num_workers=4, batched_sampler=False):
+    """The worker plumbing both LightningModules share.
+
+    ``batched_sampler`` hands the dataset a tensor of indices per call
+    (``batch_size=None``, no default collate), which is how ``LEGODataset`` is
+    read; the plain path is torch's per-item fetch and collate.
+    """
+    common = dict(
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=num_workers > 0,
+        multiprocessing_context="fork" if num_workers > 0 else None,
+    )
+    if batched_sampler:
+        sampler = (RandomSampler if shuffle else SequentialSampler)(dataset)
+        return DataLoader(
+            dataset,
+            sampler=BatchSampler(sampler, bs, drop_last=False),
+            batch_size=None,
+            **common,
+        )
+    return DataLoader(dataset, batch_size=bs, shuffle=shuffle, **common)

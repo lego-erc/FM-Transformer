@@ -1,20 +1,14 @@
+"""Flow-map self-distillation, for few-step sampling.
+
+``one_step_euler_loss`` takes the LightningModule as its first argument. The
+target for step ``d`` is two no-grad half-steps at ``d/2``, averaged through
+``logmap`` rather than Euclidean-ly because the factors are spheres. Its
+bootstrap ladder is anchored at ``d=0`` deliberately -- without that the bottom
+rung supervises nothing.
+"""
+
 import torch
 from torch import Tensor
-
-
-def curvature_loss(lego, x_t: Tensor, t: Tensor, v_out: Tensor, ds_t, pdgid_idx: Tensor) -> Tensor:
-    mask, am = ds_t.m.full, ds_t.am.full
-    gen = (mask == 1).unsqueeze(-1)
-    g   = gen & am.unsqueeze(-1)
-    man = lego.model.manifold
-    eps = lego.rc.curv_eps
-    with torch.no_grad():
-        e   = torch.where(t + eps <= 1.0, eps, -eps)  # probe backward near t=1
-        x_e = torch.where(
-            gen, man.expmap(x_t, e.unsqueeze(-1) * man.proju(x_t, v_out.detach())), x_t)
-    v_e = lego.model(x_e, t + e, mask=mask, attn_mask=am, types=lego.types_embd, pdgids=pdgid_idx)
-    sq  = man.proju(x_t, v_e - v_out) ** 2            # probe sign cancels: (+-eps)^2 = eps^2
-    return (sq * g).sum() / (g.sum().clamp(min=1) * v_out.shape[-1] * eps ** 2)
 
 
 def one_step_euler_loss(lego, base: Tensor, ds_t, pdgid_idx: Tensor) -> Tensor:

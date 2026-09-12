@@ -28,6 +28,7 @@ if log_conf["comet"]:
 
 import lightning as ltng
 import torch
+from legofmt.cfm.project_model import uncompiled
 from legofmt.main.modules import LEGOLtng
 from legofmt.multiplicity.model import MultModel
 
@@ -35,8 +36,14 @@ d_dtype = getattr(torch, run["dtype"])
 torch.set_default_dtype(d_dtype)
 torch.set_float32_matmul_precision(run["matmul_precision"])
 
+if run.get("compile"):
+    import torch._dynamo
+
+    torch._dynamo.config.recompile_limit = 32
+
 epochs = run["epochs"]
 devices = run["devices"]
+nodes = run.get("nodes", 1)
 name = run["name"]
 
 # Coerce the YAML-native values into what the models expect.
@@ -52,7 +59,7 @@ config["dl_conf"]["lds_args"]["data"] = dpath_prefix + config["dl_conf"]["lds_ar
 scheduler = config["opt_conf"].get("scheduler")
 if scheduler is not None and "total_steps" not in scheduler:
     bs = config["dl_conf"]["bs"]
-    scheduler["total_steps"] = epochs * int(run["dataset_size"] / (bs * len(devices)))
+    scheduler["total_steps"] = epochs * int(run["dataset_size"] / (bs * len(devices) * nodes))
 
 if log_conf["comet"]:
     from lightning.pytorch.loggers import CometLogger
@@ -64,6 +71,10 @@ if log_conf["comet"]:
         mode="get_or_create",
         name=name,
     )
+elif log_conf.get("csv_dir"):
+    from lightning.pytorch.loggers import CSVLogger
+
+    logger = CSVLogger(save_dir=log_conf["csv_dir"], name=name)
 else:
     logger = False
 
@@ -71,7 +82,7 @@ config["additional"]["epochs"] = epochs
 config["additional"]["precision"] = (
     str(run["precision"]) + ", " + torch.get_float32_matmul_precision()
 )
-config["additional"]["comet_exp_key"] = logger._experiment_key if logger else None
+config["additional"]["comet_exp_key"] = getattr(logger, "_experiment_key", None) if logger else None
 try:
     git_rev = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
@@ -82,12 +93,14 @@ config["additional"]["git_rev"] = git_rev
 
 if logger:
     logger.log_hyperparams(config)
+if log_conf["comet"]:
     logger.experiment.log_asset(str(cfg_path), file_name=cfg_path.name)
 
 trainer = ltng.Trainer(
     max_epochs=epochs,
     accelerator="gpu",
     devices=devices,
+    num_nodes=nodes,
     precision=run["precision"],
     strategy=run["strategy"],
     logger=logger,
@@ -110,7 +123,7 @@ if resume_from:
     incompat = target.load_state_dict(prev["state_dict"], strict=False)
     assert not incompat.unexpected_keys, f"resume_from arch mismatch: {incompat}"
 
-if train_model == "fm" and compile_mode == "model":
+if compile_mode == "model":  # fm: the ProjectModel; mult: the count Decoder wrapper
     model.model = torch.compile(model.model, dynamic=False)
 
 trainer.fit(model=model)
@@ -134,9 +147,11 @@ os.makedirs(ckpt_dir, exist_ok=True)
 
 model._opt_eval()
 if train_model == "fm":
-    vf = model.model._orig_mod.vf if compile_mode == "model" else model.model.vf
+    vf = uncompiled(model.model).vf
     state_dict = vf.state_dict()
 else:
+    if compile_mode == "model":
+        model.model = uncompiled(model.model)  # keep state_dict keys free of the compile wrapper
     state_dict = model.state_dict()
 
 torch.save(
