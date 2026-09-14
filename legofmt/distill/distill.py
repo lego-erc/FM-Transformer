@@ -12,6 +12,11 @@ from torch import Tensor
 
 
 def one_step_euler_loss(lego, base: Tensor, ds_t, pdgid_idx: Tensor) -> Tensor:
+    with torch.autocast(base.device.type, enabled=False):
+        return _one_step_euler_loss_fp32(lego, base.float(), ds_t, pdgid_idx)
+
+
+def _one_step_euler_loss_fp32(lego, base: Tensor, ds_t, pdgid_idx: Tensor) -> Tensor:
     mask, am = ds_t.m.full, ds_t.am.full
     gen = (mask == 1).unsqueeze(-1)
     g   = gen & am.unsqueeze(-1)
@@ -23,7 +28,7 @@ def one_step_euler_loss(lego, base: Tensor, ds_t, pdgid_idx: Tensor) -> Tensor:
         step = 2.0 ** -(torch.randint(1, sections + 1,
                                       (base.shape[0], 1), device=base.device) - 1).to(base.dtype)
         t0   = (torch.rand_like(step) * (1.0 / step).round()).floor() * step  # grid-aligned start
-        x0   = lego.ps.sample(base, ds_t.f.model_in, t0.squeeze(-1)).x_t
+        x0   = lego.ps.sample(base, ds_t.f.model_in.float(), t0.squeeze(-1)).x_t
         half = step / 2
         h    = half.unsqueeze(-1)
         d_t  = torch.where(half >= 2.0 ** -(sections - 1), half, torch.zeros_like(half))

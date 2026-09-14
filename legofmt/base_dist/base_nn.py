@@ -119,7 +119,7 @@ class BaseDist:
 
         ed_t = ds_t.f.edep
         w    = fwd.float() * (ed_t > 0)
-        ly   = torch.logit((ed_t / self.gen_base.e_dep_max).clamp(1e-4, 1 - 1e-4))
+        ly   = torch.logit((ed_t.float() / self.gen_base.e_dep_max).clamp(1e-4, 1 - 1e-4))
         mu1, sig1 = mu.squeeze(-1), sig.squeeze(-1)
         l_edep = ((sig1.log() + (ly - mu1) ** 2 / (2 * sig1 ** 2))
                   * w).sum() / w.sum().clamp(min=1)
@@ -161,8 +161,8 @@ class BaseDist:
         tgt = ds_t.f.out_cc.unsqueeze(-2).split(man.ambient_dims, dim=-1)
         ref = out.unsqueeze(-3).split(man.ambient_dims, dim=-1)
         cost = sum(
-            ((a * b).sum(-1).clamp(-1 + 1e-6, 1 - 1e-6).acos()
-             if isinstance(mf, Sphere) else (a - b).norm(dim=-1)) ** 2
+            (((a * b).sum(-1).float().clamp(-1 + 1e-6, 1 - 1e-6).acos()
+              if isinstance(mf, Sphere) else (a - b).norm(dim=-1).float()) ** 2)
             for mf, a, b in zip(man.manifolds, tgt, ref)
         ) + blocked * 1e6
         assign = slap(cost, cost.device).long()
