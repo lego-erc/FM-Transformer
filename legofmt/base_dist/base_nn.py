@@ -119,7 +119,11 @@ class BaseDist:
 
         ed_t = ds_t.f.edep
         w    = fwd.float() * (ed_t > 0)
-        ly   = torch.logit((ed_t / self.gen_base.e_dep_max).clamp(1e-4, 1 - 1e-4))
+        # .float() is load-bearing: in bf16 `1 - 1e-4` rounds to exactly 1.0
+        # (resolution near 1 is 2**-8), so the clamp stops bounding and
+        # logit(1.0) is +inf. Safe today only because ed_t comes from fp32 data
+        # -- autocast casts matmuls, not elementwise math -- so pin it.
+        ly   = torch.logit((ed_t.float() / self.gen_base.e_dep_max).clamp(1e-4, 1 - 1e-4))
         mu1, sig1 = mu.squeeze(-1), sig.squeeze(-1)
         l_edep = ((sig1.log() + (ly - mu1) ** 2 / (2 * sig1 ** 2))
                   * w).sum() / w.sum().clamp(min=1)
@@ -160,9 +164,13 @@ class BaseDist:
         man = self.rc.manifold
         tgt = ds_t.f.out_cc.unsqueeze(-2).split(man.ambient_dims, dim=-1)
         ref = out.unsqueeze(-3).split(man.ambient_dims, dim=-1)
+        # .float() is load-bearing on the sphere branch: in bf16 `1 - 1e-6`
+        # rounds to exactly 1.0, so the clamp silently stops guarding acos at
+        # the near-parallel end where it is worst conditioned. `ref` derives
+        # from base_head's Linear layers, which autocast DOES cast.
         cost = sum(
-            ((a * b).sum(-1).clamp(-1 + 1e-6, 1 - 1e-6).acos()
-             if isinstance(mf, Sphere) else (a - b).norm(dim=-1)) ** 2
+            (((a * b).sum(-1).float().clamp(-1 + 1e-6, 1 - 1e-6).acos()
+              if isinstance(mf, Sphere) else (a - b).norm(dim=-1).float()) ** 2)
             for mf, a, b in zip(man.manifolds, tgt, ref)
         ) + blocked * 1e6
         assign = slap(cost, cost.device).long()
