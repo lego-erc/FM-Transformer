@@ -13,7 +13,7 @@ log energy loss*
 pins ``u = 1`` (fully stopped), while ``u -> 0`` (barely interacting) is where
 ``u`` degenerates. For a small loss ``log(E_in/E_out) ~ dE/E_in``, so ``u`` goes
 *linear* in the fractional loss and crushes the entire low end against zero.
-``out_log_min`` restores constant relative resolution there; see
+``e_log_min`` restores constant relative resolution there; see
 :meth:`norm_out`.
 """
 
@@ -28,16 +28,16 @@ class EnergyProjections:
         norm_type: str | bool = "in_frac",
         cutoff_mev: float = 10.0,
         max_energy: float | None = None,
-        out_log_min: float | None = None,
+        e_log_min: float | None = None,
     ):
         self.func = getattr(self, norm_type) if isinstance(norm_type, str) else self.identity
         self.cutoff = cutoff_mev
         self.max_energy = max_energy
         self.log_range = torch.tensor(max_energy / cutoff_mev).log().item() if max_energy else None
         # Smallest resolvable fractional log energy loss; None keeps the raw linear u.
-        self.out_log_min = out_log_min or None
-        self.out_log_range = (
-            torch.tensor(1.0 / self.out_log_min).log().item() if self.out_log_min else None
+        self.e_log_min = e_log_min or None
+        self.e_log_range = (
+            torch.tensor(1.0 / self.e_log_min).log().item() if self.e_log_min else None
         )
 
     def __call__(self, *args, **kwargs):
@@ -55,33 +55,33 @@ class EnergyProjections:
         return dir_ * norm
 
     def norm_out(self, u: Tensor) -> Tensor:
-        """Fractional log energy loss -> model scalar. Identity without ``out_log_min``.
+        """Fractional log energy loss -> model scalar. Identity without ``e_log_min``.
 
-        With it, ``u`` is respread logarithmically over ``[out_log_min, 1]``, so a
+        With it, ``u`` is respread logarithmically over ``[e_log_min, 1]``, so a
         fixed channel error becomes a fixed *relative* error in the loss instead of
         a fixed absolute one -- the move ``DataPrep.norm_edep`` makes for E_dep, for
-        the same reason. ``u <= out_log_min`` folds onto 0 and joins the genuine
+        the same reason. ``u <= e_log_min`` folds onto 0 and joins the genuine
         no-interaction atom that neutrals produce (which
         ``_shift_overflow_targets`` then shifts to ``-overflow_delta``).
 
         Choosing it: charged particles never reach 0 -- their smallest real loss is
         u ~ 2.2e-4 in copper, 1.2e-3 in argon -- but neutrons pass through and their
-        small-loss tail reaches u ~ 8e-7, so ``out_log_min`` must sit below that or
+        small-loss tail reaches u ~ 8e-7, so ``e_log_min`` must sit below that or
         it re-clamps them, the exact regression ``edep_log_min`` was added to undo.
         1e-7 is safe; 1e-5 is not.
         """
-        if not self.out_log_min:
+        if not self.e_log_min:
             return u
-        return ((u / self.out_log_min).clamp_min(1.0).log()
-                / self.out_log_range).clamp(0.0, 1.0)
+        return ((u / self.e_log_min).clamp_min(1.0).log()
+                / self.e_log_range).clamp(0.0, 1.0)
 
     def denorm_out(self, v: Tensor) -> Tensor:
         """Inverse of :meth:`norm_out`. Zero maps to zero either way, so a decoded
         sentinel stays a no-loss particle."""
-        if not self.out_log_min:
+        if not self.e_log_min:
             return v
         return torch.where(
-            v > 0, self.out_log_min * (v * self.out_log_range).exp(), torch.zeros_like(v),
+            v > 0, self.e_log_min * (v * self.e_log_range).exp(), torch.zeros_like(v),
         )
 
     def to_mev(self, e_model: Tensor, e_in: Tensor) -> Tensor:

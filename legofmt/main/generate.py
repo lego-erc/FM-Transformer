@@ -67,7 +67,7 @@ class GenerateOut(torch.nn.Module):
         self.proj_ray = CubeTrace()
         self.pen = EnergyProjections(
             cutoff_mev=self.model.rc.cutoff_mev, max_energy=self.model.rc.max_energy,
-            out_log_min=self.model.rc.out_log_min,
+            e_log_min=self.model.rc.e_log_min,
         )
 
     def __call__(self, cond: torch.Tensor, prepped: bool = False):

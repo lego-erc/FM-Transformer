@@ -21,7 +21,7 @@ U = torch.tensor([0.0, 1e-8, 8e-7, 2.2e-4, 1.2e-3, 0.5, 1.0])
 
 
 def _pen(lo):
-    return EnergyProjections(cutoff_mev=10.0, max_energy=1000.0, out_log_min=lo)
+    return EnergyProjections(cutoff_mev=10.0, max_energy=1000.0, e_log_min=lo)
 
 
 def test_default_is_the_raw_linear_scale():
@@ -66,7 +66,7 @@ def test_to_mev_inverts_cc_trafo_end_to_end():
     cc[..., 0] = 1.0                                     # unit momentum along x
     cc[..., 3] = 1.0                                     # unit position
     for lo in (None, LO):
-        prep = DataPrep({**CFG, "out_log_min": lo})
+        prep = DataPrep({**CFG, "e_log_min": lo})
         v = prep.cc_trafo(cc.clone(), e_kin=mev)[0, 1:, 0]
         e_in_sc = prep.pen.to_scalar_e(torch.tensor([e_in]))
         assert torch.allclose(prep.pen.to_mev(v, e_in_sc), e_out, rtol=1e-4)

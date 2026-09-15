@@ -29,7 +29,7 @@ class DataPrep:
             cond = model_conf.get("cond_scalars", ("Density",))
             self.energy_kin = model_conf.get("energy_kin", True)
             self.edep_log_min = model_conf.get("edep_log_min")
-            out_log_min = model_conf.get("out_log_min")
+            e_log_min = model_conf.get("e_log_min")
         else:
             # manifold is only needed by cc_trafo (the dict path); norm_e-only
             # users (MultLoader) legitimately have no manifold to give.
@@ -41,10 +41,10 @@ class DataPrep:
             cond = config.get("cond_scalars", ("Density",))
             self.energy_kin = config.get("energy_kin", True)
             self.edep_log_min = config.get("edep_log_min")
-            out_log_min = config.get("out_log_min")
+            e_log_min = config.get("e_log_min")
         set_layout(cond)
         self.pen = EnergyProjections(
-            cutoff_mev=cutoff_mev, max_energy=max_energy, out_log_min=out_log_min,
+            cutoff_mev=cutoff_mev, max_energy=max_energy, e_log_min=e_log_min,
         )
         self.ppa = CubeTrace()
 

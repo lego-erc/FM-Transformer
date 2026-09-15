@@ -74,7 +74,7 @@ class ResolvedLEGOConfig:
 
     max_energy: float
     cutoff_mev: float
-    out_log_min: float | None
+    e_log_min: float | None
     amp_dtype: torch.dtype | None
 
     dl_conf: dict
@@ -234,7 +234,7 @@ def _build_resolved(
         n_prefix=n_prefix,
         mask_conf=model_conf.get("mask_conf", {}),
         max_energy=model_conf["max_energy"],
-        out_log_min=model_conf.get("out_log_min"),
+        e_log_min=model_conf.get("e_log_min"),
         cutoff_mev=config["dl_conf"]["lds_args"]["cutoff_mev"],
         amp_dtype=_amp_dtype((config.get("additional") or {}).get("precision")),
         dl_conf=config["dl_conf"],
