@@ -61,9 +61,10 @@ def build_base_head(rc, gen_base) -> nn.Sequential | None:
             )
         return None
 
-    head = nn.Sequential(
-        nn.Linear(4 + len(rc.pdgids_template), 16), nn.Mish(),
-        nn.Linear(16, 4))
+    n_in = 4 + len(rc.pdgids_template)
+    if bc.get("base_head_nout", False):
+        n_in += len(rc.pdgids_template) + 2   # log1p(n_out) + log1p(per-pdgid counts)
+    head = nn.Sequential(nn.Linear(n_in, 16), nn.Mish(), nn.Linear(16, 4))
     with torch.no_grad():
         head[-1].weight.zero_()
         head[-1].bias.copy_(torch.tensor(
@@ -71,6 +72,10 @@ def build_base_head(rc, gen_base) -> nn.Sequential | None:
              float(gen_base.kappa)]).log())
         if hs is None or hs.keys() != head.state_dict().keys():
             return head  # fresh head: zero-init output layer, priors in the bias
+        if hs["0.weight"].shape != head[0].weight.shape:
+            # base_head_nout was toggled since the head was saved; the input
+            # layer is a different function. Re-pretrain rather than mis-load.
+            return head
         if hs["2.weight"].shape == head[-1].weight.shape:
             head.load_state_dict(hs)
         else:
@@ -100,11 +105,33 @@ class BaseDist:
         tf      = torch.where(ok_u, (u.sign() - p) / u, torch.full_like(u, 4.0))
         tb      = torch.where(ok_u, (p + u.sign()) / u, torch.full_like(u, 4.0))
         chord   = ((tf.amin(-1) + tb.amin(-1)).clamp(0.0, 3.5) / 2).unsqueeze(-1)
-        x       = torch.cat((ds_t.f.in_cc[..., 0], species, chord,
-                             t.log().unsqueeze(-1)), dim=-1)
-        out     = self.base_head(x)
+        feats   = [ds_t.f.in_cc[..., 0], species, chord, t.log().unsqueeze(-1)]
+        if (self.rc.config.get("base_conf") or {}).get("base_head_nout", False):
+            feats += self._out_set_feats(ds_t)
+        out     = self.base_head(torch.cat(feats, dim=-1))
         return (out[..., 0:1].exp(), out[..., 1:2], out[..., 2:3].exp(),
                 out[..., 3:4].exp().clamp_min(1e-3))  # kap: divisor in sample()
+
+    def _out_set_feats(self, ds_t: DataStruct) -> list[Tensor]:
+        """Outgoing multiplicity and per-pdgid composition -- both already fixed
+        before the flow runs, since ``gen_batch`` sizes the slots from the mult
+        model, so this conditioning is available identically in training and
+        generation.
+
+        E_dep is bimodal in exactly this variable. Measured on rp_had_060926 at
+        the eval point (argon, rho ~ 10, 100 mm, proton T > 950 MeV, chord ~ 1):
+        the n_out == 1 pass-through branch is 46% of events with a relative
+        width (q90-q10)/median of 0.121, against 1.816 for the mixture -- a 15x
+        spread the head could not represent while fitting one logit-normal to
+        both modes.
+        """
+        valid = ds_t.am.out_p
+        pid   = ds_t.f.out_p[..., -1]
+        idx   = pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)
+        n_cls = len(self.pdgids_template) + 1          # class 0 is pad / unknown
+        oh    = nn.functional.one_hot(idx.long().clamp(0, n_cls - 1), n_cls)
+        cnt   = (oh * valid.unsqueeze(-1)).sum(-2).float()
+        return [valid.sum(-1, keepdim=True).float().log1p(), cnt.log1p()]
 
     def _base_moment_loss(self, ds_t, fwd, s, mu, sig, kap) -> Tensor:
         z  = 2 ** 0.5 * torch.erfinv(torch.linspace(
