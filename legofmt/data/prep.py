@@ -29,6 +29,7 @@ class DataPrep:
             cond = model_conf.get("cond_scalars", ("Density",))
             self.energy_kin = model_conf.get("energy_kin", True)
             self.edep_log_min = model_conf.get("edep_log_min")
+            out_log_min = model_conf.get("out_log_min")
         else:
             # manifold is only needed by cc_trafo (the dict path); norm_e-only
             # users (MultLoader) legitimately have no manifold to give.
@@ -40,8 +41,11 @@ class DataPrep:
             cond = config.get("cond_scalars", ("Density",))
             self.energy_kin = config.get("energy_kin", True)
             self.edep_log_min = config.get("edep_log_min")
+            out_log_min = config.get("out_log_min")
         set_layout(cond)
-        self.pen = EnergyProjections(cutoff_mev=cutoff_mev, max_energy=max_energy)
+        self.pen = EnergyProjections(
+            cutoff_mev=cutoff_mev, max_energy=max_energy, out_log_min=out_log_min,
+        )
         self.ppa = CubeTrace()
 
     def __call__(self, batch: tuple) -> Tensor:
@@ -66,7 +70,9 @@ class DataPrep:
             else mom.norm(dim=-1, keepdim=True)
         lg = (e_mev.clamp_min(1e-8) / self.pen.cutoff).log()
         e = torch.cat(
-            (e_mev[:, :1], 1 - (lg[:, 1:] / lg[:, :1].clamp_min(1e-6)).clamp(0, 1)), dim=1,
+            (e_mev[:, :1],
+             self.pen.norm_out(1 - (lg[:, 1:] / lg[:, :1].clamp_min(1e-6)).clamp(0, 1))),
+            dim=1,
         )
         if self.proj_ray:
             ray = torch.cat((dir_[:, 0], pos[:, 0]), dim=-1)
