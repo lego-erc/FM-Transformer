@@ -17,6 +17,8 @@ _COND_SCALARS: tuple[str, ...] = ("Density",)
 
 
 def set_layout(cond_scalars) -> None:
+    """Set the process-global slot layout. Called by resolve_*_config and
+    DataPrep, so constructing a model or a loader re-points every _F accessor."""
     global _COND_SCALARS
     _COND_SCALARS = tuple(cond_scalars)
 
@@ -30,6 +32,10 @@ def n_prefix() -> int:
 
 
 def cond_slot(name: str) -> int:
+    """Row index of a conditioning scalar: cond_scalars[0] is row 0, the rest
+    are shifted by one because row 1 is the generated E_dep."""
+    if name not in _COND_SCALARS:
+        raise ValueError(f"{name!r} not in cond_scalars {_COND_SCALARS}")
     i = _COND_SCALARS.index(name)
     return 0 if i == 0 else i + 1
 
@@ -45,7 +51,7 @@ class _F:
     def edep(self) -> Tensor: return self.full[..., 1, 0]
     def cond(self, name: str) -> Tensor: return self.full[..., cond_slot(name), 0]
     @property
-    def pdgids(self) -> Tensor: return self.full[..., -1:]
+    def pdgids(self) -> Tensor: return self.full[..., -1:]  # negative index: valid on the 8-column layout only, not on a 7-column solve output
     @property
     def non_p(self) -> Tensor: return self.full[..., :n_prefix(), :]
     @property
@@ -67,7 +73,7 @@ class _F:
 class _M:
 
     def __init__(self, m: Tensor) -> None:
-        self.full = m.squeeze(-1) if m.ndim > 2 else m
+        self.full = m.squeeze(-1) if m.ndim > 2 else m  # accepts (B, L) or (B, L, 1); callers mix the two
     @property
     def out_p(self) -> Tensor: return self.full[..., n_prefix() + 1:]
 

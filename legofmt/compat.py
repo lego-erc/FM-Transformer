@@ -113,7 +113,8 @@ def legacy_param_rename(state_dict, prefix, *_) -> None:
 
 def load_legacy_base_head(head: nn.Sequential, hs: dict) -> None:
     """A ``base_head`` saved with fewer outputs than the current one: copy the
-    rows that exist and leave the rest at their init values."""
+    rows that exist and leave the rest at their init values. Call under
+    torch.no_grad(): it copies into parameter slices in place."""
     n_old = hs["2.weight"].shape[0]
     head[0].load_state_dict({"weight": hs["0.weight"], "bias": hs["0.bias"]})
     head[-1].weight[:n_old].copy_(hs["2.weight"])
@@ -133,6 +134,7 @@ XT_QK_NORM_FIX = Version("2.25.5")
 
 
 def qk_norm_scale_compat(model_args: dict, additional: dict) -> None:
+    """Cube attn_qk_norm_scale for checkpoints stamped before the x-transformers 2.25.5 fix."""
     saved = additional.get("x_transformers_version")
     old_ckpt = saved is None or Version(saved) < XT_QK_NORM_FIX
     if model_args.get("attn_qk_norm") and old_ckpt and XT_VERSION >= XT_QK_NORM_FIX:
@@ -152,6 +154,7 @@ FP32_ATTN_QK_SCALE = 100
 
 
 def needs_fp32_attention(model_args: dict) -> bool:
+    """True when attn_qk_norm_scale > 100 (pre-2.25.5 checkpoints), which need the fp32 attention kernel."""
     return bool(model_args.get("attn_qk_norm")) and model_args.get("attn_qk_norm_scale", 10) > FP32_ATTN_QK_SCALE
 
 
@@ -181,6 +184,7 @@ MANIFOLD_EVAL_NS: dict[str, Any] = {
 
 
 def build_manifold_from_string(spec: str) -> ProductManifold:
+    """Eval the legacy string manifold spec, with a DeprecationWarning."""
     warnings.warn(
         "String manifold specs are deprecated; use a list of factor dicts "
         "([{'name': 'euclidean', 'dim': 3}, ...]).",

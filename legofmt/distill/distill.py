@@ -12,6 +12,8 @@ from torch import Tensor
 
 
 def one_step_euler_loss(lego, base: Tensor, ds_t, pdgid_idx: Tensor) -> Tensor:
+    """fp32 wrapper: the loss is ~5e-5 and bf16 autocast inflates it ~390x, so
+    the ladder runs outside autocast."""
     with torch.autocast(base.device.type, enabled=False):
         return _one_step_euler_loss_fp32(lego, base.float(), ds_t, pdgid_idx)
 
@@ -31,7 +33,7 @@ def _one_step_euler_loss_fp32(lego, base: Tensor, ds_t, pdgid_idx: Tensor) -> Te
         x0   = lego.ps.sample(base, ds_t.f.model_in.float(), t0.squeeze(-1)).x_t
         half = step / 2
         h    = half.unsqueeze(-1)
-        d_t  = torch.where(half >= 2.0 ** -(sections - 1), half, torch.zeros_like(half))
+        d_t  = torch.where(half >= 2.0 ** -(sections - 1), half, torch.zeros_like(half))  # smallest step's teacher uses d=0, anchoring the bootstrap ladder
         s1    = lego.model(x0, t0, d=d_t, **ckw)
         x_mid = torch.where(gen, man.expmap(x0, h * s1), x0)
         s2    = lego.model(x_mid, t0 + half, d=d_t, **ckw)

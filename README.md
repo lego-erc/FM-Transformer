@@ -10,8 +10,9 @@ Generation is **two-stage**:
 1. **Multiplicity model** (`MultModel`, autoregressive `x-transformers` decoder)
    predicts how many outgoing particles of each PDG-id the event contains.
 2. **Flow-matching model** (`LEGOLtng` wrapping `CFMTrafo_x`, an `x-transformers`
-   encoder) integrates an ODE on `Euclidean(3) × Sphere(2)` to produce per-particle
-   `(momentum, surface-position)` for that many outgoing slots.
+   encoder) integrates an ODE on `Euclidean(1) × Sphere(3) × Sphere(3)` (energy
+   scalar, momentum direction, surface-position direction) to produce the
+   per-particle kinematics for that many outgoing slots, plus the event's `E_dep`.
 
 Both models are `lightning.LightningModule`s configured by a single nested
 `config` dict.
@@ -44,9 +45,9 @@ pdgids  = torch.tensor([11])                 # a PDG-id, e^- in this case;    (B
 with torch.no_grad():
     out = gen.gen_model_w_g4_args(n, pos, mom, energy, density, size, pdgids)
 
-# out["per_particle"]["Outgoing"] : [B*n, max_seq_l-3, 8]
-# out["per_particle"]["Incoming"] : [B*n, 1, 8]   layout: [density, px,py,pz, x,y,z, pdgid]
-# out["per_event"]                : {"E_dep", "Density"}
+# out["per_particle"]["Outgoing"] : [B*n, max_seq_l - n_prefix - 1, 8]   model layout (see Data structure)
+# out["per_particle"]["Incoming"] : [B*n, 1, 8]
+# out["per_event"]                : {"E_dep", *cond_scalars}   -- E_dep in model normalisation, not MeV
 # out["per_voxel"]                : {"E_dep": empty}
 print(out["per_particle"]["Outgoing"].shape)
 ```
@@ -128,9 +129,9 @@ gen = GenerateOut("flow.pt", "mult.pt", device="cuda",
                   couple_in_out_pdgids=False)  # if True, restrict outgoing
                                                # pdg-ids to the incoming set
 
-# Raw call: cond is [B, 8] = [density, px,py,pz, x,y,z, pdgid_raw]
+# Raw call: cond is [B, n_cond + 7] = [*cond_scalars, px,py,pz (energy-scaled), x,y,z, pdgid_raw]
 sols, mask, attn_mask = gen(cond)
-# sols : [B, ntokens, 8]  =  [density, px,py,pz, x,y,z, pdgid_raw]
+# sols : [B, ntokens, 8]  in the model layout: [energy scalar, mom dir(3), pos dir(3), pdgid_raw]
 # mask / attn_mask : [B, ntokens]
 ```
 
@@ -143,11 +144,14 @@ sols, mask, attn_mask = gen(cond)
 Each prepared dataset is a folder containing:
 
 - `data_prepped.pt` — a 3-tuple `(target, mask, attn_mask)` matching `DataStruct.__init__`.
-- `meta.json` — `{ "ntokens": int, "particles": [pdgid, ...], "particles_in": [pdgid, ...] }`.
+  The two `max_energy`-dependent channels (incoming energy scalar, `E_dep`) are
+  stored in MeV and normalised at load time by `DataPrep.norm_e`.
+- `meta.json` — `ntokens`, `particles` (sorted outgoing PDG-ids), `particles_in`
+  (incoming PDG-ids the multiplicity model knows), `max_energy`, `cutoff_mev`,
+  `cond_scalars`, `energy_kin`.
 
-`ntokens` is `2 + 1 + max_outgoing` (two scalar rows, one incoming, the rest outgoing).
-`particles` is the sorted set of outgoing PDG-ids; `particles_in` is the set of
-incoming PDG-ids the multiplicity model knows about.
+`ntokens = n_prefix + 1 + max_outgoing`, where `n_prefix = len(cond_scalars) + 1`
+(the conditioning-scalar rows plus the generated `E_dep` row).
 
 ### In memory (`DataStruct`)
 
@@ -155,54 +159,48 @@ incoming PDG-ids the multiplicity model knows about.
 
 | Field | Shape | Meaning |
 |---|---|---|
-| `f` (features) | `[B, N, 8]` | Per-particle features, see layout below. |
+| `f` (features) | `[B, N, 8]` | Per-slot features, see layout below. |
 | `m` (loss mask) | `[B, N]` int | `1` where the slot is a random variable the flow must produce; `0` where it is a condition or pad. |
 | `am` (attn mask) | `[B, N]` bool | `True` for valid slots (transformer attention mask). |
 
-Row layout along `N`:
+Row layout along `N` (slot roles depend on `model_conf.cond_scalars`, default
+`("Density",)`; current configs use `("Density", "Z", "A", "Size")`):
 
 ```
-row 0       : non_p[0]   – per-event scalar row 1 (density)         mask=0  attn=1
-row 1       : non_p[1]   – per-event scalar row 2 (E_dep / E_in)    mask=1  attn=1
-row 2       : in_p       – incoming particle (condition)            mask=0  attn=1
-rows 3..N-1 : out_p      – outgoing particles (RVs, padded)         mask=1  attn=1/0
+row 0              : cond_scalars[0] (Density)                    mask=0  attn=1
+row 1              : E_dep / max_energy  -- generated, not a condition   mask=1  attn=1
+rows 2..n_prefix-1 : cond_scalars[1:] (Z, A, Size, ...)           mask=0  attn=1
+row n_prefix       : incoming particle (condition)                mask=0  attn=1
+rows n_prefix+1..  : outgoing particles (RVs, padded)             mask=1  attn=1/0
 ```
 
-Column layout along the last dim of `f` (8 columns total):
+Column layout along the last dim of `f` (8 columns):
 
-| Col | Particle rows (`in_p`, `out_p`) | Non-particle rows (`non_p`) |
+| Col | Particle rows | Scalar rows |
 |---|---|---|
-| `0` | original scalar from raw data (e.g. energy `E`); **not consumed by the model** | `1` |
-| `1` | `px` of momentum (or its `in_frac` / `log` transform after `DataPrep`) | row 0: **density**; row 1: **E_dep / E_in** |
-| `2` | `py` | `1` |
-| `3` | `pz` | `1` |
-| `4` | `x` position (ray-traced onto the unit-cube surface if `proj_ray=True`) | `1` |
-| `5` | `y` | `1` |
-| `6` | `z` | `1` |
-| `7` | raw `pdgid` (mapped to a vocab index inside `LEGOLtng.convert_pdgids`) | `0` |
+| `0` | energy scalar: `log(E/cutoff)/log(max_energy/cutoff)` clamped to `[0, 1]`; **outgoing rows store `1 - e_out/e_in`** (relative to the incoming particle) | the scalar's value |
+| `1:4` | unit momentum direction | `1` |
+| `4:7` | unit position direction (ray-traced onto the cube surface for the incoming row if `proj_ray=True`) | `1` |
+| `7` | pdgid (raw, or a vocab index when `pdgid_is_idx`) | `0` |
 
-The FM model only ever sees `model_in = f[..., 1:7]` (the 6-d momentum+position
-block) and `pdgids = f[..., 7]` separately. Column 0 is a passthrough slot.
+`model_in = f[..., 0:7]` — seven columns, and `model_args.in_dim` must be 7. Col 0 is
+the flow's energy channel (`Euclidean(1)` factor), not a passthrough.
 
-`_F(f)` exposes named views (all are plain tensor slices, not copies):
+Always index through `_F(f)` / `DataStruct` (plain slices, not copies); the
+layout is process-global state set by `set_layout(cond_scalars)`:
 
 | View | Slice | Description |
 |---|---|---|
-| `d` | `f[..., 0, 1]` | density scalar (row 0, col 1) |
-| `edep` | `f[..., 1, 1]` | E_dep / E_in scalar (row 1, col 1) |
+| `d` / `edep` | `f[..., 0, 0]` / `f[..., 1, 0]` | density and `E_dep` scalars |
+| `cond(name)` | `f[..., cond_slot(name), 0]` | any conditioning scalar by name |
 | `pdgids` | `f[..., -1:]` | pdgid column, all rows |
-| `non_p` | `f[..., :2, :]` | both scalar rows, all cols |
-| `in_p` | `f[..., 2:3, :]` | incoming-particle row, all cols |
-| `out_p` | `f[..., 3:, :]` | outgoing-particle rows, all cols |
-| `non_cc` / `in_cc` / `out_cc` | `[..., {rows}, 1:7]` | the 6-d momentum+position block of each row group |
-| `model_in` | `f[..., 1:7]` | the 6-d block for every row (what the vector field sees) |
-| `mom` | `f[..., 1:4]` | momentum only (3 cols: `px, py, pz`) |
+| `non_p` / `in_p` / `out_p` | rows `[:n_prefix]` / `[n_prefix]` / `[n_prefix+1:]`, all cols | scalar rows, incoming, outgoing |
+| `non_cc` / `in_cc` / `out_cc` | same rows, cols `0:7` | the 7-d model block of each row group |
+| `model_in` / `energy` | `f[..., 0:7]` / `f[..., 0:1]` | what the vector field sees / its energy channel |
 
-The forward output of `LEGOLtng` / `GenerateOut` is laid out as
-`[density_broadcast(1) | solved_model_in(6) | pdgid(1)]` — i.e. the model's
-6-d output occupies cols 1–6 with a broadcast density in col 0, mirroring the
-on-disk layout. Hence the same `_F` views (which read cols 1–6 of each row,
-and row 0 col 1 for `d`) continue to apply to returned samples.
+`LEGOLtng.forward` / `GenerateOut` return the same `[B, N, 8]` layout (solved
+`model_in` in cols `0:7`, pdgid in col 7, conditioning rows passed through, NaN
+outside `attn_mask`), so the same `_F` views apply to generated samples.
 
 ---
 
@@ -217,10 +215,10 @@ Any key not listed defaults to the value shown in the source.
 | Key | Default | Effect |
 |---|---|---|
 | `lds_args.data` | — | Folder containing `data_prepped.pt` + `meta.json`, or a `.pt` path directly (suffix `.pt` is the discriminator — folder paths get `/data_prepped.pt` appended). |
-| `lds_args.cutoff_mev` | `10.0` | Drop outgoing particles with momentum magnitude below this MeV. Also used by `GenerateBase` as the log-floor in the magnitude prior. |
-| `lds_args.min_particles` | `0` | Drop events with fewer than this many valid outgoing particles. |
+| `lds_args.cutoff_mev` | from `meta.json` | Lower bound of the energy normalisation (`log(E/cutoff)/log(max_energy/cutoff)`). Prepped datasets are already cut; the cutoff itself is applied at prep time (kinetic energy when `energy_kin`, else `\|p\|`, incoming row included). |
+| `lds_args.min_particles` | `0` | Drop events with fewer than this many valid outgoing particles (prep time). |
+| `lds_args.frac` | `1.0` | Keep a seeded random fraction of the events. |
 | `lds_args.dtype` | `torch.float32` | Cast features to this dtype. |
-| `is_filtered` | `False` | If `True`, the on-disk file is loaded as-is via `get_filtered` (no cutoff applied). |
 | `bs` | `2**12` | Batch size. |
 | `num_workers` | `4` | `DataLoader` workers (uses `fork` start method if >0). |
 
@@ -238,12 +236,15 @@ training set via `random_split`.
 
 | Key | Default | Effect |
 |---|---|---|
-| `base_dist` | `"poles"` | Only `"poles"` is currently supported (samples vMF around the incoming-particle direction and its antipode). |
-| `kappa` | `tensor(10.)` | vMF concentration. Higher → tighter around the pole. |
+| `base_dist` | `"poles"` | Direction prior: `"poles"` (vMF-like around the incoming direction, `bs_frac` at the antipode), `"iso"` (isotropic momentum and position), `"iso_pos"` (poles for momentum, isotropic position). |
+| `kappa` | `tensor(10.)` | Concentration. Higher → tighter around the pole. Overwritten per event by the learned `base_head` when present. |
 | `bs_frac` | `0.0` | Fraction of samples placed at the antipodal pole (backscatter). |
 | `tanh_theta` | `False` | Use `π·tanh(N(0,1)/κ)` instead of wrapped-normal θ. |
-| `scale_dist` | `"trunc_norm"` | Magnitude prior for the momentum scalar: `"trunc_norm"`, `"uniform"`, or `"sm_norm"`. |
+| `scale_dist` | `"trunc_norm"` | Energy prior: `"trunc_norm"`, `"uniform"`, `"sm_norm"` (`1 - tanh(|N(0,1)|·sm_scale)`), `"logit_norm"`. The learned `base_head` requires `"sm_norm"`. |
+| `sm_scale` | `0.5` | `sm_norm` tanh temperature; larger → flatter energy base. Per event from `base_head` when present. |
 | `e_dep_max` | `1.0` | Sigmoid scale for the sampled E_dep base value. |
+| `base_head` | — | Saved `base_head` state dict (written by training); `base_head_frozen` keeps it fixed on reload. |
+| `base_head_nout` | `False` | Also feed the outgoing multiplicity and per-pdgid composition to the head; only E_dep's `(mu, sig)` see them. |
 
 ### `model_conf` — flow-matching model
 
@@ -251,13 +252,22 @@ Top-level FM options:
 
 | Key | Default | Effect |
 |---|---|---|
-| `manifold` | — | Required. String eval'd in a restricted namespace (only `ProductManifold`, `Euclidean`, `Sphere` are bound), e.g. `"ProductManifold([Euclidean(), Sphere()], (3, 3))"`. The second argument is the per-block ambient dim. |
-| `max_energy` | — | Required (here or in `meta.json`). Upper energy bound (MeV) for the `EnergyProjections` normalisation; with `dl_conf.lds_args.cutoff_mev` (lower bound) it maps physical `|p|` to/from the bounded `[0, 1]` energy scalar. `resolve_legoltng_config` raises `KeyError` if it is found in neither `meta.json` nor `model_conf`. |
-| `proj_ray` | `True` (read by `DataPrep` only) | At prep-time, ray-trace incoming/outgoing positions onto the unit-cube surface via `CubeTrace`. Ignored when loading already-prepped data from disk. |
-| `proj_en` | `False` | Energy normalisation applied in `DataPrep`. Allowed values: `False` / `"identity"` (no-op), `"in_frac"` (divide outgoing momenta by incoming magnitude), `"log"`, `"in_frac_log"`, `"exp"`. (`exp_mult` / `in_mult` exist on `EnergyProjections` but take two arguments and are not callable from this hook.) |
-| `ot_coupling` | `False` | At training time, Hungarian-assign base→data per event for OT-style coupling. Requires the optional `torch_lap_cuda_lib` package; otherwise this raises at first call. |
-| `t_dist` | `"uniform"` | Time sampling for the loss: `"uniform"`, `"sm_norm"` (`sigmoid(s · N(0,1))`), `"sd3"` (SD3 logit-normal mix `1-u + s/3·((π/2·u).sin()² - u)`), or `"sd3_grid"` (50/50 mix of `"sd3"` with a discrete grid `{0, 0.4, 0.8, 0.9}` — sampled with weights `.1/.2/.3/.4` and jittered by `0.02·N(0,1)`). |
-| `t_dist_scale` | `1.4` | Scale `s` for `sm_norm` / `sd3`. |
+| `manifold` | — | Required. List of factor dicts whose dims sum to 7, e.g. `[{name: euclidean, dim: 1}, {name: sphere, dim: 3}, {name: sphere, dim: 3}]`. The old eval'd string form (`"ProductManifold([...], (3, 3))"`) still loads with a `DeprecationWarning`. |
+| `max_energy` | — | Required (here or in `meta.json`). Upper energy bound (MeV) for the `EnergyProjections` normalisation; with `dl_conf.lds_args.cutoff_mev` (lower bound) it maps physical energy to/from the bounded `[0, 1]` energy scalar. A pure normalisation ceiling: it may exceed the gun energy (E_dep can exceed T_kin). |
+| `cond_scalars` | from `meta.json`, else `("Density",)` | Per-event conditioning scalars; sets the row layout (see Data structure). |
+| `energy_kin` | from `meta.json`, else `True` | Use Geant4's recorded kinetic energy as the energy scalar instead of `|p|` (which saturates for hadrons). |
+| `edep_log_min` | `None` | Log-scale the E_dep row: `log(E_dep/edep_log_min)/log(max_energy/edep_log_min)`, clamped to `[0, 1]`; `None` keeps `E_dep/max_energy`. |
+| `overflow_delta` | `0.0` | Sentinel offset: zero-deposit / fully-absorbed targets are written to `-overflow_delta` in the energy channel so the flow can separate the atom from the continuum. |
+| `proj_ray` | `True` (read by `DataPrep` only) | At prep-time, ray-trace the incoming position onto the unit-cube surface via `CubeTrace`. |
+| `canon_sym` | `False` | Canonicalise directions onto a reference cube face before the flow and undo it after (`CubeSymmetry`). |
+| `ot_coupling` | `False` | At training time, Hungarian-assign base→data slots per event (same pdgid only). Requires `torch_lap_cuda_lib`; `on_fit_start` raises otherwise. |
+| `t_dist` | `"sd3"` | Training-time `t` sampling: `"sd3"` (mode sampling `1-u + s/3·(sin²(πu/2) - u)`; `s = 0` is uniform) or `"sm_norm"` (`sigmoid(s·N(0,1))`, i.e. logit-normal). |
+| `t_dist_scale`, `t_dist_shift` | `1.4`, `1.0` | Scale `s` above; `shift != 1` applies `t ** (1/shift)`. |
+| `mask_conf.p_forward` | — | If `mask_conf` is set, per-event coin flip between the forward mask and its inverse (generate the incoming from the outgoing set). |
+| `uncert_weighting`, `uncert_bins`, `uncert_min`, `uncert_min_flow` | `False`, `16`, `-6.0`, `= uncert_min` | Kendall-style learned per-(t-bin, channel) log-variance weights `exp(-lv)·L + lv`, clamped at the floor(s); the flow-map term has its own cell and floor. |
+| `one_step_euler_fac`, `one_step_euler_sections`, `one_step_euler_every` | `0.0`, `8`, `1` | Flow-map self-distillation weight, dyadic ladder depth, and step gating. `> 0` requires `model_args.step_cond`. |
+| `base_dist_loss`, `base_pretrain_batches`, `base_pretrain_bs` | `0.0`, `300`, `dl_conf.bs` | Learned base head: co-training weight, and up-front pretraining batches (then frozen). Needs `Z`, `A`, `Size` in `cond_scalars` and `scale_dist: sm_norm`. |
+| `reflow_path`, `reflow_start_epoch`, `reflow_every`, `reflow_kwargs` | `None`, `0`, `1`, `{}` | Reflow against a frozen teacher (or the student's own snapshot when no path). **Gated solely by `reflow_start_epoch > 0`.** |
 | `pdgid_is_idx` | `False` | If `True`, the pdgid column is treated as an already-indexed vocab id (skipping `convert_pdgids`). Flipped on by `GenerateOut` at inference. |
 
 `model_conf.model_args` is passed straight to `CFMTrafo_x` and on to the
@@ -266,15 +276,18 @@ Top-level FM options:
 | Key | Default | Effect |
 |---|---|---|
 | `h_dim` | — | Required. Encoder hidden dim. |
-| `in_dim` | `6` | Per-particle feature dim — 3 momentum + 3 position. |
-| `max_seq_l` | injected from `meta.json` (`ntokens`) | Sequence length used for positional / per-slot embeddings. |
+| `in_dim` | `6` (configs set `7`) | Per-slot feature dim: energy scalar + 3 momentum + 3 position = 7; must equal the manifold's total dim. |
+| `max_seq_l` | injected from `meta.json` (`ntokens`) | Sequence length used for the per-slot type indices. |
 | `nlayers`, `nhead` | `4`, `8` | Encoder depth and heads. |
 | `ff_mult` | `1` | Feed-forward expansion factor. |
 | `dropout` | `0.1` | Shared attn / ff / emb dropout. |
-| `nvtypes` | `2` | Vocab size of the mask-id embedding. The mask tensor only ever contains 0/1, so `2` suffices. |
-| `ntypes` | `4` | Vocab size of the per-slot type embedding. The actual indices are `arange(max_seq_l).clamp_max(3)` — so values `0..3` are reached. |
-| `npdgids` | injected at training (`len(meta.particles) + 1`) | Vocab size of the pdgid embedding (`+1` for the unknown / pad index `0`). |
-| `xavier_gain` | `1.0` | Gain for `xavier_normal_` on the per-embedding linear and bias params. |
+| `nvtypes` | `2` | Vocab size of the mask-id conditional map. The mask tensor only ever contains 0/1, so `2` suffices. |
+| `ntypes` | injected: `len(cond_scalars) + 3` | Vocab size of the per-slot type map; indices are `arange(max_seq_l).clamp_max(n_prefix + 1)`. |
+| `npdgids` | injected at training (`len(meta.particles) + 1`) | Vocab size of the pdgid conditional map (`+1` for the unknown / pad index `0`). |
+| `xavier_gain` | `1.0` | Gain on the init std of the conditional linear maps. |
+| `time_cond` | `True` | Sinusoidal per-token `t` embedding as the adaptive-norm condition; `False` uses a learned global vector (`LEGOLtngDirect`). |
+| `step_cond` | `False` | Also embed the step size `d` (zero-init gain), required by `one_step_euler_fac > 0`. |
+| `grad_ckpt` | `False` | Activation checkpointing per attention block. |
 
 All remaining `model_args` keys flow into `x-transformers` `Encoder`, e.g.
 `use_adaptive_rmsnorm`, `use_adaptive_layerscale`, `residual_attn`, `ff_swish`,
@@ -291,13 +304,15 @@ reproduces exactly, while fresh configs use the library default of 10.
 
 | Key | Default | Effect |
 |---|---|---|
-| `use_density` | `True` | Concatenate per-event density as an extra input column. If you set this you must bump `in_dim` to match. |
-| `in_dim` | `6` | Width of the input projection (`Linear(in_dim, h_dim)`). Must equal the runtime feature dim — 7 if `use_density=True`, otherwise 6. |
+| `cond_scalars` | from `meta.json`, else `("Density",)` | Per-event conditioning scalars prepended to the incoming token; the input width is derived as `len(cond_scalars) + 7`. |
+| `max_energy` | from `meta.json` | Normalisation ceiling for the incoming energy scalar (`GenerateOut` rebases the input when the flow's ceiling differs). |
+| `canon_sym` | `False` | Canonicalise the incoming direction onto a reference cube face (`proj_in`). |
+| `train_inverse` | `False` | Also train `InvModel` (incoming PID from the outgoing set), needed by `GenerateIn`; `inv_h_dim`, `inv_n_layers`, `inv_n_heads`, `inv_model_args` default to the count model's. |
 | `h_dim` | `512` | Hidden dim of the Decoder. |
 | `n_layers`, `n_heads` | `6`, `8` | Decoder depth and heads. |
 | `dropout` | `0.1` | Shared attn / ff / layer / emb dropout. |
 | `pos_scale` | `50.0` | Multiplier on the position (last-3) part of the input before projection. |
-| `max_out_particles` | `meta.ntokens - 3` | Cap on per-pdg-type counts during data loading. |
+| `max_out_particles` | `meta.ntokens - (n_prefix + 1)` | Cap on per-pdg-type counts during data loading. |
 | `max_count` | derived from data | Categorical vocab size of each per-slot count head; computed once from the train set. |
 | `ptypes` | `meta.particles` (sorted) | Outgoing pdg-id vocabulary (`torch.tensor`). One Decoder slot per entry. |
 | `ptypes_in` | `meta.particles_in` (sorted) | Incoming pdg-id vocabulary; used for the input embedding. |
@@ -363,17 +378,19 @@ Free-form bag for logging only (`epochs`, `precision`, `notes`,
 
 | Path | Purpose |
 |---|---|
-| `legofmt/cfm/cfm_trafo_x.py` | `CFMTrafo_x`: vector field. Embeds `(state, vtype, type-idx, pdgid)` into hidden dim, runs `x-transformers` Encoder conditioned on a sinusoidal `t`-embedding, projects back to `in_dim`. |
-| `legofmt/main/modules.py` | `LEGOLtng` Lightning wrapper (loss, sampling base, ODE solve, optional likelihood). `ProjectModel` wraps the vf to project state/velocity onto the manifold. |
-| `legofmt/main/generate.py` | `GenerateOut`: chains `MultModel` + `LEGOLtng` for end-to-end sampling, builds the conditioning batch from per-event scalars. |
-| `legofmt/main/optimizers.py` | `build_optimizer` registry. Strings `"muon"` and `"schedulefree"` resolve to factories; `"warmup_cosine"` scheduler. Pass classes directly to bypass the registry. |
-| `legofmt/multiplicity/model.py` | Autoregressive Decoder over PDG-id slots producing per-type particle counts. |
-| `legofmt/data/dataloaders.py` | `GetLEGOData` (energy-cutoff + sort + NaN-handling) and `LEGODataset` (str / dict / tuple constructor, collates to `DataStruct`). |
-| `legofmt/data/prep.py` | `DataPrep`: applies `EnergyProjections`, `CubeTrace` ray projection, and `manifold.projx`, then prepends per-event scalar rows. |
-| `legofmt/data/struct.py` | `DataStruct(f, m, am)` with views: `f.d` density, `f.edep`, `f.pdgids`, `f.in_p`, `f.out_p`, `f.in_cc`, `f.out_cc`, `f.model_in`, `f.mom`. |
-| `legofmt/geometry/path_sample_mult.py` | `ProductManifold` (block-split expmap/logmap/projx/proju) and `ProductPathSampler` (`GeodesicProbPath` per block, `CondOTScheduler`). |
-| `legofmt/geometry/gen_base.py` | `GenerateBase`: samples the FM base distribution (vMF "poles" only; magnitude from `scale_dist`). |
-| `legofmt/geometry/vmf_sampling.py` | von-Mises–Fisher sampling on the sphere; cartesian↔spherical; `to_cube` projection. |
-| `legofmt/geometry/raytracing_proj.py` | `CubeTrace`: ray-trace a position onto the unit cube along its momentum direction. |
-| `legofmt/geometry/energy_proj.py` | `EnergyProjections`: energy normalisations — `identity`, `in_frac`, `log`, `in_frac_log`, `exp`, plus the two-argument `in_mult` / `exp_mult` inverses. |
-| `legofmt/physics/energy.py`, `legofmt/viz/*` | Physics helpers and corner/rotation plots (not used at train time). |
+| `legofmt/cfm/cfm_trafo_x.py` | `CFMTrafo_x`: vector field. Per-(mask, type, pdgid) conditional linear embedding, `x-transformers` Encoder conditioned on sinusoidal `t` (and `d`) embeddings, mirrored output projection. |
+| `legofmt/cfm/project_model.py`, `legofmt/cfm/solvers.py`, `legofmt/cfm/path_sampler.py` | `ProjectModel` keeps state/velocity on the manifold; `Solvers` mixin (`solve`, hand-unrolled midpoint/Euler steps, `log_likelihood`, `forward`); `ProductPathSampler` (one `GeodesicProbPath` per factor). |
+| `legofmt/main/modules.py` | `LEGOLtng`: construction, Lightning hooks, data split, optimizer wiring. Behaviour lives in the mixins `TrainStep` / `BaseDist` / `Solvers`. |
+| `legofmt/main/train_step.py` | `TrainStep`: training step, per-cell uncertainty weighting, `t` and mask sampling, flow-map loss gating. |
+| `legofmt/main/generate.py` | `GenerateOut` / `GenerateIn`: chain `MultModel` + `LEGOLtng` for end-to-end sampling; build the padded conditioning batch. |
+| `legofmt/base_dist/gen_base.py`, `legofmt/base_dist/base_nn.py` | `GenerateBase` samplers (`poles` / `iso` / `iso_pos`, `scale_dist`) and the learned per-event `base_head` (`BaseDist` mixin, pretraining, OT coupling). |
+| `legofmt/distill/distill.py`, `legofmt/distill/reflow.py` | Flow-map self-distillation loss; reflow teacher and the one-step `LEGOLtngDirect` variant. |
+| `legofmt/mod_comps/config.py`, `legofmt/mod_comps/optimizers.py` | Config resolution (`Resolved*Config`, manifold building, version stamps) and the optimizer registry (`BatchedMuon`, `"schedulefree"`, `"warmup_cosine"`). |
+| `legofmt/multiplicity/model.py` | Autoregressive Decoder over PDG-id slots producing per-type particle counts; optional `InvModel`. |
+| `legofmt/data/dataloaders.py` | `LEGODataset` (energy cutoff, sorting, NaN handling; collates to `DataStruct`) and `make_loader`. |
+| `legofmt/data/prep.py` | `DataPrep`: energy normalisation, `CubeTrace` ray projection, `manifold.projx`, the per-event scalar rows, `norm_e`/`norm_edep`. |
+| `legofmt/data/struct.py` | `DataStruct(f, m, am)`, the `_F` views, and the process-global `set_layout`. |
+| `legofmt/geometry/*` | `ProductManifold`, `GeomTrafos` (direction sampling, cartesian↔spherical, `to_cube`), `CubeTrace`, `EnergyProjections`, `CubeSymmetry`. |
+| `legofmt/log_metrics/val_metrics.py` | `ShowerValMetrics`: MMD and per-feature W1 on particle kinematics and event summaries (vendored from `lego-eval`). |
+| `legofmt/compat.py` | Loading older checkpoints: parameter renames, qk-norm scale, fp32 attention, legacy manifold strings. |
+| `legofmt/viz/*` | Corner plots and cube plots (not used at train time). |

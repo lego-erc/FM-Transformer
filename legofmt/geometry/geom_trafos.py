@@ -15,6 +15,7 @@ class GeomTrafos:
         return out.flatten(-2, -1)
 
     def to_cc(self, sph):
+        """Spherical (theta, phi) -> cartesian unit vector, batched over trailing pairs."""
         if sph.shape[-1] != 2:
             return self._batched(sph, 2, "to_cc")
         theta, phi = sph.movedim(-1, 0)
@@ -24,6 +25,7 @@ class GeomTrafos:
         return torch.stack((x, y, z), dim=-1)
 
     def to_sph(self, cc):
+        """Cartesian unit vector -> spherical (theta, phi), batched over trailing triples."""
         if cc.shape[-1] != 3:
             return self._batched(cc, 3, "to_sph")
         cc = F.normalize(cc, dim=-1)
@@ -50,6 +52,9 @@ class GeomTrafos:
         self, n: tuple, loc_cc, kappa: torch.Tensor,
         bs_frac: float = 0.0, tanh_theta: bool = False,
     ):
+        """Directions concentrated (kappa) around loc_cc, wrapped-normal or
+        tanh-normal theta; bs_frac sends the first round(bs_frac*B) events --
+        all their particles -- to the antipode."""
         loc = self.to_sph(loc_cc).expand((*n, -1))
         if bs_frac > 0.0:
             loc = loc.clone()
@@ -67,6 +72,7 @@ class GeomTrafos:
         return self.to_cc(self.rotate(sph, loc_theta, loc_phi + torch.pi / 2))
 
     def sample_iso(self, n: tuple, mpct, device=None, **kwargs):
+        """mpct isotropic unit directions per event."""
         samples_phi = 2 * torch.pi * torch.rand((*n, mpct), device=device)
         samples_cos_theta = 2 * torch.rand((*n, mpct), device=device) - 1
         samples_theta = torch.acos(samples_cos_theta)
