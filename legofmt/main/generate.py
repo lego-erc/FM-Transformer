@@ -55,6 +55,15 @@ class GenerateOut(torch.nn.Module):
                 f"{self.cond_names}; cond carries only the flow's scalars."
             )
 
+        mm_max = mult_conf["config"]["mm_conf"].get("max_energy")
+        self.mult_e_scale = 1.0
+        if mm_max and mm_max != self.model.rc.max_energy:
+            cut = self.model.rc.cutoff_mev
+            self.mult_e_scale = float(
+                torch.tensor(self.model.rc.max_energy / cut).log()
+                / torch.tensor(mm_max / cut).log()
+            )
+
         set_layout(self.cond_names)
 
         if couple_in_out_pdgids:
@@ -145,6 +154,10 @@ class GenerateOut(torch.nn.Module):
         mult_in = torch.cat(
             (cond[:, :self.n_mult_cond], cond[:, self.n_cond:self.n_cond + 7]), dim=-1
         )
+        if self.mult_e_scale != 1.0:
+            mult_in[:, self.n_mult_cond] = (
+                mult_in[:, self.n_mult_cond] * self.mult_e_scale
+            ).clamp(0.0, 1.0)
         mult = self.gen_mult((mult_in, None, pdgid_in_idx))
         mult = mult[:, self.ptype_idx] * self.ptype_in_mask
 
