@@ -1,10 +1,12 @@
 """The flow's vector field: an x-transformers Encoder over the padded sequence.
 
-Each token is embedded by a per-(mask, type, pdgid) conditional linear map --
-three index-selected weight tensors summed and contracted with ``x`` in one
-einsum -- and the output projection mirrors it. Time, and with ``step_cond``
-the step size, enter as sinusoidal embeddings passed to x-transformers as
-``condition=`` for adaptive RMSNorm.
+Each token is embedded by a per-(mask, type, pdgid) conditional linear map: the
+mean of three index-selected linear maps, computed as one matmul of the
+one-hot-Kronecker-``x`` against the stacked weight banks (no ``(B, L, h, in)``
+intermediate; its index backward was 60% of an eager step). The output
+projection mirrors it. Time, and with ``step_cond`` the step size, enter as
+sinusoidal embeddings passed to x-transformers as ``condition=`` for adaptive
+RMSNorm.
 """
 
 from __future__ import annotations
@@ -111,6 +113,32 @@ class CFMTrafo_x(nn.Module):
         else:
             self.global_cond = nn.Parameter(torch.zeros(1, h_dim))
 
+    def _one_hot(self, mask: Tensor, types: Tensor, pdgids: Tensor, batch: int) -> Tensor:
+        """``(B, L, nvtypes + ntypes + npdgids)`` one-hot over the three conditioning
+        vocabularies, so the index-selected linear maps become one matmul.
+        ``pdgids`` arrives as ``_F.pdgids``, i.e. ``(B, L, 1)``."""
+        n = mask.shape[1]
+        return torch.cat((
+            nn.functional.one_hot(mask.reshape(batch, n).long(), self.nvtypes),
+            nn.functional.one_hot(types.view(-1)[:n], self.ntypes).expand(batch, -1, -1),
+            nn.functional.one_hot(pdgids.reshape(batch, n).long(), self.npdgids),
+        ), dim=-1).to(self.cond_w_mask.dtype)
+
+    def _embed(self, x: Tensor, oh: Tensor) -> Tensor:
+        """Mean of the mask-, type- and pdgid-conditional up-projections of ``x``."""
+        w  = torch.cat((self.cond_w_mask[:, 0], self.cond_w_types[:, 0], self.cond_w_pdgids[:, 0]))
+        b  = torch.cat((self.cond_bi_mask, self.cond_bi_types, self.cond_bi_pdgids))
+        xo = (oh.unsqueeze(-1) * x.unsqueeze(-2)).flatten(-2)  # (B, L, K * in_dim)
+        return (xo @ w.transpose(1, 2).reshape(-1, self.h_dim) + oh @ b) / 3
+
+    def _project_out(self, h: Tensor, mask: Tensor, oh: Tensor) -> Tensor:
+        """Mean of the three conditional down-projections; zero on conditioning slots."""
+        w   = torch.cat((self.cond_w_mask[:, 1], self.cond_w_types[:, 1], self.cond_w_pdgids[:, 1]))
+        b   = torch.cat((self.cond_bo_mask, self.cond_bo_types, self.cond_bo_pdgids))
+        out = (h @ w.permute(1, 0, 2).reshape(self.h_dim, -1)).view(*h.shape[:-1], -1, self.in_dim)
+        out = torch.einsum("blki,blk->bli", out, oh) + oh @ b
+        return (mask == 1).unsqueeze(-1) * out / 3
+
     def forward(
         self,
         x: Tensor,
@@ -121,12 +149,6 @@ class CFMTrafo_x(nn.Module):
         t: Tensor | None = None,
         d: Tensor | None = None,
     ) -> Tensor:
-        n = x.shape[1]
-        mi, ti, pi = mask.view(-1), types.view(-1)[:n], pdgids.view(-1)
-        s3 = (-1, n, self.h_dim)
-        so = (-1, n, self.in_dim)
-        s4 = (-1, n, self.h_dim, self.in_dim)
-
         if self.time_cond:
             tf = t.unsqueeze(-1) * self.freqs
             cond = torch.where(self.mask_freqs.bool(), tf.sin(), tf.cos())
@@ -135,21 +157,8 @@ class CFMTrafo_x(nn.Module):
         else:
             cond = self.global_cond.expand(x.shape[0], -1)
 
-        # Up-projection: the three source-indexed weights are summed
-        # before the einsum (single fused contraction); biases summed
-        # likewise; divide by 3 to average. Inlined to let intermediates
-        # be freed before the next op.
-        embd = (
-            torch.einsum(
-                "ijl,ijkl->ijk", x,
-                self.cond_w_mask  [mi, 0].view(s4)
-              + self.cond_w_types [ti, 0]
-              + self.cond_w_pdgids[pi, 0].view(s4),
-            )
-          + self.cond_bi_mask  [mi].view(s3)
-          + self.cond_bi_types [ti].view(s3)
-          + self.cond_bi_pdgids[pi].view(s3)
-        ) / 3
+        oh   = self._one_hot(mask, types, pdgids, x.shape[0])
+        embd = self._embed(x, oh)
         if self.time_cond:
             embd = embd + cond
 
@@ -158,15 +167,4 @@ class CFMTrafo_x(nn.Module):
         if self.training:
             embd = self.vf.emb_dropout(embd)
         h = self.vf.project_out(self.vf.attn_layers(embd, mask=attn_mask, condition=cond))
-
-        return (mask == 1).unsqueeze(-1) * (
-            torch.einsum(
-                "ijk,ijkl->ijl", h,
-                self.cond_w_mask  [mi, 1].view(s4)
-              + self.cond_w_types [ti, 1]
-              + self.cond_w_pdgids[pi, 1].view(s4),
-            )
-          + self.cond_bo_mask  [mi].view(so)
-          + self.cond_bo_types [ti].view(so)
-          + self.cond_bo_pdgids[pi].view(so)
-        ) / 3
+        return self._project_out(h, mask, oh)
