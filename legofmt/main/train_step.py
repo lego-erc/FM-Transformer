@@ -109,7 +109,9 @@ class TrainStep:
         every = self.rc.one_step_euler_every
         lvf = None
         if hasattr(self, "lv_flow"):
-            lvf = self.lv_flow.clamp(min=self.rc.uncert_min).squeeze()
+            # A Kendall cell settles at lv = log(L); one_step_euler (~5e-5) runs three
+            # decades below the velocity losses, so it needs a lower floor of its own.
+            lvf = self.lv_flow.clamp(min=self.rc.uncert_min_flow).squeeze()
             loss = loss + fac * lvf
         if self.training and self.global_step % every != 0:
             return loss

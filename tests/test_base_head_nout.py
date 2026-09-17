@@ -147,3 +147,14 @@ def test_nout_conditioning_separates_the_bimodal_edep() -> None:
     assert abs(mu1_on - MU1) < 0.4 and abs(mu2_on - MU2) < 0.4, (mu1_on, mu2_on)
     assert sig1_on < sig2_on / 2, f"sigma not separated: {sig1_on} vs {sig2_on}"
     assert abs(sig1_on - SIG1) / SIG1 < 0.6, f"spike width {sig1_on} vs {SIG1}"
+
+
+def test_only_edep_sees_the_outgoing_set() -> None:
+    """sm_scale and kappa must not move with n_out: conditioning them rewrote the
+    outgoing priors 8x across branches and cost 2x on the direction losses."""
+    model = LEGOLtng(_config(True))
+    model.pretrain_base(_mixed(512, s) for s in range(150))
+    s, mu, sig, kap = model.base_head_params(_batch(torch.full((2,), 0.1), torch.tensor([1, 2])))
+    assert abs(float(mu[0] - mu[1])) > 0.5, "E_dep prior should separate the branches"
+    assert torch.allclose(s[0], s[1]) and torch.allclose(kap[0], kap[1]), (
+        "sm_scale / kappa leaked n_out")

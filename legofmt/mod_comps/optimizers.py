@@ -40,17 +40,21 @@ class BatchedMuon(torch.optim.Optimizer):
         self._shape_groups = {}  # id(group) -> [(param indices, lr ratio)], shapes are fixed
 
     def _groups_by_shape(self, group, ps):
-        if id(group) not in self._shape_groups:
+        # keyed on the live parameter set, not the group: the index is into `ps`,
+        # which drops parameters without gradients, so a freeze after the first
+        # step (a pretrained head) would otherwise index past the end
+        key = (id(group), tuple(id(p) for p in ps))
+        if key not in self._shape_groups:
             by_shape = defaultdict(list)  # >2-D weights flatten to (dim0, -1), as in pytorch_optimizer
             for i, p in enumerate(ps):
                 by_shape[(p.shape[0], p[0].numel())].append(i)
             # pytorch_optimizer's get_adjusted_lr: Moonlight's sqrt(max(1, rows/cols)) if
             # use_adjusted_lr, else the original Muon 0.2*sqrt(max(rows, cols)) -- always applied
-            self._shape_groups[id(group)] = [
+            self._shape_groups[key] = [
                 (idx, max(1.0, r / c) ** 0.5 if group["use_adjusted_lr"] else 0.2 * max(r, c) ** 0.5)
                 for (r, c), idx in by_shape.items()
             ]
-        return self._shape_groups[id(group)]
+        return self._shape_groups[key]
 
     @torch.no_grad()
     def step(self, closure=None):

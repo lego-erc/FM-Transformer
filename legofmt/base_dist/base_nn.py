@@ -103,10 +103,19 @@ class BaseDist:
         tf      = torch.where(ok_u, (u.sign() - p) / u, torch.full_like(u, 4.0))
         tb      = torch.where(ok_u, (p + u.sign()) / u, torch.full_like(u, 4.0))
         chord   = ((tf.amin(-1) + tb.amin(-1)).clamp(0.0, 3.5) / 2).unsqueeze(-1)
-        feats   = [ds_t.f.in_cc[..., 0], species, chord, t.log().unsqueeze(-1)]
+        x       = torch.cat((ds_t.f.in_cc[..., 0], species, chord, t.log().unsqueeze(-1)), dim=-1)
         if (self.rc.config.get("base_conf") or {}).get("base_head_nout", False):
-            feats += self._out_set_feats(ds_t)
-        out     = self.base_head(torch.cat(feats, dim=-1))
+            # Only E_dep's (mu, sig) see the outgoing set. sm_scale and kappa are
+            # read from a second pass with those inputs zeroed -- a constant, so
+            # the NLL fits them to the marginal over n_out, as without the flag.
+            # Conditioning them too moved kappa 5.6..44.7 across branches and cost
+            # 2x on direction losses; conditioning E_dep alone kept the gain.
+            extra   = torch.cat(self._out_set_feats(ds_t), dim=-1)
+            out_e   = self.base_head(torch.cat((x, extra), dim=-1))
+            out     = self.base_head(torch.cat((x, torch.zeros_like(extra)), dim=-1))
+            out     = torch.cat((out[..., 0:1], out_e[..., 1:3], out[..., 3:4]), dim=-1)
+        else:
+            out     = self.base_head(x)
         return (out[..., 0:1].exp(), out[..., 1:2], out[..., 2:3].exp(),
                 out[..., 3:4].exp().clamp_min(1e-3))  # kap: divisor in sample()
 

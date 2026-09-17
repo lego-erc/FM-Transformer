@@ -65,6 +65,7 @@ class ResolvedLEGOConfig:
     uncert_weighting: bool
     uncert_bins: int
     uncert_min: float
+    uncert_min_flow: float
     overflow_delta: float
     canon_sym: bool
     cond_scalars: tuple[str, ...]
@@ -227,6 +228,7 @@ def _build_resolved(
         uncert_weighting=model_conf.get("uncert_weighting", False),
         uncert_bins=model_conf.get("uncert_bins", 16),
         uncert_min=model_conf.get("uncert_min", -6.0),
+        uncert_min_flow=model_conf.get("uncert_min_flow", model_conf.get("uncert_min", -6.0)),
         overflow_delta=overflow_delta,
         canon_sym=model_conf.get("canon_sym", False),
         cond_scalars=cond_scalars,

@@ -649,3 +649,19 @@ def test_all_params_receive_grad(cls) -> None:
     loss.backward()
     missing = [n for n, p in model.model.named_parameters() if p.grad is None]
     assert not missing, f"params without grad (DDP would crash): {missing}"
+
+
+def test_uncert_min_flow_is_its_own_floor() -> None:
+    """A Kendall cell settles at lv = log(L), and one_step_euler runs three decades
+    below the velocity losses, so uncert_min_flow floors that cell separately."""
+    cfg = _uncert_config()
+    cfg["config"]["model_conf"]["one_step_euler_fac"] = 1.0
+    cfg["config"]["model_conf"]["model_args"]["step_cond"] = True
+    cfg["config"]["model_conf"]["uncert_min_flow"] = -10.0
+    m = LEGOLtngVelocity(cfg)
+    assert m.rc.uncert_min == -6.0 and m.rc.uncert_min_flow == -10.0
+    with torch.no_grad():
+        m.lv_flow.fill_(-20.0)
+    assert float(m.lv_flow.clamp(min=m.rc.uncert_min_flow)) == -10.0
+    plain = LEGOLtngVelocity(_uncert_config())
+    assert plain.rc.uncert_min_flow == plain.rc.uncert_min, "default must follow uncert_min"
