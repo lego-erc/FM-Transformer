@@ -34,6 +34,7 @@ class GetLEGOData:
         return self.dataset_cutoff(*args, **kwargs)
 
     def dataset_compact(self, data):
+        """Concatenate the incoming and outgoing per-particle tensors into one padded row axis."""
         data_pp = data.get("per_particle")
         data_add = data.get("per_event")
         data_pp = torch.cat((data_pp["Incoming"], data_pp["Outgoing"]), dim=-2)
@@ -44,6 +45,9 @@ class GetLEGOData:
         data: dict,
         n_events: (int | None) = None,
     ) -> tuple[Tensor, Tensor, Tensor, dict]:
+        """Drop particles below cutoff_mev (kinetic energy when energy_kin, else |p|;
+        the incoming row included), compact survivors to the front, drop events with
+        fewer than min_particles outgoing; padding is NaN."""
         dataset, data_add = self.dataset_compact(data)
         e_valid = dataset[..., 0] if self.energy_kin else dataset[..., 1:4].norm(dim=-1)
         mask_valid = e_valid >= self.cutoff_mev
@@ -51,11 +55,13 @@ class GetLEGOData:
         mask_valid_sorted = mask_valid.sort(dim=-1, descending=True).values[:, :max_valid]
         dataset_valid = torch.full_like(dataset[:, :max_valid], torch.nan)
         dataset_valid[mask_valid_sorted] = dataset[mask_valid]
+        del dataset, mask_valid, mask_valid_sorted
         keep = ~dataset_valid[:, : self.min_particles + 1, 0].isnan().any(dim=-1)
         data_pp = dataset_valid[keep]
+        del dataset_valid
         data_add = {k: v[keep] for k, v in data_add.items()}
         if n_events is not None:
-            rd_idx = torch.randperm(data_pp.shape[0], device="cpu")[:n_events]
+            rd_idx = torch.randperm(data_pp.shape[0], device="cpu", generator=torch.Generator().manual_seed(0))[:n_events]
             data_pp = data_pp[rd_idx]
             data_add = {k: v[rd_idx] for k, v in data_add.items()}
         particle_nan = ~data_pp.isnan().any(dim=-1)
@@ -87,7 +93,8 @@ class LEGODataset(Dataset):
         frac = kwargs.get("frac")
         if frac and frac < 1.0:
             n = int(len(self.data) * frac)
-            idxs = torch.randperm(len(self.data), device=self.device)[:n]
+            idxs = torch.randperm(len(self.data), device=self.device,
+                                  generator=torch.Generator(device=self.device).manual_seed(0))[:n]
             self.data = self.data[idxs]
 
     def __len__(self) -> int:
@@ -102,7 +109,8 @@ def make_loader(dataset, *, bs, shuffle, num_workers=4, batched_sampler=False):
 
     ``batched_sampler`` hands the dataset a tensor of indices per call
     (``batch_size=None``, no default collate), which is how ``LEGODataset`` is
-    read; the plain path is torch's per-item fetch and collate.
+    read; the plain path is torch's per-item fetch and collate. Workers only
+    move CPU-side indexing off the training loop.
     """
     common = dict(
         num_workers=num_workers,

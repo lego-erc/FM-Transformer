@@ -28,6 +28,11 @@ from legofmt.mod_comps.optimizers import (
 
 
 class MultLoader(torch.utils.data.Dataset):
+    """Flattens a prepped dataset into (in_tok, counts, pdgid_in_idx) plus the
+    inverse-model tensors when train_inverse; assumes mm_conf.cond_scalars is
+    the layout the file was written with.
+    """
+
     def __init__(self, config: dict, device: str = "cpu"):
         self.device = device
         mm_conf = config.get("mm_conf")
@@ -41,7 +46,13 @@ class MultLoader(torch.utils.data.Dataset):
             "max_energy": mm_conf["max_energy"],
             "cutoff_mev": lds_conf.get("cutoff_mev"),
             "cond_scalars": mm_conf.get("cond_scalars", cond_scalars()),
+            "edep_log_min": mm_conf.get("edep_log_min"),
         })).data
+        meta_cond = config.get("additional", {}).get("data_meta", {}).get("cond_scalars")
+        if meta_cond and tuple(meta_cond) != tuple(mm_conf["cond_scalars"]):
+            raise ValueError(
+                f"mm_conf.cond_scalars={tuple(mm_conf['cond_scalars'])} != dataset layout {tuple(meta_cond)}"
+            )
         ds_f = ds.f
         # in_dim must be len(cond_scalars) + 7
         conds = torch.cat([ds_f.cond(n).unsqueeze(-1) for n in cond_scalars()], dim=-1)
@@ -58,8 +69,8 @@ class MultLoader(torch.utils.data.Dataset):
                 (conds.unsqueeze(1).expand(-1, out_cc.shape[1], -1), out_cc), dim=-1
             ).contiguous()
             self.out_pid_idx = torch.searchsorted(ptypes, ds_f.out_p[..., -1].long()).clamp(max=ptypes.shape[0] - 1)
-            self.out_mask = ds.am.out_p.bool()
-            self.edep = ds_f.edep
+            self.out_mask = ds.am.out_p.bool().clone()
+            self.edep = ds_f.edep.clone()
 
     def __len__(self):
         return self.in_tok.shape[0]
@@ -118,6 +129,7 @@ class InvModel(nn.Module):
         return self.proj_in_(x)
 
     def forward(self, out_tok, out_pid_idx, out_mask, edep):
+        """Incoming-PID logits from the outgoing set's tokens, pids, mask and E_dep."""
         tok = self.proj_in(out_tok) + self.embd_out_(out_pid_idx)
         out = self.model(
             tok, mask=out_mask, condition=self.proj_cond_(edep.unsqueeze(-1)),
@@ -128,6 +140,10 @@ class InvModel(nn.Module):
 
 
 class MultModel(LightningModule):
+    """Autoregressive per-pdgid count decoder: one slot per ptypes entry with
+    fused per-slot count heads (proj_out_w/b), conditioned on the incoming token.
+    """
+
     def __init__(self, full_config: dict):
         super().__init__()
         rc = resolve_mult_config(full_config)
@@ -169,7 +185,7 @@ class MultModel(LightningModule):
         self.proj_out_b = torch.nn.Parameter(torch.empty(rc.max_seq_len, rc.max_particles))
         _bound = 1.0 / (rc.h_dim ** 0.5)
         for _i in range(rc.max_seq_len):
-            torch.nn.init.kaiming_uniform_(self.proj_out_w[_i], a=5 ** 0.5)
+            torch.nn.init.kaiming_uniform_(self.proj_out_w[_i].transpose(0, 1), a=5 ** 0.5)
             torch.nn.init.uniform_(self.proj_out_b[_i], -_bound, _bound)
 
         # Optional inverse-PID co-training head (separate params, no sharing).
@@ -253,10 +269,14 @@ class MultModel(LightningModule):
             bs=self.rc.mm_conf.get("bs", 2**12),
             shuffle=True,
             num_workers=self.rc.dl_conf.get("num_workers", 4),
+            batched_sampler=True,
         )
 
     @torch.no_grad()
     def forward(self, batch: (tuple | torch.Tensor)):
+        """Inference only: a 3-D batch[0] runs InvModel (outgoing set -> incoming
+        PID index), a 2-D one decodes counts autoregressively with a KV cache;
+        puts the module in eval mode."""
         self._opt_eval()
         self.eval()
         if batch[0].dim() == 3:

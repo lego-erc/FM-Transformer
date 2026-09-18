@@ -13,11 +13,14 @@ from legofmt.geometry.geom_trafos import GeomTrafos
 
 
 class GenerateBase:
+    """Samples the flow's base distribution: directions from base_dist
+    (poles/iso/iso_pos), the energy prior from scale_dist, the E_dep row from
+    insert_add."""
 
     def __init__(self, config: dict):
         self.geom_trafos = GeomTrafos()
         self.cutoff_mev = config["dl_conf"]["lds_args"].get("cutoff_mev", 10.0)
-        base_conf = config.get("base_conf")
+        base_conf = config.get("base_conf") or {}
         self.base_dist = base_conf.get("base_dist", "poles")
         self.tanh_theta = base_conf.get("tanh_theta", False)
         self.kappa = base_conf.get("kappa", torch.tensor(10.0))
@@ -38,6 +41,7 @@ class GenerateBase:
 
     @torch.no_grad()
     def rd_scale(self, shape, e_in):
+        """Energy prior for the outgoing slots per scale_dist; returns (B, n_out, 1)."""
         if self.scale_dist == "trunc_norm":
             u = torch.nn.init.trunc_normal_(
                 e_in.new_empty((*shape, 1)), std=1.0, a=-1.0, b=0.0,
@@ -67,8 +71,8 @@ class GenerateBase:
 
     @torch.no_grad()
     def iso_dirs(self, shape, incoming_rt, **kwargs):
-        # naive base: isotropic momentum/position directions; energy scale unchanged
-        # (rd_scale, i.e. sm_norm) and e_dep base inherited from insert_add.
+        # naive base: isotropic momentum/position directions; energy scale from
+        # rd_scale (per scale_dist), E_dep row from insert_add.
         e_sc = self.rd_scale(shape, torch.ones_like(incoming_rt[..., 0:1]))
         p_ = self.geom_trafos.sample_iso(shape, 1, device=incoming_rt.device)
         x  = self.geom_trafos.sample_iso(shape, 1, device=incoming_rt.device)
@@ -77,6 +81,8 @@ class GenerateBase:
 
     @torch.no_grad()
     def iso(self, shape, device):
+        """Fully isotropic x_0 for inverse-mask events, on all rows; unrelated
+        to base_dist='iso', which routes to iso_dirs."""
         e = torch.rand((*shape, 1), device=device)
         p = self.geom_trafos.sample_iso(shape, 1, device=device)
         x = self.geom_trafos.sample_iso(shape, 1, device=device)
@@ -84,6 +90,8 @@ class GenerateBase:
 
     @torch.no_grad()
     def insert_add(self, base):
+        """Fills the E_dep row's energy cell from the (learned) sigmoid-normal
+        edep_mu/edep_sig, in place."""
         mu, sig = self.edep_mu, self.edep_sig
         if torch.is_tensor(mu):
             mu, sig = mu.squeeze(-1), sig.squeeze(-1)
