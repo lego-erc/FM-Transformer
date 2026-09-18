@@ -18,24 +18,26 @@ class BatchedMuon(torch.optim.Optimizer):
     """``pytorch_optimizer.Muon``'s update (Nesterov momentum -> Newton-Schulz
     orthogonalisation for >=2-D weights, AdamW for the rest, decoupled weight
     decay) with the per-parameter Python loop replaced by ``torch._foreach`` ops
-    and one Newton-Schulz call per group of equal-shape matrices. Same
-    numbers, ~5x fewer kernel launches (flow 18 -> 4 ms, mult 16 -> 3 ms per
-    step; both training steps are launch-bound). Equality check:
-    tests/test_batched_muon.py."""
+    and one Newton-Schulz call per group of equal-shape matrices. Same update up
+    to bf16 rounding in the batched Newton-Schulz, ~5x fewer kernel launches
+    (flow 18 -> 4 ms, mult 16 -> 3 ms per step; both training steps are
+    launch-bound). Closeness check: tests/test_batched_muon.py."""
 
     def __init__(
         self, params, lr=1e-3, momentum=0.95, nesterov=True, ns_steps=5,
         weight_decay=0.0, weight_decouple=True, use_adjusted_lr=False,
         adamw_lr=3e-4, adamw_betas=(0.9, 0.95), adamw_wd=0.0, adamw_eps=1e-10, **_,
     ):
-        for g in params:
+        for g in params:  # per-group keys win over the constructor defaults, as in the library
             if g["use_muon"]:
-                g.update(lr=g.get("lr", lr), momentum=momentum, nesterov=nesterov, ns_steps=ns_steps,
-                         weight_decay=g.get("weight_decay", weight_decay), use_adjusted_lr=use_adjusted_lr)
+                g.update(lr=g.get("lr", lr), momentum=g.get("momentum", momentum),
+                         nesterov=g.get("nesterov", nesterov), ns_steps=g.get("ns_steps", ns_steps),
+                         weight_decay=g.get("weight_decay", weight_decay),
+                         use_adjusted_lr=g.get("use_adjusted_lr", use_adjusted_lr))
             else:
-                g.update(lr=g.get("lr", adamw_lr), betas=adamw_betas, eps=adamw_eps,
-                         weight_decay=g.get("weight_decay", adamw_wd))
-            g.update(weight_decouple=weight_decouple, step=0)
+                g.update(lr=g.get("lr", adamw_lr), betas=g.get("betas", adamw_betas),
+                         eps=g.get("eps", adamw_eps), weight_decay=g.get("weight_decay", adamw_wd))
+            g.update(weight_decouple=g.get("weight_decouple", weight_decouple), step=0)
         super().__init__(params, {})
         self._shape_groups = {}  # id(group) -> [(param indices, lr ratio)], shapes are fixed
 
@@ -107,6 +109,8 @@ class BatchedMuon(torch.optim.Optimizer):
 
 
 def muon_factory(params, **kw):
+    """Muon for ``ndim >= 2`` weights, AdamW for the rest: 1-D gates and
+    log-variances must not be orthogonalised, which would discard their magnitude."""
     ps = list(params)
     return BatchedMuon([
         {"params": [p for p in ps if p.ndim >= 2], "use_muon": True},
@@ -120,6 +124,9 @@ def schedulefree_adamw(params, **kw):
 
 
 def warmup_cosine(opt, total_steps, warmup_frac=0.05, eta_min=1e-6):
+    """Linear warmup over ``warmup_frac`` then cosine to ``eta_min``. ``total_steps``
+    must be an upper bound on the real step count: past ``T_max`` the cosine rises
+    back toward the peak LR."""
     n = max(1, int(warmup_frac * total_steps))
     return SequentialLR(opt, milestones=[n], schedulers=[
         LinearLR(opt, start_factor=1e-3, end_factor=1.0, total_iters=n),

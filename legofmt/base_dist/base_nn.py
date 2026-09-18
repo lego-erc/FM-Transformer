@@ -86,6 +86,8 @@ class BaseDist:
     """Base-distribution mixin for :class:`~legofmt.main.modules.LEGOLtng`."""
 
     def base_head_params(self, ds_t: DataStruct) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Per-event ``(sm_scale, edep_mu, edep_sig, kappa)`` from the head's inputs:
+        incoming kinematics, species one-hot, cube chord, ``log(Size*Density/X0)``."""
         pid     = ds_t.f.in_p[..., 0, -1]
         idx     = pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)
         species = nn.functional.one_hot(
@@ -111,8 +113,8 @@ class BaseDist:
             # Conditioning them too moved kappa 5.6..44.7 across branches and cost
             # 2x on direction losses; conditioning E_dep alone kept the gain.
             extra   = torch.cat(self._out_set_feats(ds_t), dim=-1)
-            out_e   = self.base_head(torch.cat((x, extra), dim=-1))
-            out     = self.base_head(torch.cat((x, torch.zeros_like(extra)), dim=-1))
+            both    = torch.cat((torch.cat((x, extra), -1), torch.cat((x, torch.zeros_like(extra)), -1)))
+            out_e, out = self.base_head(both).chunk(2)  # one forward for both passes
             out     = torch.cat((out[..., 0:1], out_e[..., 1:3], out[..., 3:4]), dim=-1)
         else:
             out     = self.base_head(x)
@@ -131,6 +133,8 @@ class BaseDist:
         return [valid.sum(-1, keepdim=True).float().log1p(), cnt.log1p()]
 
     def _base_moment_loss(self, ds_t, fwd, s, mu, sig, kap) -> Tensor:
+        """Moment-match the prior to the batch: quantile-node mean of the energy scale,
+        logit-normal NLL for E_dep, and (``tanh_theta``) the mean opening angle for kappa."""
         z  = 2 ** 0.5 * torch.erfinv(torch.linspace(
             -0.995, 0.995, 100, device=s.device))  # N(0,1) quantile nodes
         v  = (ds_t.am.out_p & fwd.unsqueeze(-1)).float()
@@ -161,6 +165,8 @@ class BaseDist:
         return l_scale + l_edep + l_kappa
 
     def _fit_base_head(self, ds_t, fwd) -> None:
+        """Run the head, hand its outputs to the sampler, and cache the moment loss
+        while the head is trainable."""
         learn = self.model.training and self.base_head[-1].weight.requires_grad
         with torch.set_grad_enabled(learn):
             s, mu, sig, kap = self.base_head_params(ds_t)
@@ -172,6 +178,8 @@ class BaseDist:
         self.gen_base.kappa    = kap.detach()
 
     def _ot_couple(self, base: Tensor, ds_t, data: Tensor) -> Tensor:
+        """Per-event Hungarian assignment of base slots to data slots, blocked across
+        pdgids and valid/pad pairs; base samples are pdgid-independent so permuting is free."""
         if slap is None:
             raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
         base = base.where(ds_t.am.full.unsqueeze(-1), data)
@@ -194,6 +202,8 @@ class BaseDist:
         return base
 
     def gen_base_wrapper(self, ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]") -> Tensor:
+        """Draw ``x_0``: data on conditioning cells, the (learned) prior on generated
+        ones, an isotropic sample for inverse-mask events. ``lego_eval`` calls this."""
         if not isinstance(ds_t, DataStruct):
             ds_t = DataStruct(*ds_t)
         self._base_dist_loss = None
@@ -216,27 +226,33 @@ class BaseDist:
         return torch.where((m == 1).unsqueeze(-1), noise, data)
 
     def pretrain_base(self, batches, lr: float = 1e-2) -> float:
+        """Fit the base head alone on ``batches`` with Adam, then freeze it (so a
+        ``base_dist_loss`` set alongside is inert). Returns the final moment loss."""
         opt          = torch.optim.Adam(self.base_head.parameters(), lr=lr)
         was_training = self.model.training
         rc           = self.rc
         self.rc      = replace(rc, ot_coupling=False)
         self.model.train()
         ot = float("nan")
-        for ds_t in batches:
-            opt.zero_grad()
-            self.gen_base_wrapper(ds_t)
-            if self._base_dist_loss is None:
-                continue
-            self._base_dist_loss.backward()
-            opt.step()
-            ot = self._base_dist_loss.item()
-        self.model.train(was_training)
-        self.rc = rc
+        try:
+            for ds_t in batches:
+                opt.zero_grad()
+                self.gen_base_wrapper(ds_t)
+                if self._base_dist_loss is None:
+                    continue
+                self._base_dist_loss.backward()
+                opt.step()
+                ot = self._base_dist_loss.item()
+        finally:
+            self.model.train(was_training)
+            self.rc = rc
         self.base_head.requires_grad_(False)
         self._base_dist_loss = None
         return ot
 
     def _pretrain_base_if_needed(self) -> None:
+        """Rank 0 pretrains on CPU-resident data moved to its device and broadcasts the
+        weights; every rank ends with the head frozen."""
         if (self.rc.base_pretrain_batches and getattr(self, "_trainer", None)
                 and hasattr(self, "base_head") and self.base_head[-1].weight.requires_grad):
             if self.trainer.is_global_zero:

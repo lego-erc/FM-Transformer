@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,7 +19,7 @@ import torch
 from flow_matching.utils.manifolds import Euclidean, Sphere
 
 from legofmt.compat import (
-    XT_QK_NORM_FIX, XT_VERSION, apply_legacy_projection_in_out,
+    XT_VERSION, apply_legacy_projection_in_out,
     build_manifold_from_string, migrate_legacy_mult_heads,
     qk_norm_scale_compat, rename_ntokens,
 )
@@ -208,6 +209,13 @@ def _build_resolved(
     overflow_delta = model_conf.get("overflow_delta", 0.0)
     if overflow_delta < 0:
         raise ValueError(f"overflow_delta must be >= 0, got {overflow_delta}.")
+    if model_conf.get("base_dist_loss", 0.0) > 0 and model_conf.get("base_pretrain_batches", 300) > 0:
+        warnings.warn(
+            "base_pretrain_batches > 0 freezes the base head after pretraining, so "
+            "base_dist_loss is inert; set base_pretrain_batches: 0 to co-train.",
+            stacklevel=2,
+        )
+    uncert_min = model_conf.get("uncert_min", -6.0)
 
     return ResolvedLEGOConfig(
         max_seq_l=max_seq_l,
@@ -227,8 +235,8 @@ def _build_resolved(
         one_step_euler_every=model_conf.get("one_step_euler_every", 1),
         uncert_weighting=model_conf.get("uncert_weighting", False),
         uncert_bins=model_conf.get("uncert_bins", 16),
-        uncert_min=model_conf.get("uncert_min", -6.0),
-        uncert_min_flow=model_conf.get("uncert_min_flow", model_conf.get("uncert_min", -6.0)),
+        uncert_min=uncert_min,
+        uncert_min_flow=model_conf.get("uncert_min_flow", uncert_min),
         overflow_delta=overflow_delta,
         canon_sym=model_conf.get("canon_sym", False),
         cond_scalars=cond_scalars,
