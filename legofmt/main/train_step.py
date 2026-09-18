@@ -27,6 +27,8 @@ class TrainStep:
     """Training-step mixin for :class:`~legofmt.main.modules.LEGOLtng`."""
 
     def _shift_overflow_targets(self, ds_t: DataStruct) -> DataStruct:
+        """On a clone, write ``-overflow_delta`` into the zero-valued outgoing-energy
+        and E_dep cells: 'absorbed / no deposit' becomes a target outside ``[0, 1]``."""
         f = ds_t.f.full.clone()
         delta = self.rc.overflow_delta
         op = _F(f).out_p
@@ -56,6 +58,10 @@ class TrainStep:
                 )
             nb  = self.rc.uncert_bins
             idx = (t.detach().clamp(0, 1) * nb).long().clamp(max=nb - 1)
+            # clamp in place: below the floor clamp() has zero gradient, so a cell
+            # that overshoots would latch there and stop responding to its loss
+            with torch.no_grad():
+                self.lv.clamp_(min=self.rc.uncert_min)
             lv  = self.lv.view(nb, 3)[idx].clamp(min=self.rc.uncert_min)  # (B, 3)
             w   = torch.exp(-lv)
             total = (
@@ -80,6 +86,8 @@ class TrainStep:
 
     @torch.no_grad()
     def _sample_mask(self, ds_t: DataStruct) -> Tensor:
+        """Per-event coin flip (``mask_conf.p_forward``) between the data mask and its
+        inverse (generate the incoming from the outgoing set); scalar rows stay conditioning."""
         if not self.rc.mask_conf:
             return ds_t.m.full
         fwd = ds_t.m.full
@@ -89,6 +97,8 @@ class TrainStep:
         return torch.where(pick.unsqueeze(-1), fwd, inv.long())
 
     def _sample_t(self, ds_t: DataStruct) -> Tensor:
+        """Training-time ``t`` per event: logit-normal (``sm_norm``) or SD3 mode sampling
+        (``sd3``; scale 0 is uniform); ``t_dist_shift`` applies ``t ** (1/shift)``."""
         if self.rc.t_dist == "sm_norm":
             t = torch.sigmoid(self.rc.t_dist_scale * torch.randn_like(ds_t.f.d))
         elif self.rc.t_dist == "sd3":
@@ -103,6 +113,9 @@ class TrainStep:
     def _flow_map_loss(
         self, loss: Tensor, base: Tensor, ds_t: DataStruct, pdgid_idx: Tensor,
     ) -> Tensor:
+        """Add ``fac * (lv_flow + every * exp(-lv_flow) * one_step_euler)`` on firing
+        steps and the barrier alone otherwise, so the per-step expectation equals
+        the ungated Kendall term; validation evaluates it every step with ``every=1``."""
         fac = self.rc.one_step_euler_fac
         if fac <= 0:
             return loss
@@ -111,6 +124,8 @@ class TrainStep:
         if hasattr(self, "lv_flow"):
             # A Kendall cell settles at lv = log(L); one_step_euler (~5e-5) runs three
             # decades below the velocity losses, so it needs a lower floor of its own.
+            with torch.no_grad():  # in place, so the gradient stays live on the floor
+                self.lv_flow.clamp_(min=self.rc.uncert_min_flow)
             lvf = self.lv_flow.clamp(min=self.rc.uncert_min_flow).squeeze()
             loss = loss + fac * lvf
         if self.training and self.global_step % every != 0:
@@ -145,6 +160,9 @@ class TrainStep:
             ):  # reflow: couple base to the teacher's transport of it
                 tgt = self.reflow_teacher.solve(ds_t, x_init=base, **self.rc.reflow_kwargs)
                 tgt = torch.where((ds_t.m.full == 1).unsqueeze(-1), tgt, ds_t.f.model_in)
+                # the E_dep row is generated but its direction columns are the (1,1,1)
+                # filler; transporting them gave that row an off-manifold target
+                tgt[:, :self.rc.n_prefix, 1:] = ds_t.f.non_cc[..., 1:]
                 ds_t = DataStruct(
                     torch.cat((tgt, ds_t.f.pdgids), dim=-1), ds_t.m.full, ds_t.am.full,
                 )
