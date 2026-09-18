@@ -1,9 +1,13 @@
 """Vendored from lego-eval (metrics.py + summary.py); legofmt cannot import
-lego_eval (circular). w1_per_feature is the equal-N specialisation."""
+lego_eval (circular). w1_per_feature is the equal-N specialisation.
+
+Two known warts: ``standardize`` pools real+fake statistics and the MMD
+bandwidth is re-derived per call, so neither number is comparable across runs;
+the event summaries cover only e-/e+/gamma (zero features for hadronic runs)."""
 
 import torch
 
-from legofmt.data.struct import _F
+from legofmt.data.struct import DataStruct, _F
 
 from legofmt.geometry.geom_trafos import GeomTrafos
 
@@ -43,6 +47,8 @@ def event_summary(mom, e, pos, pdgid, active, e_dep):
 
 
 def standardize(a, b):
+    """Z-score both sets by their pooled mean/std: an over-dispersed model inflates
+    sigma and reports a smaller W1, and each run gets its own normaliser."""
     anchor = torch.cat([a, b], dim=0)
     mu = anchor.mean(dim=0)
     sigma = anchor.std(dim=0).clamp(min=1e-8)
@@ -111,10 +117,16 @@ class ShowerValMetrics:
 
     @staticmethod
     def _generate(lego, ds_t):
+        """Generate with the ``odeint_conf`` solver settings, canonicalising the
+        directions first when ``canon_sym`` is on, exactly as ``Solvers.forward``."""
         cfg = lego.rc.odeint_conf
-        step = cfg.get("step_size", 0.04)
-        grid = torch.arange(0, 1 + step, step, device=lego.device).clamp_max(1)
-        return lego.solve(
+        sym = getattr(lego, "sym", None)
+        if sym is not None:
+            fwd  = ds_t.m.full[:, lego.rc.n_prefix] == 0
+            face = sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
+            ds_t = DataStruct(lego._canon_dirs(ds_t.f.full, face, fwd), ds_t.m.full, ds_t.am.full)
+        out = lego.solve(
             ds_t, x_init=lego.gen_base_wrapper(ds_t),
-            step_size=step, method=cfg.get("method", "midpoint"), time_grid=grid,
+            step_size=cfg.get("step_size", 0.04), method=cfg.get("method", "midpoint"),
         )
+        return out if sym is None else lego._canon_dirs(out, face, fwd, inverse=True)
