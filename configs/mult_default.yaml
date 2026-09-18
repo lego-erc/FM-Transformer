@@ -34,13 +34,11 @@ config:
     num_workers: 16
 
   mm_conf:
-    in_dim: 11
-    cond_scalars: ["Density", "Z", "A", "Size"]
+    cond_scalars: ["Density", "Z", "A", "Size"]   # in_dim is derived: len(cond_scalars) + 7
     dropout: 0.05
     h_dim: 128
     n_layers: 6
     n_heads: 6
-    in_dim: 8
     bs: 4096
     lr: 1.0e-3
     weight_decay: 1.0e-2

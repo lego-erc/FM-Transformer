@@ -1,11 +1,13 @@
 """Prepare raw shower data for training.
 
 Writes ``data_prepped.pt`` (the prepped tensors) and ``meta.json`` (the metadata
-the fresh-training config path reads) into the data directory.
+the fresh-training config path reads) into the output directory: the first CLI
+argument, or ``$LEGO_DATA_DIR`` if none is given.
 """
 
 import json
 import os
+import sys
 
 import numpy as np
 import torch
@@ -13,8 +15,6 @@ import pyg4lego
 
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.data.prep import DataPrep
-
-rng = np.random.default_rng(0)
 
 n_items = 500        # density points swept per material
 n_events_per_item = 4000
@@ -78,7 +78,7 @@ dataset = LEGODataset(
     device="cpu",
 )
 
-out_dir = os.path.dirname(os.path.abspath(__file__))
+out_dir = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("LEGO_DATA_DIR", ".")
 os.makedirs(out_dir, exist_ok=True)
 
 d = dataset.data
@@ -86,7 +86,7 @@ torch.save((d.f.full, d.m.full, d.am.full), f"{out_dir}/data_prepped.pt")
 
 ntokens = d.f.full.shape[1]
 pdgids = d.f.full[..., -1].flatten().nan_to_num().unique()
-pdgids = pdgids[(0 < pdgids.abs()) & (pdgids.abs() < 1000000000)].tolist() # filter pdgids
+pdgids = pdgids[(0 < pdgids.abs()) & (pdgids.abs() < 100000000)].tolist() # filter pdgids
 
 meta_dict = {
     "ntokens": ntokens,
@@ -95,6 +95,7 @@ meta_dict = {
     "max_energy": energy_max,
     "cutoff_mev": energy_min,
     "cond_scalars": cond_scalars,
+    "energy_kin": True,
 }
 
 with open(f"{out_dir}/meta.json", "w") as f:
