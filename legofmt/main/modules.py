@@ -26,10 +26,8 @@ from legofmt.main.train_step import TrainStep
 
 from legofmt.data.dataloaders import LEGODataset, make_loader
 from legofmt.data.prep import DataPrep
-from legofmt.data.struct import DataStruct
 
 from legofmt.cfm.path_sampler import ProductPathSampler
-from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.geometry.symmetry_projections import CubeSymmetry
 
 from legofmt.mod_comps.config import resolve_legoltng_config
@@ -128,10 +126,12 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
 
     @torch.no_grad()
     def convert_pdgids(self, pdgids: Tensor) -> Tensor:
-        cond = torch.isnan(pdgids) | (pdgids == 0) | (pdgids >= 1e8)
-        pdgid_idx = torch.searchsorted(
-            self.pdgids_template.to(pdgids.device), pdgids.contiguous()) + 1
-        return pdgid_idx.masked_fill_(cond, 0)
+        """Raw pdgids -> 1-based indices into ``pdgids_template``; NaN, 0, ions
+        (>= 1e8) and ids outside the vocabulary map to the unknown/pad index 0."""
+        template  = self.pdgids_template.to(pdgids.device)
+        pos       = torch.searchsorted(template, pdgids.contiguous()).clamp_max(len(template) - 1)
+        unknown   = torch.isnan(pdgids) | (pdgids == 0) | (pdgids >= 1e8) | (template[pos] != pdgids)
+        return (pos + 1).masked_fill_(unknown, 0)
 
     def _canon_dirs(self, x: Tensor, face: Tensor, fwd: Tensor, inverse: bool = False) -> Tensor:
         rot  = self.sym.uncanonicalize if inverse else self.sym.canonicalize
