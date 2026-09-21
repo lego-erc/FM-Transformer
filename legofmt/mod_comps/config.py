@@ -305,6 +305,7 @@ class ResolvedMultConfig:
     dl_conf: dict
     mm_conf: dict
     opt_conf: dict | None
+    val_conf: dict
     config: dict
 
     state_dict: dict | None
@@ -415,6 +416,7 @@ def _build_resolved_mult(
         dl_conf=dl_conf,
         mm_conf=mm_conf,
         opt_conf=config.get("opt_conf", mm_conf.get("opt_conf")),  # top-level first, mm_conf for back-compat
+        val_conf=config.get("val_conf", {}),
         config=config,
         state_dict=state_dict,
         train_inverse=mm_conf.get("train_inverse", False),

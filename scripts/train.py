@@ -145,10 +145,12 @@ if hasattr(model, "base_head"):
     }
     model.rc.config["base_conf"]["base_head_frozen"] = not model.base_head[-1].weight.requires_grad
 # the learned loss weights live on the LightningModule, not in vf's state_dict:
-# keep them so resume_from does not restart every Kendall cell at weight 1
-model.rc.config["model_conf"]["loss_weights"] = {
-    k: getattr(model, k).detach().cpu() for k in ("lv", "lv_flow") if hasattr(model, k)
-}
+# keep them so resume_from does not restart every Kendall cell at weight 1.
+# Guarded: the mult model has neither the cells nor a model_conf to put them in.
+if any(hasattr(model, k) for k in ("lv", "lv_flow")):
+    model.rc.config["model_conf"]["loss_weights"] = {
+        k: getattr(model, k).detach().cpu() for k in ("lv", "lv_flow") if hasattr(model, k)
+    }
 
 if run.get("ckpt_dir"):
     ckpt_dir = run["ckpt_dir"]  # explicit dir -> save directly here, no flow/mult subdir

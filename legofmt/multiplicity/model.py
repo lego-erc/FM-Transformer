@@ -9,6 +9,7 @@ from the outgoing set and backs ``GenerateIn``.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import random_split
 
 from lightning import LightningModule
 
@@ -263,14 +264,67 @@ class MultModel(LightningModule):
             return self.opt
         return {"optimizer": self.opt, "lr_scheduler": self._sched}
 
-    def train_dataloader(self):
+    def setup(self, stage: str | None = None) -> None:
+        if getattr(self, "_val_ds", None) is not None:
+            return
+        full = MultLoader(self.rc.config)
+        n_val = max(1, int(len(full) * self.rc.val_conf.get("val_frac", 0.01)))
+        gen = torch.Generator().manual_seed(self.rc.val_conf.get("seed", 0))
+        self._train_ds, self._val_ds = random_split(
+            full, [len(full) - n_val, n_val], generator=gen,
+        )
+
+    def _make_loader(self, dataset, *, shuffle: bool):
         return make_loader(
-            MultLoader(self.rc.config),
+            dataset,
             bs=self.rc.mm_conf.get("bs", 2**12),
-            shuffle=True,
+            shuffle=shuffle,
             num_workers=self.rc.dl_conf.get("num_workers", 4),
             batched_sampler=True,
         )
+
+    def train_dataloader(self):
+        return self._make_loader(self._train_ds, shuffle=True)
+
+    def val_dataloader(self):
+        return self._make_loader(self._val_ds, shuffle=False)
+
+    def on_validation_epoch_start(self) -> None:
+        # rows: [0] generated counts, [1] true counts, [2, 0] event count
+        self._val_acc = torch.zeros(3, self.rc.max_seq_len, device=self.device)
+
+    @torch.no_grad()
+    def validation_step(self, batch, batch_idx):
+        """Free-running per-species counts, not the loss.
+
+        The loss saturates at the data's irreducible entropy while the sampled
+        counts are still several percent off, so only a rollout metric tracks
+        the thing that is actually wrong. ``force_eager`` keeps the 19 decode
+        shapes out of the dynamo cache the compiled training step lives in.
+        """
+        in_tok, counts, pdgid_in_idx = batch[:3]
+        with torch.compiler.set_stance("force_eager"):
+            gen = self((in_tok, None, pdgid_in_idx))
+        self._val_acc[0] += gen.sum(0)
+        self._val_acc[1] += counts.sum(0)
+        self._val_acc[2, 0] += in_tok.shape[0]
+
+    def on_validation_epoch_end(self) -> None:
+        acc = self._val_acc
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(acc, op=torch.distributed.ReduceOp.SUM)
+        n = acc[2, 0].clamp(min=1)
+        gen, true = acc[0] / n, acc[1] / n
+        # keep comes from the reduced sums, so every rank logs the same key set;
+        # per-rank keys would leave the ranks issuing different collectives
+        keep = true > self.rc.val_conf.get("count_floor", 0.005)
+        ratio = gen[keep] / true[keep]
+        self.log_dict({
+            "val/n_out_ratio": gen.sum() / true.sum().clamp(min=1e-9),
+            "val/count_mae": (ratio - 1).abs().mean(),
+        }, sync_dist=False)
+        for i in keep.nonzero(as_tuple=True)[0].tolist():
+            self.log(f"val/count_ratio/{int(self.ptypes[i])}", gen[i] / true[i], sync_dist=False)
 
     @torch.no_grad()
     def forward(self, batch: (tuple | torch.Tensor)):
