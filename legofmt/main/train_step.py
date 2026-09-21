@@ -21,6 +21,7 @@ from torch import Tensor
 from legofmt.data.struct import DataStruct, _F
 
 from legofmt.distill.distill import one_step_euler_loss
+from legofmt.log_metrics.val_metrics import UNSYNCED_PREFIXES
 
 
 class TrainStep:
@@ -189,6 +190,10 @@ class TrainStep:
         loss = self._step(batch, _batch_idx)
         self.log("Validation Loss", loss, on_step=True, on_epoch=True, sync_dist=True, batch_size=bs)
         for name, val in self.val_metrics(self, batch).items():
-            self.log(name, val, on_epoch=True, sync_dist=True, batch_size=bs)
+            # population-dependent keys carry no collective: a rank whose shard holds no
+            # events of a species emits no key for it, and syncing those would leave the
+            # ranks issuing different numbers of collectives and deadlock NCCL
+            sync = not name.startswith(UNSYNCED_PREFIXES)
+            self.log(name, val, on_epoch=True, sync_dist=sync, batch_size=bs)
         return loss
 

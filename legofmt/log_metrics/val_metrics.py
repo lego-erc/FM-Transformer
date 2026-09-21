@@ -3,7 +3,8 @@ lego_eval (circular). w1_per_feature is the equal-N specialisation.
 
 Two known warts: ``standardize`` pools real+fake statistics and the MMD
 bandwidth is re-derived per call, so neither number is comparable across runs;
-the event summaries cover only e-/e+/gamma (zero features for hadronic runs)."""
+the event summaries cover only e-/e+/gamma (zero features for hadronic runs).
+``edep_by_primary`` exists because of that second one -- see its docstring."""
 
 import torch
 
@@ -22,6 +23,16 @@ SUMMARY_FEATURE_NAMES = [
     for stat in ("mean", "std")
     for k in KIN_NAMES
 ] + ["E_dep"]
+
+# Incoming guns, for the per-primary E_dep split. Superset of any one dataset;
+# species absent from a batch are simply not logged.
+PRIMARY_TAGS = {11: "em", -11: "ep", 22: "g", 2212: "p", 2112: "n",
+                211: "pip", -211: "pim"}
+
+# Which keys edep_by_primary can emit. Their presence depends on the species and the
+# multiplicities a rank's own shard happens to hold, so they must never be logged with
+# sync_dist: ranks would issue different numbers of collectives and NCCL would deadlock.
+UNSYNCED_PREFIXES = ("val/w1_edep/", "val/edep_ratio_multi/")
 
 
 def _spherical(mom, e, pos):
@@ -87,6 +98,36 @@ def w1_per_feature(X, Y):
     return (X.sort(0).values - Y.sort(0).values).abs().mean(0)
 
 
+def edep_by_primary(edep_real, edep_fake, pdgid_in, n_out) -> dict:
+    """E_dep accuracy split by incoming species, and again on the events with a
+    secondary.
+
+    Nothing else in the validation set resolves the primary: ``event_summary``
+    tags *outgoing* e-/e+/gamma and pools every gun together, so a defect that
+    lives in one primary averages away. Measured on rp_fm_had_base_180926
+    (2026-09-18): E_dep was within 1% for e-/e+/gamma at every multiplicity but
+    +15% for protons and +20% for neutrons once ``n_out >= 4``, and none of the
+    logged metrics moved. The split on ``n_out >= 2`` is where the hadronic
+    error lives -- a nuclear interaction happened, and the E_dep prior cannot
+    see that it did.
+
+    Ratios, not W1, for the multi cell: the error is a scale error and a ratio
+    reads directly as a percentage.
+    """
+    out = {}
+    for pid, tag in PRIMARY_TAGS.items():
+        sel = pdgid_in == pid
+        if not bool(sel.any()):
+            continue
+        r, f = edep_real[sel], edep_fake[sel]
+        out[f"val/w1_edep/{tag}"] = (r.sort().values - f.sort().values).abs().mean()
+        multi = sel & (n_out >= 2)
+        if int(multi.sum()) >= 32:
+            rm, fm = edep_real[multi], edep_fake[multi]
+            out[f"val/edep_ratio_multi/{tag}"] = fm.mean() / rm.mean().clamp(min=1e-8)
+    return out
+
+
 class ShowerValMetrics:
 
     def __call__(self, lego, ds_t) -> dict:
@@ -113,6 +154,10 @@ class ShowerValMetrics:
                 f"val/w1_{tag}/{n}": w1
                 for n, w1 in zip(names, w1_per_feature(fake_s, real_s))
             })
+        out.update(edep_by_primary(
+            ds_t.f.edep, _F(gen).edep, ds_t.f.in_p[..., 0, -1].long(),
+            ds_t.am.out_p.sum(-1),
+        ))
         return out
 
     @staticmethod

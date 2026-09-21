@@ -5,7 +5,9 @@ from legofmt.log_metrics.val_metrics import (
     KIN_NAMES,
     SUMMARY_FEATURE_NAMES,
     ShowerValMetrics,
+    UNSYNCED_PREFIXES,
     compute_mmd,
+    edep_by_primary,
     event_summary,
     particle_kinematics,
     standardize,
@@ -108,3 +110,67 @@ def test_shower_val_metrics_returns_loggable_dict():
     assert sum(k.startswith("val/w1_particle/") for k in out) == len(KIN_NAMES)
     assert sum(k.startswith("val/w1_summary/") for k in out) == len(SUMMARY_FEATURE_NAMES)
     assert all(torch.isfinite(v) for v in out.values())
+
+
+def test_edep_by_primary_splits_the_guns():
+    """A proton-only E_dep error must show up on the proton keys and nowhere else."""
+    edep_real = torch.cat([torch.full((64,), 0.4), torch.full((64,), 0.4)])
+    edep_fake = edep_real.clone()
+    edep_fake[64:] *= 1.25                       # protons only, +25%
+    pdgid_in = torch.cat([torch.full((64,), 11), torch.full((64,), 2212)])
+    n_out = torch.full((128,), 4)
+
+    out = edep_by_primary(edep_real, edep_fake, pdgid_in, n_out)
+    assert set(out) == {"val/w1_edep/em", "val/w1_edep/p",
+                        "val/edep_ratio_multi/em", "val/edep_ratio_multi/p"}
+    assert out["val/w1_edep/em"].item() == 0.0
+    assert out["val/edep_ratio_multi/em"].item() == 1.0
+    assert abs(out["val/edep_ratio_multi/p"].item() - 1.25) < 1e-5
+
+
+def test_edep_by_primary_skips_thin_and_single_particle_cells():
+    edep = torch.rand(40)
+    pdgid_in = torch.full((40,), 2112)
+    # 8 events with a secondary is under the 32-event floor -> no ratio key
+    n_out = torch.cat([torch.full((32,), 1), torch.full((8,), 3)])
+    out = edep_by_primary(edep, edep.clone(), pdgid_in, n_out)
+    assert set(out) == {"val/w1_edep/n"}
+
+
+def test_population_dependent_keys_are_excluded_from_sync():
+    """Every key whose presence depends on the shard must match UNSYNCED_PREFIXES.
+
+    validation_step logs with sync_dist for everything else, and a synced key that
+    one rank emits and another does not leaves the ranks issuing different numbers
+    of collectives -- NCCL then hangs at the sanity check and times out 30 min later.
+    """
+    both = edep_by_primary(                         # e- and p, both with a multi cell
+        torch.rand(128), torch.rand(128),
+        torch.cat([torch.full((64,), 11), torch.full((64,), 2212)]),
+        torch.full((128,), 4),
+    )
+    thin = edep_by_primary(                         # protons only, all n_out == 1
+        torch.rand(64), torch.rand(64),
+        torch.full((64,), 2212), torch.ones(64),
+    )
+    varying = set(both) ^ set(thin)
+    assert varying, "fixture no longer exercises a varying key set"
+    assert all(k.startswith(UNSYNCED_PREFIXES) for k in varying), sorted(varying)
+
+
+def test_static_val_metric_keys_are_still_synced():
+    B, L = 16, 8
+    f = torch.randn(B, L, 8)
+    f[..., 7] = torch.tensor([0, 0, 0, 11, -11, 22, 11, 0.0])
+    am = torch.zeros(B, L, dtype=torch.bool)
+    am[:, 2:] = True
+    mm = am.clone().long()
+    mm[:, :3] = 0
+
+    out = ShowerValMetrics()(_StubLego(), DataStruct(f, mm, am))
+    synced = {k for k in out if not k.startswith(UNSYNCED_PREFIXES)}
+    assert synced == (
+        {"val/mmd_particle", "val/mmd_summary"}
+        | {f"val/w1_particle/{n}" for n in KIN_NAMES}
+        | {f"val/w1_summary/{n}" for n in SUMMARY_FEATURE_NAMES}
+    )
