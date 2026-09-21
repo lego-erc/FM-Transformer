@@ -37,9 +37,7 @@ class TrainStep:
         edep.masked_fill_(edep == 0, -delta)
         return DataStruct(f, ds_t.m.full, ds_t.am.full)
 
-    def reduce_loss(
-        self, sq: Tensor, ds_t: DataStruct, t: Tensor | None = None,
-    ) -> tuple[Tensor, dict]:
+    def reduce_loss(self, sq: Tensor, ds_t: DataStruct) -> tuple[Tensor, dict]:
         """The weighted training loss, and the scalars the caller should log."""
         g        = ((ds_t.m.full == 1) & (ds_t.am.full == 1)).unsqueeze(-1)
         denom    = g.sum().clamp(min=1)
@@ -48,34 +46,25 @@ class TrainStep:
         loss_dir = out[..., 1:4].sum() / (denom * 3)
         loss_x   = out[..., 4:7].sum() / (denom * 3)
         logs     = {}
-        if not self.rc.uncert_weighting:
+        if not self.rc.learned_loss_weights:
             total = loss_e + loss_dir + loss_x
         else:
-            if t is None:
-                raise ValueError(
-                    "uncert_weighting=True needs the per-event t, which the "
-                    "time-independent (LEGOLtngDirect) path does not have."
-                )
-            nb  = self.rc.uncert_bins
-            idx = (t.detach().clamp(0, 1) * nb).long().clamp(max=nb - 1)
             # clamp in place: below the floor clamp() has zero gradient, so a cell
             # that overshoots would latch there and stop responding to its loss
             with torch.no_grad():
-                self.lv.clamp_(min=self.rc.uncert_min)
-            lv  = self.lv.view(nb, 3)[idx].clamp(min=self.rc.uncert_min)  # (B, 3)
+                self.lv.clamp_(min=self.rc.max_loss_weight)
+            lv  = self.lv.clamp(min=self.rc.max_loss_weight)  # (3,), one per channel
             w   = torch.exp(-lv)
             total = (
-                (out[..., 0:1] * w[:, 0].view(-1, 1, 1)).sum() / denom
-                + (out[..., 1:4] * w[:, 1].view(-1, 1, 1)).sum() / (denom * 3)
-                + (out[..., 4:7] * w[:, 2].view(-1, 1, 1)).sum() / (denom * 3)
-                + lv.mean(0).sum()  # the +log(sigma^2) barrier; zero at init
+                w[0] * loss_e + w[1] * loss_dir + w[2] * loss_x
+                + lv.sum()  # the +log(sigma^2) barrier; zero at init
             )
-            v = lv.detach().exp().mean(0)
+            v = lv.detach().exp()
             logs = {"uncert/var_energy": v[0], "uncert/var_dir": v[1], "uncert/var_pos": v[2]}
         out_logs = {}
         if self.training:
             out_logs = {
-                # unweighted, so these stay comparable across uncert settings
+                # unweighted, so these stay comparable across loss-weight settings
                 "loss/energy": loss_e.detach(),
                 "loss/out_dir": loss_dir.detach(),
                 "loss/out_pos": loss_x.detach(),
@@ -125,8 +114,8 @@ class TrainStep:
             # A Kendall cell settles at lv = log(L); one_step_euler (~5e-5) runs three
             # decades below the velocity losses, so it needs a lower floor of its own.
             with torch.no_grad():  # in place, so the gradient stays live on the floor
-                self.lv_flow.clamp_(min=self.rc.uncert_min_flow)
-            lvf = self.lv_flow.clamp(min=self.rc.uncert_min_flow).squeeze()
+                self.lv_flow.clamp_(min=self.rc.max_loss_weight_flow)
+            lvf = self.lv_flow.clamp(min=self.rc.max_loss_weight_flow).squeeze()
             loss = loss + fac * lvf
         if self.training and self.global_step % every != 0:
             return loss
@@ -175,7 +164,7 @@ class TrainStep:
             types=self.types_embd, pdgids=pdgid_idx, **step_extras,
         )
         sq = (v_out - ps_.dx_t) ** 2
-        loss, logs = self.reduce_loss(sq, ds_t, t=t)
+        loss, logs = self.reduce_loss(sq, ds_t)
         if logs:
             self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
 

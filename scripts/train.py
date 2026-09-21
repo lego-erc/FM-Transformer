@@ -31,6 +31,7 @@ import lightning as ltng
 import torch
 from legofmt.cfm.project_model import uncompiled
 from legofmt.main.modules import LEGOLtng
+from legofmt.mod_comps.config import migrate_loss_weight_keys
 from legofmt.multiplicity.model import MultModel
 
 d_dtype = getattr(torch, run["dtype"])
@@ -123,7 +124,8 @@ if resume_from:
     target = model.model.vf if train_model == "fm" else model
     incompat = target.load_state_dict(prev["state_dict"], strict=False)
     assert not incompat.unexpected_keys, f"resume_from arch mismatch: {incompat}"
-    for k, v in prev["config"]["model_conf"].get("uncert_lv", {}).items():  # learned loss weights
+    prev_mc = migrate_loss_weight_keys(prev["config"]["model_conf"])
+    for k, v in prev_mc.get("loss_weights", {}).items():
         if hasattr(model, k):
             getattr(model, k).data.copy_(v)
 
@@ -144,7 +146,7 @@ if hasattr(model, "base_head"):
     model.rc.config["base_conf"]["base_head_frozen"] = not model.base_head[-1].weight.requires_grad
 # the learned loss weights live on the LightningModule, not in vf's state_dict:
 # keep them so resume_from does not restart every Kendall cell at weight 1
-model.rc.config["model_conf"]["uncert_lv"] = {
+model.rc.config["model_conf"]["loss_weights"] = {
     k: getattr(model, k).detach().cpu() for k in ("lv", "lv_flow") if hasattr(model, k)
 }
 

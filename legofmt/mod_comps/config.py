@@ -63,10 +63,9 @@ class ResolvedLEGOConfig:
     one_step_euler_fac: float
     one_step_euler_sections: int
     one_step_euler_every: int
-    uncert_weighting: bool
-    uncert_bins: int
-    uncert_min: float
-    uncert_min_flow: float
+    learned_loss_weights: bool
+    max_loss_weight: float       # floors lv, so weight_bound = e^-max_loss_weight
+    max_loss_weight_flow: float  # the same bound for the flow-map's own cell
     overflow_delta: float
     canon_sym: bool
     cond_scalars: tuple[str, ...]
@@ -182,6 +181,31 @@ def _resolve_from_checkpoint(config: dict, state_dict: dict) -> ResolvedLEGOConf
     )
 
 
+# --- back-compat: the 2026-09 loss-weighting rename and the removal of the t-bins ---
+# `uncert_bins` 16 vs 1 measured as a null on generated E_dep (paired dW1 +0.015 +- 0.124
+# MeV against a 0.75 seed sd), so the per-t-bin table is gone and `lv` is one cell per
+# channel. A saved `lv` of size `bins*3` collapses through the mean of its variances,
+# because a converged Kendall cell sits at `lv = log(L)`.
+_RENAMED_KEYS = {
+    "uncert_weighting": "learned_loss_weights",
+    "uncert_min": "max_loss_weight",
+    "uncert_min_flow": "max_loss_weight_flow",
+    "uncert_lv": "loss_weights",
+}
+
+
+def migrate_loss_weight_keys(model_conf: dict) -> dict:
+    """Rewrite the pre-2026-09 ``uncert_*`` keys and drop the removed t-bin axis."""
+    for old, new in _RENAMED_KEYS.items():
+        if old in model_conf:
+            model_conf.setdefault(new, model_conf.pop(old))
+    model_conf.pop("uncert_bins", None)
+    lv = (model_conf.get("loss_weights") or {}).get("lv")
+    if lv is not None and lv.numel() > 3:
+        model_conf["loss_weights"]["lv"] = lv.view(-1, 3).exp().mean(0).log()
+    return model_conf
+
+
 def _build_resolved(
     config: dict,
     model_conf: dict,
@@ -190,6 +214,7 @@ def _build_resolved(
     pdgids: torch.Tensor,
     state_dict: dict | None,
 ) -> ResolvedLEGOConfig:
+    migrate_loss_weight_keys(model_conf)
     cond_scalars = tuple(model_conf.get("cond_scalars", ("Density",)))
     n_prefix = len(cond_scalars) + 1  # + edep slot (generated)
     set_layout(cond_scalars)
@@ -215,7 +240,7 @@ def _build_resolved(
             "base_dist_loss is inert; set base_pretrain_batches: 0 to co-train.",
             stacklevel=2,
         )
-    uncert_min = model_conf.get("uncert_min", -6.0)
+    max_loss_weight = model_conf.get("max_loss_weight", -6.0)
 
     return ResolvedLEGOConfig(
         max_seq_l=max_seq_l,
@@ -233,10 +258,9 @@ def _build_resolved(
         one_step_euler_fac=model_conf.get("one_step_euler_fac", 0.0),
         one_step_euler_sections=sections,
         one_step_euler_every=model_conf.get("one_step_euler_every", 1),
-        uncert_weighting=model_conf.get("uncert_weighting", False),
-        uncert_bins=model_conf.get("uncert_bins", 16),
-        uncert_min=uncert_min,
-        uncert_min_flow=model_conf.get("uncert_min_flow", uncert_min),
+        learned_loss_weights=model_conf.get("learned_loss_weights", False),
+        max_loss_weight=max_loss_weight,
+        max_loss_weight_flow=model_conf.get("max_loss_weight_flow", max_loss_weight),
         overflow_delta=overflow_delta,
         canon_sym=model_conf.get("canon_sym", False),
         cond_scalars=cond_scalars,
