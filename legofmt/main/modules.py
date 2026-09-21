@@ -39,11 +39,23 @@ from legofmt.mod_comps.optimizers import (
 from legofmt.log_metrics.val_metrics import ShowerValMetrics
 
 
+class _Interacting:
+    """Index view over the events that deposited energy, without copying them."""
+
+    def __init__(self, ds, keep: Tensor) -> None:
+        self.ds, self.keep = ds, keep
+
+    def __len__(self) -> int:
+        return len(self.keep)
+
+    def __getitem__(self, i):
+        return self.ds[self.keep[i]]
+
+
 def _drop_passthrough(ds):
     keep = ((_F(ds.data.f.full).edep.reshape(-1) > 0)
             | (ds.data.am.out_p.sum(-1) != 1)).nonzero(as_tuple=True)[0]
-    ds.data = ds.data[keep]
-    return ds
+    return _Interacting(ds, keep)
 
 
 class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
