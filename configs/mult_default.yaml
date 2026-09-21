@@ -45,6 +45,7 @@ config:
     warmup_steps: 0
     post_emb_norm: false
     use_abs_pos_emb: true
+    canon_sym: false
     train_inverse: false       # co-train the separate inverse-PID model (InvModel)
     model_args:                # splatted into the count model's Decoder
       ff_swish: true
@@ -65,6 +66,11 @@ config:
       use_adaptive_rmsnorm: true
       use_adaptive_layerscale: true
       residual_attn: true
+
+  val_conf:
+    val_frac: 0.01             # held out from training; MultModel.setup does the split
+    seed: 0
+    count_floor: 0.005         # species below this mean count are left out of val/count_mae
 
   opt_conf:
     opt: muon
