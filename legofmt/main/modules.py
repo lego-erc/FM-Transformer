@@ -26,6 +26,7 @@ from legofmt.main.train_step import TrainStep
 
 from legofmt.data.dataloaders import LEGODataset, make_loader
 from legofmt.data.prep import DataPrep
+from legofmt.data.struct import _F
 
 from legofmt.cfm.path_sampler import ProductPathSampler
 from legofmt.geometry.symmetry_projections import CubeSymmetry
@@ -36,6 +37,13 @@ from legofmt.mod_comps.optimizers import (
 )
 
 from legofmt.log_metrics.val_metrics import ShowerValMetrics
+
+
+def _drop_passthrough(ds):
+    keep = ((_F(ds.data.f.full).edep.reshape(-1) > 0)
+            | (ds.data.am.out_p.sum(-1) != 1)).nonzero(as_tuple=True)[0]
+    ds.data = ds.data[keep]
+    return ds
 
 
 class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
@@ -150,6 +158,8 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         if getattr(self, "_val_ds", None) is not None:
             return
         full  = LEGODataset(**self.rc.dl_conf["lds_args"], prep=DataPrep(self.rc.config))
+        if self.rc.config.get("model_conf", {}).get("exclude_passthrough", False):
+            full = _drop_passthrough(full)
         n_val = max(1, int(len(full) * self.rc.val_conf.get("val_frac", 0.01)))
         gen   = torch.Generator().manual_seed(self.rc.val_conf.get("seed", 0))
         self._train_ds, self._val_ds = random_split(
