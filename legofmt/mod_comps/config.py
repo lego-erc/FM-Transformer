@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import copy
 import json
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -56,7 +55,6 @@ class ResolvedLEGOConfig:
     t_dist_scale: float
     t_dist_shift: float
     ot_coupling: bool
-    base_dist_loss: float
     base_pretrain_batches: int
     base_pretrain_bs: int | None
     pdgid_is_idx: bool
@@ -234,12 +232,6 @@ def _build_resolved(
     overflow_delta = model_conf.get("overflow_delta", 0.0)
     if overflow_delta < 0:
         raise ValueError(f"overflow_delta must be >= 0, got {overflow_delta}.")
-    if model_conf.get("base_dist_loss", 0.0) > 0 and model_conf.get("base_pretrain_batches", 300) > 0:
-        warnings.warn(
-            "base_pretrain_batches > 0 freezes the base head after pretraining, so "
-            "base_dist_loss is inert; set base_pretrain_batches: 0 to co-train.",
-            stacklevel=2,
-        )
     max_loss_weight = model_conf.get("max_loss_weight", -6.0)
 
     return ResolvedLEGOConfig(
@@ -251,7 +243,6 @@ def _build_resolved(
         t_dist_scale=model_conf.get("t_dist_scale", 1.4),
         t_dist_shift=model_conf.get("t_dist_shift", 1.0),
         ot_coupling=model_conf.get("ot_coupling", False),
-        base_dist_loss=model_conf.get("base_dist_loss", 0.0),
         base_pretrain_batches=model_conf.get("base_pretrain_batches", 300),
         base_pretrain_bs=model_conf.get("base_pretrain_bs"),
         pdgid_is_idx=model_conf.get("pdgid_is_idx", False),

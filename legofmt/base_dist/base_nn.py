@@ -47,9 +47,9 @@ def build_base_head(rc, gen_base) -> nn.Sequential | None:
     bc = rc.config.get("base_conf") or {}
     hs = bc.get("base_head")
     # base_head_params reads Z/A/Size, so there is no head without them: an
-    # explicit ask (base_dist_loss, or a saved head that would otherwise
-    # vanish silently) is an error, the base_pretrain_batches default is not.
-    asked = rc.base_dist_loss > 0 or hs is not None
+    # explicit ask (a saved head that would otherwise vanish silently) is an
+    # error, the base_pretrain_batches default is not.
+    asked = hs is not None
     if not ((asked or rc.base_pretrain_batches > 0)
             and gen_base.scale_dist == "sm_norm"):
         return None
@@ -78,7 +78,7 @@ def build_base_head(rc, gen_base) -> nn.Sequential | None:
             head.load_state_dict(hs)
         else:
             load_legacy_base_head(head, hs)
-        head.requires_grad_(not bc.get("base_head_frozen", False))
+        head.requires_grad_(False)  # already fitted; the flow never trains the head
     return head
 
 
@@ -226,8 +226,8 @@ class BaseDist:
         return torch.where((m == 1).unsqueeze(-1), noise, data)
 
     def pretrain_base(self, batches, lr: float = 1e-2) -> float:
-        """Fit the base head alone on ``batches`` with Adam, then freeze it (so a
-        ``base_dist_loss`` set alongside is inert). Returns the final moment loss."""
+        """Fit the base head alone on ``batches`` with Adam, then freeze it: the head
+        is never trained alongside the flow. Returns the final moment loss."""
         opt          = torch.optim.Adam(self.base_head.parameters(), lr=lr)
         was_training = self.model.training
         rc           = self.rc

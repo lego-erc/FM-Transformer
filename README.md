@@ -243,7 +243,7 @@ training set via `random_split`.
 | `scale_dist` | `"trunc_norm"` | Energy prior: `"trunc_norm"`, `"uniform"`, `"sm_norm"` (`1 - tanh(|N(0,1)|·sm_scale)`), `"logit_norm"`. The learned `base_head` requires `"sm_norm"`. |
 | `sm_scale` | `0.5` | `sm_norm` tanh temperature; larger → flatter energy base. Per event from `base_head` when present. |
 | `e_dep_max` | `1.0` | Sigmoid scale for the sampled E_dep base value. |
-| `base_head` | — | Saved `base_head` state dict (written by training); `base_head_frozen` keeps it fixed on reload. |
+| `base_head` | — | Saved `base_head` state dict (written by training); always reloaded frozen — the head is never trained alongside the flow. |
 | `base_head_nout` | `False` | Also feed the outgoing multiplicity and per-pdgid composition to the head; only E_dep's `(mu, sig)` see them. |
 
 ### `model_conf` — flow-matching model
@@ -266,7 +266,7 @@ Top-level FM options:
 | `mask_conf.p_forward` | — | If `mask_conf` is set, per-event coin flip between the forward mask and its inverse (generate the incoming from the outgoing set). |
 | `learned_loss_weights`, `max_loss_weight`, `max_loss_weight_flow` | `False`, `-6.0`, `= max_loss_weight` | Kendall-style learned per-channel log-variance weights `exp(-lv)·L + lv` (energy / dir / pos), clamped at the floor(s), i.e. `weight_bound = e^-max_loss_weight` (403x at `-6`); the flow-map term has its own cell and floor. Pre-2026-09 `uncert_*` keys are migrated on load. |
 | `one_step_euler_fac`, `one_step_euler_sections`, `one_step_euler_every` | `0.0`, `8`, `1` | Flow-map self-distillation weight, dyadic ladder depth, and step gating. `> 0` requires `model_args.step_cond`. |
-| `base_dist_loss`, `base_pretrain_batches`, `base_pretrain_bs` | `0.0`, `300`, `dl_conf.bs` | Learned base head: co-training weight, and up-front pretraining batches (then frozen). Needs `Z`, `A`, `Size` in `cond_scalars` and `scale_dist: sm_norm`. |
+| `base_pretrain_batches`, `base_pretrain_bs` | `300`, `dl_conf.bs` | Learned base head: up-front pretraining batches, after which the head is frozen — it is never trained alongside the flow. Needs `Z`, `A`, `Size` in `cond_scalars` and `scale_dist: sm_norm`. |
 | `reflow_path`, `reflow_start_epoch`, `reflow_every`, `reflow_kwargs` | `None`, `0`, `1`, `{}` | Reflow against a frozen teacher (or the student's own snapshot when no path). **Gated solely by `reflow_start_epoch > 0`.** |
 | `pdgid_is_idx` | `False` | If `True`, the pdgid column is treated as an already-indexed vocab id (skipping `convert_pdgids`). Flipped on by `GenerateOut` at inference. |
 

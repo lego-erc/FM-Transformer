@@ -11,8 +11,7 @@ its caller, so the reduction can be exercised without a Trainer attached.
 
 Members resolved through ``self`` and owned by ``LEGOLtng``: ``rc``, ``model``,
 ``ps``, ``sym``, ``lv``, ``lv_flow``, ``gen_base``, ``val_metrics``,
-``reflow_teacher``, ``convert_pdgids``, ``_canon_dirs``, ``gen_base_wrapper``,
-``_base_dist_loss``.
+``reflow_teacher``, ``convert_pdgids``, ``_canon_dirs``, ``gen_base_wrapper``.
 """
 
 import torch
@@ -171,14 +170,6 @@ class TrainStep:
 
         loss = self._flow_map_loss(loss, base, ds_t, pdgid_idx)
 
-        if (ot := self._base_dist_loss) is not None:
-            loss = loss + self.rc.base_dist_loss * ot
-            if self.training:
-                self.log_dict(
-                    {"loss/base_dist": ot.detach(),
-                     "base/sm_scale": self.gen_base.sm_scale.detach().mean()},
-                    on_step=True, on_epoch=False, logger=True, sync_dist=False,
-                )
         return loss
 
     def training_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
