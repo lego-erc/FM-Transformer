@@ -1,7 +1,7 @@
 # legofmt
 
 Riemannian continuous flow-matching transformer for generating outgoing particles
-given an incoming particle and a material density. Targets calorimeter-style
+given an incoming particle, material atomic number, mass number and density. Targets calorimeter-style
 shower data (LEGO/Geant4) where each event has one incoming particle and a
 variable number of outgoing particles labelled by PDG-id.
 
