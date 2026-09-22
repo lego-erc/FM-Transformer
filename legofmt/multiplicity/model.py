@@ -31,7 +31,7 @@ from legofmt.mod_comps.optimizers import (
 _NEUTRAL_PDGIDS = (22, 2112, 130, 310, 12, -12, 14, -14, 3122)
 
 
-def _passthrough_allowed(rc) -> torch.Tensor:
+def _pt_pdgid_allowed(rc) -> torch.Tensor:
     allowed = rc.mm_conf.get("passthrough_pdgids", _NEUTRAL_PDGIDS)
     allowed = {int(p) for p in allowed}
     return torch.tensor([int(p) in allowed for p in rc.ptypes_in], dtype=torch.bool)
@@ -72,10 +72,10 @@ class MultLoader(torch.utils.data.Dataset):
         ).clamp(0, ptypes_in.shape[0] - 1)
         self.in_tok = torch.cat((conds, ds_f.in_cc.squeeze(-2)), dim=-1)
         self.counts = (ds_f.out_p[..., -1:] == ptypes.view(1, 1, -1)).sum(1).clamp_max(max_particles - 1)
-        self.passthrough = None
+        self.pt_target = None
         if mm_conf.get("passthrough_head", False):
             n_out = ds.am.out_p.sum(-1)
-            self.passthrough = ((ds_f.edep.reshape(-1) <= 0) & (n_out == 1)).float()
+            self.pt_target = ((ds_f.edep.reshape(-1) <= 0) & (n_out == 1)).float()
 
         if self.train_inverse:
             out_cc = ds_f.out_cc.nan_to_num()
@@ -95,15 +95,15 @@ class MultLoader(torch.utils.data.Dataset):
             self.counts[idx].to(self.device),
             self.pdgid_in_idx[idx].to(self.device),
         )
-        pt = () if self.passthrough is None else (self.passthrough[idx].to(self.device),)
+        pt_tgt = () if self.pt_target is None else (self.pt_target[idx].to(self.device),)
         if not self.train_inverse:
-            return base + pt
+            return base + pt_tgt
         return base + (
             self.out_tok[idx].to(self.device),
             self.out_pid_idx[idx].to(self.device),
             self.out_mask[idx].to(self.device),
             self.edep[idx].to(self.device),
-        ) + pt
+        ) + pt_tgt
 
 
 class InvModel(nn.Module):
@@ -202,7 +202,7 @@ class MultModel(LightningModule):
             self.pt_head = nn.Sequential(
                 nn.Linear(rc.h_dim, pt_dim), nn.Mish(), nn.Linear(pt_dim, 1),
             )
-        self.register_buffer("_pt_allowed", _passthrough_allowed(rc), persistent=False)
+        self.register_buffer("_pt_pdgid_allowed", _pt_pdgid_allowed(rc), persistent=False)
         self.proj_out_w = torch.nn.Parameter(torch.empty(rc.max_seq_len, rc.h_dim, rc.max_particles))
         self.proj_out_b = torch.nn.Parameter(torch.empty(rc.max_seq_len, rc.max_particles))
         _bound = 1.0 / (rc.h_dim ** 0.5)
@@ -270,7 +270,7 @@ class MultModel(LightningModule):
             loss_count = ce.mean()
             total = loss_count
         else:
-            allowed = self._pt_allowed[pdgid_in_idx]
+            allowed = self._pt_pdgid_allowed[pdgid_in_idx]
             w = 1.0 - batch[-1].float() * allowed
             loss_count = (ce * w).sum() / w.sum().clamp(min=1.0)
             total = loss_count
@@ -305,7 +305,7 @@ class MultModel(LightningModule):
             return torch.zeros(in_tok.shape[0], dtype=torch.bool, device=in_tok.device)
         in_embd = self.proj_in(in_tok) + self.embd_pp_(pdgid_in_idx)
         p = self.pt_head(in_embd).squeeze(-1).sigmoid()
-        return (torch.rand_like(p) < p) & self._pt_allowed[pdgid_in_idx]
+        return (torch.rand_like(p) < p) & self._pt_pdgid_allowed[pdgid_in_idx]
 
     def configure_optimizers(self):
         if self._sched is None:
@@ -352,8 +352,8 @@ class MultModel(LightningModule):
         """
         in_tok, counts, pdgid_in_idx = batch[:3]
         with torch.compiler.set_stance("force_eager"):
-            skip = self.sample_passthrough(in_tok, pdgid_in_idx)
-            gen = self((in_tok, None, pdgid_in_idx), skip=skip)
+            pt_mask = self.sample_passthrough(in_tok, pdgid_in_idx)
+            gen = self((in_tok, None, pdgid_in_idx), pt_mask=pt_mask)
         self._val_acc[0] += gen.sum(0)
         self._val_acc[1] += counts.sum(0)
         self._val_acc[2, 0] += in_tok.shape[0]
@@ -364,19 +364,19 @@ class MultModel(LightningModule):
             torch.distributed.all_reduce(acc, op=torch.distributed.ReduceOp.SUM)
         n = acc[2, 0].clamp(min=1)
         gen, true = acc[0] / n, acc[1] / n
-        # keep comes from the reduced sums, so every rank logs the same key set;
+        # keep_species comes from the reduced sums, so every rank logs the same key set;
         # per-rank keys would leave the ranks issuing different collectives
-        keep = true > self.rc.val_conf.get("count_floor", 0.005)
-        ratio = gen[keep] / true[keep]
+        keep_species = true > self.rc.val_conf.get("count_floor", 0.005)
+        ratio = gen[keep_species] / true[keep_species]
         self.log_dict({
             "val/n_out_ratio": gen.sum() / true.sum().clamp(min=1e-9),
             "val/count_mae": (ratio - 1).abs().mean(),
         }, sync_dist=False)
-        for i in keep.nonzero(as_tuple=True)[0].tolist():
+        for i in keep_species.nonzero(as_tuple=True)[0].tolist():
             self.log(f"val/count_ratio/{int(self.ptypes[i])}", gen[i] / true[i], sync_dist=False)
 
     @torch.no_grad()
-    def forward(self, batch: (tuple | torch.Tensor), skip: torch.Tensor | None = None):
+    def forward(self, batch: (tuple | torch.Tensor), pt_mask: torch.Tensor | None = None):
         """Inference only: a 3-D batch[0] runs InvModel (outgoing set -> incoming
         PID index), a 2-D one decodes counts autoregressively with a KV cache;
         puts the module in eval mode."""
@@ -392,14 +392,14 @@ class MultModel(LightningModule):
 
         in_tok, _, pdgid_in_idx = batch
         counts = in_tok.new_zeros(in_tok.shape[0], self.rc.max_seq_len, dtype=torch.long)
-        if skip is not None and skip.any():
-            pid = self.ptypes_in[pdgid_in_idx[skip]]
-            counts[skip, torch.searchsorted(self.ptypes, pid).clamp(max=self.rc.max_seq_len - 1)] = 1
-            keep = ~skip
-            if not keep.any():
+        if pt_mask is not None and pt_mask.any():
+            pid = self.ptypes_in[pdgid_in_idx[pt_mask]]
+            counts[pt_mask, torch.searchsorted(self.ptypes, pid).clamp(max=self.rc.max_seq_len - 1)] = 1
+            keep_events = ~pt_mask
+            if not keep_events.any():
                 return counts
-            sub = self.forward((in_tok[keep], None, pdgid_in_idx[keep]))
-            counts[keep] = sub
+            sub = self.forward((in_tok[keep_events], None, pdgid_in_idx[keep_events]))
+            counts[keep_events] = sub
             return counts
 
         in_embd = self.proj_in(in_tok) + self.embd_pp_(pdgid_in_idx)

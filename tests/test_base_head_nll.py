@@ -101,7 +101,7 @@ def test_zero_deposit_events_do_not_break_the_loss() -> None:
     model = LEGOLtng(_config())
     model.model.train()
     model.gen_base_wrapper(_batch(64, torch.zeros(64)))
-    loss = model._base_dist_loss
+    loss = model._base_head_loss
     assert loss is not None and torch.isfinite(loss), loss
     loss.backward()
     for p in model.base_head.parameters():

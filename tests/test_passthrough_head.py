@@ -55,12 +55,12 @@ def test_head_is_absent_by_default() -> None:
 def test_default_allowed_species_are_the_neutrals() -> None:
     m = _model(passthrough_head=True)
     # ptypes_in = [22, 211, 2112, 2212]; only the photon and the neutron
-    assert m._pt_allowed.tolist() == [True, False, True, False]
+    assert m._pt_pdgid_allowed.tolist() == [True, False, True, False]
 
 
 def test_allowed_species_can_be_overridden() -> None:
     m = _model(passthrough_head=True, passthrough_pdgids=[2112])
-    assert m._pt_allowed.tolist() == [False, False, True, False]
+    assert m._pt_pdgid_allowed.tolist() == [False, False, True, False]
 
 
 def test_disabled_head_never_fires() -> None:
@@ -83,8 +83,8 @@ def test_a_fired_event_emits_exactly_the_incoming_particle() -> None:
     with torch.no_grad():
         m.pt_head[-1].bias.fill_(50.0)
     in_tok, idx = _inputs(m, 2)  # neutron in, ptypes index 2
-    skip = m.sample_passthrough(in_tok, idx)
-    counts = m((in_tok, None, idx), skip=skip)
+    pt_mask = m.sample_passthrough(in_tok, idx)
+    counts = m((in_tok, None, idx), pt_mask=pt_mask)
     assert counts[:, 2].eq(1).all()
     assert counts[:, [0, 1]].eq(0).all()
 
@@ -96,18 +96,18 @@ def test_skipping_nothing_reproduces_the_plain_decode() -> None:
     torch.manual_seed(5)
     a = m((in_tok, None, idx))
     torch.manual_seed(5)
-    b = m((in_tok, None, idx), skip=torch.zeros(len(in_tok), dtype=torch.bool))
+    b = m((in_tok, None, idx), pt_mask=torch.zeros(len(in_tok), dtype=torch.bool))
     assert torch.equal(a, b)
 
 
 def test_partial_skip_leaves_the_decoded_rows_untouched() -> None:
     m = _model(passthrough_head=True)
     in_tok, idx = _inputs(m, 2, n=8)
-    skip = torch.tensor([True, False] * 4)
-    counts = m((in_tok, None, idx), skip=skip)
-    assert counts[skip][:, 2].eq(1).all()
-    assert counts[skip][:, [0, 1]].eq(0).all()
-    assert counts[~skip].shape == (4, 3)
+    pt_mask = torch.tensor([True, False] * 4)
+    counts = m((in_tok, None, idx), pt_mask=pt_mask)
+    assert counts[pt_mask][:, 2].eq(1).all()
+    assert counts[pt_mask][:, [0, 1]].eq(0).all()
+    assert counts[~pt_mask].shape == (4, 3)
 
 
 def test_training_step_consumes_the_passthrough_label() -> None:

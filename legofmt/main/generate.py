@@ -94,14 +94,15 @@ class GenerateOut(torch.nn.Module):
                 (cond_model[:, :nc], e, dir_, pos, cond_model[:, nc + 6:]), dim=-1
             )
         cond_fm, mask, attn_mask = self.gen_batch(cond_model)
-        pt = mask.sum(-1) == 0
-        if pt.all():
+        pt_mask = mask.sum(-1) == 0
+        if pt_mask.all():
             sols = cond_fm.clone()
-        elif pt.any():
-            keep = ~pt
-            sub, _, _ = self.model((cond_fm[keep], mask[keep], attn_mask[keep]))
+        elif pt_mask.any():
+            keep_events = ~pt_mask
+            sub, _, _ = self.model(
+                (cond_fm[keep_events], mask[keep_events], attn_mask[keep_events]))
             sols = cond_fm.clone()
-            sols[keep] = sub.to(sols.dtype)
+            sols[keep_events] = sub.to(sols.dtype)
         else:
             sols, mask, attn_mask = self.model((cond_fm, mask, attn_mask))
         sols[..., -1] = torch.cat([sols.new_zeros(1), self.pdgids.to(sols.dtype)])[sols[..., -1].long()]
@@ -177,8 +178,8 @@ class GenerateOut(torch.nn.Module):
             mult_in[:, self.n_mult_cond] = (
                 mult_in[:, self.n_mult_cond] * self.mult_e_scale
             ).clamp(0.0, 1.0)
-        pt = self.gen_mult.sample_passthrough(mult_in, pdgid_in_idx)
-        mult = self.gen_mult((mult_in, None, pdgid_in_idx), skip=pt)
+        pt_mask = self.gen_mult.sample_passthrough(mult_in, pdgid_in_idx)
+        mult = self.gen_mult((mult_in, None, pdgid_in_idx), pt_mask=pt_mask)
         mult = mult[:, self.ptype_idx] * self.ptype_in_mask
 
         max_particles = self.max_seq_l - (self.n_prefix + 1)
@@ -220,13 +221,13 @@ class GenerateOut(torch.nn.Module):
         for j in range(1, self.n_cond):
             cond_fm[:, j + 1, 0] = conds[:, j]
         _F(cond_fm).non_p[..., 1:-1] = 1
-        if pt.any():
+        if pt_mask.any():
             edep = _F(cond_fm).edep
-            edep[pt] = 0.0
+            edep[pt_mask] = 0.0
             out = _F(cond_fm).out_p
-            out[pt, :, 0] = 0.0
+            out[pt_mask, :, 0] = 0.0
             mask = mask.clone()
-            mask[pt] = 0
+            mask[pt_mask] = 0
         return cond_fm, mask, attn_mask
 
 

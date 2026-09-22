@@ -60,7 +60,8 @@ class TrainStep:
                 + lv.sum()  # the +log(sigma^2) barrier; zero at init
             )
             v = lv.detach().exp()
-            logs = {"uncert/var_energy": v[0], "uncert/var_dir": v[1], "uncert/var_pos": v[2]}
+            logs = {"loss_weight/var_energy": v[0], "loss_weight/var_dir": v[1],
+                    "loss_weight/var_pos": v[2]}
         out_logs = {}
         if self.training:
             out_logs = {
@@ -127,7 +128,7 @@ class TrainStep:
         if self.training:
             fm_logs = {"loss/one_step_euler": sc.detach()}
             if lvf is not None:
-                fm_logs["uncert/var_flow"] = lvf.detach().exp()
+                fm_logs["loss_weight/var_flow"] = lvf.detach().exp()
             self.log_dict(fm_logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
         return loss + w * sc
 

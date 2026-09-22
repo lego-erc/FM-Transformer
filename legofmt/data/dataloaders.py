@@ -56,10 +56,10 @@ class GetLEGOData:
         dataset_valid = torch.full_like(dataset[:, :max_valid], torch.nan)
         dataset_valid[mask_valid_sorted] = dataset[mask_valid]
         del dataset, mask_valid, mask_valid_sorted
-        keep = ~dataset_valid[:, : self.min_particles + 1, 0].isnan().any(dim=-1)
-        data_pp = dataset_valid[keep]
+        keep_complete = ~dataset_valid[:, : self.min_particles + 1, 0].isnan().any(dim=-1)
+        data_pp = dataset_valid[keep_complete]
         del dataset_valid
-        data_add = {k: v[keep] for k, v in data_add.items()}
+        data_add = {k: v[keep_complete] for k, v in data_add.items()}
         if n_events is not None:
             rd_idx = torch.randperm(data_pp.shape[0], device="cpu", generator=torch.Generator().manual_seed(0))[:n_events]
             data_pp = data_pp[rd_idx]

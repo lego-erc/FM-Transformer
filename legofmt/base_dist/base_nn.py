@@ -11,7 +11,7 @@ than owning it here.
 
 Members resolved through ``self`` and owned by ``LEGOLtng``: ``rc``, ``model``,
 ``gen_base``, ``base_head``, ``pdgids_template``, ``convert_pdgids``,
-``_base_dist_loss``, ``_make_loader``, ``_train_ds``.
+``_base_head_loss``, ``_make_loader``, ``_train_ds``.
 """
 
 from dataclasses import replace
@@ -171,7 +171,7 @@ class BaseDist:
         with torch.set_grad_enabled(learn):
             s, mu, sig, kap = self.base_head_params(ds_t)
             if learn:
-                self._base_dist_loss = self._base_moment_loss(ds_t, fwd, s, mu, sig, kap)
+                self._base_head_loss = self._base_moment_loss(ds_t, fwd, s, mu, sig, kap)
         self.gen_base.sm_scale = s.detach().unsqueeze(-1)
         self.gen_base.edep_mu  = mu.detach()
         self.gen_base.edep_sig = sig.detach()
@@ -206,7 +206,7 @@ class BaseDist:
         ones, an isotropic sample for inverse-mask events. ``lego_eval`` calls this."""
         if not isinstance(ds_t, DataStruct):
             ds_t = DataStruct(*ds_t)
-        self._base_dist_loss = None
+        self._base_head_loss = None
         data  = ds_t.f.model_in
         m     = ds_t.m.full
         fwd   = m[:, self.rc.n_prefix] == 0  # incoming slot conditions => forward event
@@ -238,16 +238,16 @@ class BaseDist:
             for ds_t in batches:
                 opt.zero_grad()
                 self.gen_base_wrapper(ds_t)
-                if self._base_dist_loss is None:
+                if self._base_head_loss is None:
                     continue
-                self._base_dist_loss.backward()
+                self._base_head_loss.backward()
                 opt.step()
-                ot = self._base_dist_loss.item()
+                ot = self._base_head_loss.item()
         finally:
             self.model.train(was_training)
             self.rc = rc
         self.base_head.requires_grad_(False)
-        self._base_dist_loss = None
+        self._base_head_loss = None
         return ot
 
     def _pretrain_base_if_needed(self) -> None:

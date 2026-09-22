@@ -42,20 +42,20 @@ from legofmt.log_metrics.val_metrics import ShowerValMetrics
 class _Interacting:
     """Index view over the events that deposited energy, without copying them."""
 
-    def __init__(self, ds, keep: Tensor) -> None:
-        self.ds, self.keep = ds, keep
+    def __init__(self, ds, keep_idx: Tensor) -> None:
+        self.ds, self.keep_idx = ds, keep_idx
 
     def __len__(self) -> int:
-        return len(self.keep)
+        return len(self.keep_idx)
 
     def __getitem__(self, i):
-        return self.ds[self.keep[i]]
+        return self.ds[self.keep_idx[i]]
 
 
-def _drop_passthrough(ds):
-    keep = ((_F(ds.data.f.full).edep.reshape(-1) > 0)
-            | (ds.data.am.out_p.sum(-1) != 1)).nonzero(as_tuple=True)[0]
-    return _Interacting(ds, keep)
+def _interacting_only(ds) -> _Interacting:
+    keep_idx = ((_F(ds.data.f.full).edep.reshape(-1) > 0)
+                | (ds.data.am.out_p.sum(-1) != 1)).nonzero(as_tuple=True)[0]
+    return _Interacting(ds, keep_idx)
 
 
 class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
@@ -75,7 +75,7 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         self.val_metrics = ShowerValMetrics()
         self.ps          = ProductPathSampler(self.rc.manifold)
 
-        self._base_dist_loss = None
+        self._base_head_loss = None
         params = list(self.model.parameters())
         head = build_base_head(self.rc, self.gen_base)
         if head is not None:
@@ -171,7 +171,7 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
             return
         full  = LEGODataset(**self.rc.dl_conf["lds_args"], prep=DataPrep(self.rc.config))
         if self.rc.config.get("model_conf", {}).get("exclude_passthrough", False):
-            full = _drop_passthrough(full)
+            full = _interacting_only(full)
         n_val = max(1, int(len(full) * self.rc.val_conf.get("val_frac", 0.01)))
         gen   = torch.Generator().manual_seed(self.rc.val_conf.get("seed", 0))
         self._train_ds, self._val_ds = random_split(
