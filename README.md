@@ -256,11 +256,8 @@ Top-level FM options:
 | `proj_ray` | `True` (read by `DataPrep` only) | At prep-time, ray-trace incoming/outgoing positions onto the unit-cube surface via `CubeTrace`. Ignored when loading already-prepped data from disk. |
 | `proj_en` | `False` | Energy normalisation applied in `DataPrep`. Allowed values: `False` / `"identity"` (no-op), `"in_frac"` (divide outgoing momenta by incoming magnitude), `"log"`, `"in_frac_log"`, `"exp"`. (`exp_mult` / `in_mult` exist on `EnergyProjections` but take two arguments and are not callable from this hook.) |
 | `ot_coupling` | `False` | At training time, Hungarian-assign base→data per event for OT-style coupling. Requires the optional `torch_lap_cuda_lib` package; otherwise this raises at first call. |
-| `ot_e_only` | `False` | When `ot_coupling` is on, base the LAP cost on pairwise `\|p\|` (energy) differences instead of the full 6-D `cdist` — strict energy-ordered pairing. Ignored when `ot_coupling=False`. |
-| `cond_cube` | `False` | When solving on the manifold, pass the cube-projected version of the position block as conditioning to the vector field. The integrated state itself stays on the manifold. |
 | `t_dist` | `"uniform"` | Time sampling for the loss: `"uniform"`, `"sm_norm"` (`sigmoid(s · N(0,1))`), `"sd3"` (SD3 logit-normal mix `1-u + s/3·((π/2·u).sin()² - u)`), or `"sd3_grid"` (50/50 mix of `"sd3"` with a discrete grid `{0, 0.4, 0.8, 0.9}` — sampled with weights `.1/.2/.3/.4` and jittered by `0.02·N(0,1)`). |
 | `t_dist_scale` | `1.4` | Scale `s` for `sm_norm` / `sd3`. |
-| `loss_sc` | `0.0` | Weight of an auxiliary "predict-x1" MSE on the momentum 3-vector (`pred = x_t + (1-t)·v`). `0` disables it. |
 | `pdgid_is_idx` | `False` | If `True`, the pdgid column is treated as an already-indexed vocab id (skipping `convert_pdgids`). Flipped on by `GenerateOut` at inference. |
 
 `model_conf.model_args` is passed straight to `CFMTrafo_x` and on to the
@@ -284,6 +281,12 @@ All remaining `model_args` keys flow into `x-transformers` `Encoder`, e.g.
 `ff_glu`, `ff_no_bias`, `gate_residual`, `attn_qk_norm`, `attn_value_rmsnorm`,
 `attn_flash`, `rotary_xpos`, …. See `x-transformers` docs for the full list.
 
+`attn_qk_norm_scale` is version-dependent: x-transformers < 2.25.5 applied it
+three times (logits `scale³·cosθ`, i.e. `1000·cosθ` at the default 10), newer
+versions once. Every config records `additional.x_transformers_version`; a
+checkpoint without it (or with an older one) gets its scale cubed at load so it
+reproduces exactly, while fresh configs use the library default of 10.
+
 ### `mm_conf` — multiplicity model
 
 | Key | Default | Effect |
@@ -304,6 +307,7 @@ All remaining `model_args` keys flow into `x-transformers` `Encoder`, e.g.
 | `use_abs_pos_emb` | `True` | Forwarded to `ContinuousTransformerWrapper`. Note the `use_` prefix. |
 | `model_args` | `{}` | Forwarded to `x-transformers` `Decoder` (same flag set as the FM encoder). |
 | `opt_conf` | `None` | Same schema as the FM-level `opt_conf` below (resolved by `build_optimizer`). If set, the flat `lr` / `weight_decay` / `warmup_steps` keys above are ignored and a `warnings.warn` is emitted for each. |
+| `fwd_compile` | `False` | Re-apply `torch.compile` to the count Decoder when a saved checkpoint is loaded by `GenerateOut`. `train.py` compiles it during training but unwraps it before saving, so generation otherwise runs eager. Plain compile, not `mode="reduce-overhead"` — the AR loop reuses its KV cache across steps and CUDA-graph capture rejects that. Measured 1.28x on the multiplicity phase at bs 8192; counts bit-identical under a fixed seed. |
 
 ### `opt_conf` — optimizer (FM model)
 

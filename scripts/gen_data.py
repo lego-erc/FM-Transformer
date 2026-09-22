@@ -1,6 +1,8 @@
+"""Prepare raw shower data for training.
+
+Writes ``data_prepped.pt`` (the prepped tensors) and ``meta.json`` (the metadata
+the fresh-training config path reads) into the data directory.
 """
-This script will create a data_prepped.pt pickle file with prepared data as well as a meta.json file containing metadata.
-These files will (/should) be placed in the same folder as this script."""
 
 import json
 import os
@@ -57,9 +59,11 @@ manifold = [{"name": "euclidean", "dim": 1 }, {"name": "sphere", "dim": 3 }, {"n
 # extra scalars are silently dropped / the slot layout mismatches.
 cond_scalars = ["Density", "Z", "A", "Size"]
 
+# max_energy is not used by DataPrep.prep -- the stored file keeps the
+# max_energy-dependent channels in MeV and DataPrep.norm_e converts them at
+# load time. It goes into meta.json only as the default for a fresh model.
 config = {
     "cutoff_mev": energy_min,
-    "max_energy": energy_max,
     "manifold": manifold,
     "proj_ray": True,
     "cond_scalars": cond_scalars,

@@ -1,24 +1,21 @@
+"""The flow's vector field: an x-transformers Encoder over the padded sequence.
+
+Each token is embedded by a per-(mask, type, pdgid) conditional linear map --
+three index-selected weight tensors summed and contracted with ``x`` in one
+einsum -- and the output projection mirrors it. Time, and with ``step_cond``
+the step size, enter as sinusoidal embeddings passed to x-transformers as
+``condition=`` for adaptive RMSNorm.
+"""
+
 from __future__ import annotations
 
-import warnings
+from functools import partial
 
 import torch
 from torch import Tensor, nn
+from torch.utils.checkpoint import checkpoint
 from x_transformers import ContinuousTransformerWrapper, Encoder
-
-
-# Pre-refactor parameter names -> current names.
-_LEGACY_RENAME: dict[str, str] = {
-    "l_mask_":    "cond_w_mask",
-    "b_mask_":    "cond_bi_mask",
-    "bo_mask_":   "cond_bo_mask",
-    "l_types_":   "cond_w_types",
-    "b_types_":   "cond_bi_types",
-    "bo_types_":  "cond_bo_types",
-    "l_pdgids_":  "cond_w_pdgids",
-    "b_pdgids_":  "cond_bi_pdgids",
-    "bo_pdgids_": "cond_bo_pdgids",
-}
+from legofmt.compat import fp32_attention, legacy_param_rename, needs_fp32_attention
 
 
 class CFMTrafo_x(nn.Module):
@@ -40,6 +37,7 @@ class CFMTrafo_x(nn.Module):
         dim_in_out: int | None = None,
         time_cond: bool = True,
         step_cond: bool = False,
+        grad_ckpt: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -72,6 +70,12 @@ class CFMTrafo_x(nn.Module):
                 **kwargs,
             ),
         )
+        if needs_fp32_attention(kwargs):
+            fp32_attention(self.vf)
+
+        if grad_ckpt:
+            for _norms, _block, _residual in self.vf.attn_layers.layers:
+                _block.forward = partial(checkpoint, _block.forward, use_reentrant=False)
 
         # Per conditioning source: [:, 0] up-projection, [:, 1] down-projection.
         self.cond_w_mask    = nn.Parameter(torch.empty(nvtypes, 2, h_dim, in_dim))
@@ -103,26 +107,9 @@ class CFMTrafo_x(nn.Module):
                     persistent=False,
                 )
                 self.step_gain = nn.Parameter(torch.zeros(1))
-            self._register_load_state_dict_pre_hook(self._legacy_param_rename)
+            self._register_load_state_dict_pre_hook(legacy_param_rename)
         else:
             self.global_cond = nn.Parameter(torch.zeros(1, h_dim))
-
-    @staticmethod
-    def _legacy_param_rename(state_dict, prefix, *_):
-        renames = {
-            k: prefix + _LEGACY_RENAME[suf]
-            for k in list(state_dict)
-            if k.startswith(prefix) and (suf := k[len(prefix):]) in _LEGACY_RENAME
-        }
-        if not renames:
-            return
-        warnings.warn(
-            "Remapping legacy CFMTrafo_x parameter keys "
-            "(e.g. 'l_mask_' -> 'cond_w_mask'); re-save to silence.",
-            DeprecationWarning, stacklevel=4,
-        )
-        for old, new in renames.items():
-            state_dict[new] = state_dict.pop(old)
 
     def forward(
         self,

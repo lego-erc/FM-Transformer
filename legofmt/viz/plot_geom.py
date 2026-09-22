@@ -1,3 +1,5 @@
+"""``PlotGeom``: the 3-D cube plot underneath the corner-plot animations."""
+
 import matplotlib.pyplot as plt
 import torch
 from mpl_toolkits.mplot3d.art3d import Line3DCollection

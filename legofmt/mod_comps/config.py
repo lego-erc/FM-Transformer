@@ -1,8 +1,15 @@
+"""Config resolution: raw YAML, or a checkpoint dict, -> a ``Resolved*Config``.
+
+Normalises model args, builds the manifold, and stamps the x-transformers
+version into every config. Both entry points mutate the dict they are handed
+(via ``set_layout`` and ``setdefault``), and ``set_layout`` is global state.
+Support for older artefacts lives in ``legofmt.compat``.
+"""
+
 from __future__ import annotations
 
 import copy
 import json
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,32 +17,23 @@ from typing import Any
 import torch
 from flow_matching.utils.manifolds import Euclidean, Sphere
 
-from ..data.struct import set_layout
-
-from legofmt.geometry.path_sample_mult import ProductManifold
+from legofmt.compat import (
+    XT_QK_NORM_FIX, XT_VERSION, apply_legacy_projection_in_out,
+    build_manifold_from_string, migrate_legacy_mult_heads,
+    qk_norm_scale_compat, rename_ntokens,
+)
+from legofmt.data.struct import set_layout
+from legofmt.geometry.product_manifold import ProductManifold
 
 _MANIFOLDS: dict[str, type] = {
     "euclidean": Euclidean,
     "sphere": Sphere,
 }
 
-# Restricted eval namespace for the legacy string spec form.
-_MANIFOLD_EVAL_NS: dict[str, Any] = {
-    "ProductManifold": ProductManifold,
-    "Euclidean": Euclidean,
-    "Sphere": Sphere,
-}
-
 
 def build_manifold(spec: str | list) -> ProductManifold:
     if isinstance(spec, str):
-        warnings.warn(
-            "String manifold specs are deprecated; use a list of factor dicts "
-            "([{'name': 'euclidean', 'dim': 3}, ...]).",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return eval(spec, {"__builtins__": {}}, _MANIFOLD_EVAL_NS)
+        return build_manifold_from_string(spec)
 
     if isinstance(spec, list):
         manifolds = [_MANIFOLDS[p["name"].lower()]() for p in spec]
@@ -55,27 +53,19 @@ class ResolvedLEGOConfig:
 
     t_dist: str
     t_dist_scale: float
-    t_zero_frac: float
     t_dist_shift: float
     ot_coupling: bool
-    ot_e_only: bool
     base_dist_loss: float
     base_pretrain_batches: int
     base_pretrain_bs: int | None
     pdgid_is_idx: bool
-    loss_sc_fac: float
     one_step_euler_fac: float
     one_step_euler_sections: int
     one_step_euler_every: int
-    curv_fac: float
-    curv_every: int
-    curv_eps: float
-    curv_warmup: int
     uncert_weighting: bool
     uncert_bins: int
     uncert_min: float
     overflow_delta: float
-    cond_cube: bool
     canon_sym: bool
     cond_scalars: tuple[str, ...]
     n_prefix: int
@@ -84,6 +74,7 @@ class ResolvedLEGOConfig:
 
     max_energy: float
     cutoff_mev: float
+    amp_dtype: torch.dtype | None
 
     dl_conf: dict
     opt_conf: dict
@@ -97,6 +88,17 @@ class ResolvedLEGOConfig:
     reflow_kwargs: dict
     reflow_every: int
     reflow_start_epoch: int
+
+
+def _amp_dtype(precision) -> "torch.dtype | None":
+    if isinstance(precision, torch.dtype):
+        return None if precision is torch.float32 else precision
+    head = str(precision).split(",")[0].strip().lower()
+    if head.startswith("bf16"):
+        return torch.bfloat16
+    if head.startswith("16"):
+        return torch.float16
+    return None
 
 
 def resolve_legoltng_config(full_config: dict) -> ResolvedLEGOConfig:
@@ -123,12 +125,14 @@ def _resolve_fresh(config: dict) -> ResolvedLEGOConfig:
     config["dl_conf"].setdefault("data_path", f"{dpath}/data_prepped.pt")
 
     meta = json.loads(Path(dpath, "meta.json").read_text())
+    config.setdefault("additional", {})["data_meta"] = meta
+    config["additional"]["x_transformers_version"] = str(XT_VERSION)
     max_seq_l = meta["ntokens"]
     pdgids = (
         torch.tensor(meta["particles"], dtype=torch.int64).sort().values.contiguous()
     )
 
-    max_energy = meta.get("max_energy", model_conf.get("max_energy"))
+    max_energy = model_conf.get("max_energy", meta.get("max_energy"))
     if max_energy is None:
         raise KeyError(
             f"max_energy missing from {dpath}/meta.json and model_conf; "
@@ -147,6 +151,8 @@ def _resolve_fresh(config: dict) -> ResolvedLEGOConfig:
     model_args["npdgids"] = pdgids.shape[0] + 1
     model_args.setdefault("max_seq_l", max_seq_l)
     model_conf.setdefault("cond_scalars", tuple(meta.get("cond_scalars", ("Density",))))
+    if "energy_kin" in meta:
+        model_conf.setdefault("energy_kin", bool(meta["energy_kin"]))
     model_args.setdefault("ntypes", len(model_conf["cond_scalars"]) + 3)
     # ``pdgids`` lives at model_conf scope (one level above model_args) so
     # it is preserved by the manual torch.save round-trip in scripts/train.py.
@@ -161,24 +167,17 @@ def _resolve_from_checkpoint(config: dict, state_dict: dict) -> ResolvedLEGOConf
     model_conf = config["model_conf"]
     model_args = model_conf["model_args"]
 
-    # Legacy field rename: pre-refactor checkpoints used "ntokens".
-    if "ntokens" in model_args:
-        model_args["max_seq_l"] = model_args.pop("ntokens")
-
-    _apply_legacy_projection_in_out(model_args, state_dict)
+    rename_ntokens(model_args)
+    apply_legacy_projection_in_out(model_args, state_dict)
+    additional = config.setdefault("additional", {})
+    qk_norm_scale_compat(model_args, additional)
+    additional["x_transformers_version"] = str(XT_VERSION)
 
     return _build_resolved(
         config, model_conf, model_args,
         model_args["max_seq_l"], model_conf["pdgids"],
         state_dict=state_dict,
     )
-
-
-def _apply_legacy_projection_in_out(model_args: dict, state_dict: dict) -> None:
-    # Legacy checkpoints carry vf.project_in/out linears; rebuild them by
-    # setting dim_in_out so load_state_dict finds matching layers.
-    if any(k.startswith("vf.project_in.") for k in state_dict):
-        model_args["dim_in_out"] = model_args["h_dim"]
 
 
 def _build_resolved(
@@ -208,6 +207,7 @@ def _build_resolved(
     overflow_delta = model_conf.get("overflow_delta", 0.0)
     if overflow_delta < 0:
         raise ValueError(f"overflow_delta must be >= 0, got {overflow_delta}.")
+
     return ResolvedLEGOConfig(
         max_seq_l=max_seq_l,
         pdgids_template=pdgids.contiguous(),
@@ -215,33 +215,26 @@ def _build_resolved(
         model_args=model_args,
         t_dist=model_conf.get("t_dist", "sd3"),
         t_dist_scale=model_conf.get("t_dist_scale", 1.4),
-        t_zero_frac=model_conf.get("t_zero_frac", 0.0),
         t_dist_shift=model_conf.get("t_dist_shift", 1.0),
         ot_coupling=model_conf.get("ot_coupling", False),
-        ot_e_only=model_conf.get("ot_e_only", False),
         base_dist_loss=model_conf.get("base_dist_loss", 0.0),
         base_pretrain_batches=model_conf.get("base_pretrain_batches", 300),
         base_pretrain_bs=model_conf.get("base_pretrain_bs"),
         pdgid_is_idx=model_conf.get("pdgid_is_idx", False),
-        loss_sc_fac=model_conf.get("loss_sc", 0.0),
         one_step_euler_fac=model_conf.get("one_step_euler_fac", 0.0),
         one_step_euler_sections=sections,
         one_step_euler_every=model_conf.get("one_step_euler_every", 1),
-        curv_fac=model_conf.get("curv_fac", 0.0),
-        curv_every=model_conf.get("curv_every", 4),
-        curv_eps=model_conf.get("curv_eps", 0.05),
-        curv_warmup=model_conf.get("curv_warmup", 500),
         uncert_weighting=model_conf.get("uncert_weighting", False),
         uncert_bins=model_conf.get("uncert_bins", 16),
         uncert_min=model_conf.get("uncert_min", -6.0),
         overflow_delta=overflow_delta,
-        cond_cube=model_conf.get("cond_cube", False),
         canon_sym=model_conf.get("canon_sym", False),
         cond_scalars=cond_scalars,
         n_prefix=n_prefix,
         mask_conf=model_conf.get("mask_conf", {}),
         max_energy=model_conf["max_energy"],
         cutoff_mev=config["dl_conf"]["lds_args"]["cutoff_mev"],
+        amp_dtype=_amp_dtype((config.get("additional") or {}).get("precision")),
         dl_conf=config["dl_conf"],
         opt_conf=config["opt_conf"],
         odeint_conf=config.get("odeint_conf", {}),
@@ -310,6 +303,10 @@ def _resolve_fresh_mult(config: dict) -> ResolvedMultConfig:
         raise KeyError("Fresh-training mult config requires dl_conf.lds_args.data")
 
     meta = json.loads(Path(dpath, "meta.json").read_text())
+    config.setdefault("additional", {})["data_meta"] = meta
+    config["additional"]["x_transformers_version"] = str(XT_VERSION)
+    if "max_energy" in meta:  # MultLoader's DataPrep needs it for norm_e
+        mm_conf.setdefault("max_energy", meta["max_energy"])
     mm_conf.setdefault("cond_scalars", tuple(meta.get("cond_scalars", ("Density",))))
     set_layout(tuple(mm_conf["cond_scalars"]))  # before MultLoader, which reads layout-dependent accessors
     n_prefix = len(mm_conf["cond_scalars"]) + 1
@@ -329,6 +326,12 @@ def _resolve_from_checkpoint_mult(
     mm_conf = config.setdefault("mm_conf", {})
     dl_conf = config.setdefault("dl_conf", {})
     mm_conf.setdefault("max_count", mm_conf.get("max_out_particles"))
+    additional = config.setdefault("additional", {})
+    model_args = mm_conf.get("model_args", {})
+    inv_model_args = mm_conf.get("inv_model_args", model_args)
+    for args in {id(d): d for d in (model_args, inv_model_args)}.values():  # may be one dict
+        qk_norm_scale_compat(args, additional)
+    additional["x_transformers_version"] = str(XT_VERSION)
 
     ptypes = mm_conf.get("ptypes")
     max_count = mm_conf.get("max_count")
@@ -336,41 +339,11 @@ def _resolve_from_checkpoint_mult(
         max_seq_len = (
             ptypes.shape[0] if torch.is_tensor(ptypes) else len(ptypes)
         )
-        state_dict = _migrate_legacy_mult_heads(
+        state_dict = migrate_legacy_mult_heads(
             state_dict, max_seq_len=max_seq_len, max_particles=max_count,
         )
 
     return _build_resolved_mult(config, mm_conf, dl_conf, state_dict=state_dict)
-
-
-def _migrate_legacy_mult_heads(
-    state_dict: dict, max_seq_len: int, max_particles: int
-) -> dict:
-    # Pre-fusion checkpoints stored per-position ModuleLists (embd_in_.{i},
-    # proj_out_.{i}); remap them onto the fused single-table layout.
-    has_legacy_proj = "proj_out_.0.weight" in state_dict
-    has_legacy_embd = "embd_in_.0.weight" in state_dict
-    if not (has_legacy_proj or has_legacy_embd):
-        return state_dict
-
-    out = {
-        k: v for k, v in state_dict.items()
-        if not (k.startswith("proj_out_.") or k.startswith("embd_in_."))
-    }
-
-    if has_legacy_proj:
-        weights = [state_dict[f"proj_out_.{i}.weight"] for i in range(max_seq_len)]
-        biases = [state_dict[f"proj_out_.{i}.bias"] for i in range(max_seq_len)]
-        out["proj_out_w"] = torch.stack([w.t().contiguous() for w in weights], dim=0)
-        out["proj_out_b"] = torch.stack(biases, dim=0)
-
-    if has_legacy_embd:
-        embd_weights = [
-            state_dict[f"embd_in_.{i}.weight"] for i in range(max_seq_len - 1)
-        ]
-        out["embd_in_.weight"] = torch.cat(embd_weights, dim=0)
-
-    return out
 
 
 def _build_resolved_mult(

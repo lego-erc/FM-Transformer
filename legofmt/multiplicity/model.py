@@ -1,18 +1,30 @@
+"""``MultModel``: the autoregressive per-pdgid count predictor.
+
+An x-transformers Decoder over one slot per outgoing PDG id, conditioned on the
+incoming particle and the per-event scalars, trained with cross-entropy.
+``mm_conf.train_inverse`` adds ``InvModel``, which predicts the incoming PID
+from the outgoing set and backs ``GenerateIn``.
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
 
 from lightning import LightningModule
 
 from x_transformers import ContinuousTransformerWrapper, Decoder, Encoder
 
-from legofmt.data.dataloaders import LEGODataset
+from legofmt.compat import fp32_attention, needs_fp32_attention
+
+from legofmt.data.dataloaders import LEGODataset, make_loader
+from legofmt.data.prep import DataPrep
 from legofmt.data.struct import cond_scalars
 from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.geometry.symmetry_projections import CubeSymmetry
 from legofmt.mod_comps.config import resolve_mult_config
-from legofmt.mod_comps.optimizers import build_optimizer, schedulefree_adamw
+from legofmt.mod_comps.optimizers import (
+    build_optimizer, opt_eval, opt_is_schedulefree, opt_train, schedulefree_adamw,
+)
 
 
 class MultLoader(torch.utils.data.Dataset):
@@ -25,7 +37,11 @@ class MultLoader(torch.utils.data.Dataset):
         ptypes_in = mm_conf.get("ptypes_in", torch.tensor([11, 22]))
         self.train_inverse = mm_conf.get("train_inverse", False)
 
-        ds = LEGODataset(**lds_conf).data
+        ds = LEGODataset(**lds_conf, prep=DataPrep({
+            "max_energy": mm_conf["max_energy"],
+            "cutoff_mev": lds_conf.get("cutoff_mev"),
+            "cond_scalars": mm_conf.get("cond_scalars", cond_scalars()),
+        })).data
         ds_f = ds.f
         # in_dim must be len(cond_scalars) + 7
         conds = torch.cat([ds_f.cond(n).unsqueeze(-1) for n in cond_scalars()], dim=-1)
@@ -87,6 +103,8 @@ class InvModel(nn.Module):
                 **rc.inv_model_args,
             ),
         )
+        if needs_fp32_attention(rc.inv_model_args):
+            fp32_attention(self.model)
 
         self.proj_in_ = nn.Linear(rc.in_dim, rc.inv_h_dim)
         self.embd_out_ = nn.Embedding(rc.ptypes.shape[0], rc.inv_h_dim)
@@ -135,6 +153,8 @@ class MultModel(LightningModule):
                 **rc.model_args,
             ),
         )
+        if needs_fp32_attention(rc.model_args):
+            fp32_attention(self.model)
 
         self.proj_in_ = torch.nn.Linear(rc.in_dim, rc.h_dim)
 
@@ -171,7 +191,7 @@ class MultModel(LightningModule):
             self._sched = None
         else:
             self.opt, self._sched = build_optimizer(self.parameters(), rc.opt_conf)
-        self._opt_is_sf = hasattr(self.opt, "train") and callable(getattr(self.opt, "train", None))
+        self._opt_is_sf = opt_is_schedulefree(self.opt)
 
     def proj_in(self, x):
         x = x.clone()
@@ -183,12 +203,10 @@ class MultModel(LightningModule):
         return self.proj_in_(x)
 
     def _opt_train(self):
-        if self._opt_is_sf:
-            self.opt.train()
+        opt_train(self.opt)
 
     def _opt_eval(self):
-        if self._opt_is_sf:
-            self.opt.eval()
+        opt_eval(self.opt)
 
     def on_fit_start(self):
         self._opt_train()
@@ -211,7 +229,7 @@ class MultModel(LightningModule):
         if self.inv is None:
             self.log_dict(
                 {"train_loss": loss_count, "loss/counts": loss_count.detach()},
-                prog_bar=True, sync_dist=True,
+                prog_bar=True, sync_dist=False,  # per-step all-reduce only for logging stalled DDP ranks
             )
             return loss_count
 
@@ -220,7 +238,7 @@ class MultModel(LightningModule):
         loss = loss_count + loss_inv
         self.log_dict(
             {"train_loss": loss, "loss/counts": loss_count.detach(), "loss/pid_in": loss_inv.detach()},
-            prog_bar=True, sync_dist=True,
+            prog_bar=True, sync_dist=False,  # per-step all-reduce only for logging stalled DDP ranks
         )
         return loss
 
@@ -230,16 +248,11 @@ class MultModel(LightningModule):
         return {"optimizer": self.opt, "lr_scheduler": self._sched}
 
     def train_dataloader(self):
-        dataset_train = MultLoader(self.rc.config)
-        num_workers = self.rc.dl_conf.get("num_workers", 4)
-        return DataLoader(
-            dataset_train,
-            batch_size=self.rc.mm_conf.get("bs", 2**12),
+        return make_loader(
+            MultLoader(self.rc.config),
+            bs=self.rc.mm_conf.get("bs", 2**12),
             shuffle=True,
-            num_workers=num_workers,
-            pin_memory=True,
-            persistent_workers=num_workers > 0,
-            multiprocessing_context="fork" if num_workers > 0 else None,
+            num_workers=self.rc.dl_conf.get("num_workers", 4),
         )
 
     @torch.no_grad()
