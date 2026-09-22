@@ -60,7 +60,7 @@ def _cond(gen: GenerateOut, pdgid: int, batch: int = 6) -> torch.Tensor:
 
 def _force(gen: GenerateOut, value: float) -> None:
     with torch.no_grad():
-        gen.gen_mult.pt_head.bias.fill_(value)
+        gen.gen_mult.pt_head[-1].bias.fill_(value)
 
 
 def test_fired_events_carry_no_deposit(generator: GenerateOut) -> None:

@@ -196,9 +196,12 @@ class MultModel(LightningModule):
             torch.arange(rc.max_seq_len - 1, dtype=torch.long) * rc.max_particles,
             persistent=False,
         )
-        self.pt_head = (
-            torch.nn.Linear(rc.h_dim, 1) if rc.mm_conf.get("passthrough_head", False) else None
-        )
+        self.pt_head = None
+        if rc.mm_conf.get("passthrough_head", False):
+            pt_dim = rc.mm_conf.get("passthrough_dim", rc.h_dim)
+            self.pt_head = nn.Sequential(
+                nn.Linear(rc.h_dim, pt_dim), nn.Mish(), nn.Linear(pt_dim, 1),
+            )
         self.register_buffer("_pt_allowed", _passthrough_allowed(rc), persistent=False)
         self.proj_out_w = torch.nn.Parameter(torch.empty(rc.max_seq_len, rc.h_dim, rc.max_particles))
         self.proj_out_b = torch.nn.Parameter(torch.empty(rc.max_seq_len, rc.max_particles))
@@ -259,26 +262,38 @@ class MultModel(LightningModule):
         )
         out_f = self.model(in_seq, mask=None, condition=in_embd)
         logits_f = torch.einsum("bsh,shp->bsp", out_f, self.proj_out_w) + self.proj_out_b
-        loss_count = F.cross_entropy(logits_f.reshape(-1, self.rc.max_particles), counts.reshape(-1))
-        if self.pt_head is not None:
+        ce = F.cross_entropy(
+            logits_f.reshape(-1, self.rc.max_particles), counts.reshape(-1), reduction="none",
+        ).view(counts.shape).mean(-1)
+        total, pt_logs = None, {}
+        if self.pt_head is None:
+            loss_count = ce.mean()
+            total = loss_count
+        else:
             allowed = self._pt_allowed[pdgid_in_idx]
+            w = 1.0 - batch[-1].float() * allowed
+            loss_count = (ce * w).sum() / w.sum().clamp(min=1.0)
+            total = loss_count
             if allowed.any():
-                loss_count = loss_count + F.binary_cross_entropy_with_logits(
+                loss_pt = F.binary_cross_entropy_with_logits(
                     self.pt_head(in_embd).squeeze(-1)[allowed], batch[-1].float()[allowed],
                 )
+                total = loss_count + loss_pt
+                pt_logs = {"loss/passthrough": loss_pt.detach()}
 
         if self.inv is None:
             self.log_dict(
-                {"train_loss": loss_count, "loss/counts": loss_count.detach()},
+                {"train_loss": total, "loss/counts": loss_count.detach(), **pt_logs},
                 prog_bar=True, sync_dist=False,  # per-step all-reduce only for logging stalled DDP ranks
             )
-            return loss_count
+            return total
 
         out_tok, out_pid_idx, out_mask, edep = batch[3:7]
         loss_inv = F.cross_entropy(self.inv(out_tok, out_pid_idx, out_mask, edep), pdgid_in_idx)
-        loss = loss_count + loss_inv
+        loss = total + loss_inv
         self.log_dict(
-            {"train_loss": loss, "loss/counts": loss_count.detach(), "loss/pid_in": loss_inv.detach()},
+            {"train_loss": loss, "loss/counts": loss_count.detach(),
+             "loss/pid_in": loss_inv.detach(), **pt_logs},
             prog_bar=True, sync_dist=False,  # per-step all-reduce only for logging stalled DDP ranks
         )
         return loss
@@ -337,7 +352,8 @@ class MultModel(LightningModule):
         """
         in_tok, counts, pdgid_in_idx = batch[:3]
         with torch.compiler.set_stance("force_eager"):
-            gen = self((in_tok, None, pdgid_in_idx))
+            skip = self.sample_passthrough(in_tok, pdgid_in_idx)
+            gen = self((in_tok, None, pdgid_in_idx), skip=skip)
         self._val_acc[0] += gen.sum(0)
         self._val_acc[1] += counts.sum(0)
         self._val_acc[2, 0] += in_tok.shape[0]

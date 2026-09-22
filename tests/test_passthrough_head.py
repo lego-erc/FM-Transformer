@@ -71,7 +71,7 @@ def test_disabled_head_never_fires() -> None:
 def test_charged_incoming_never_fires_however_large_the_logit() -> None:
     m = _model(passthrough_head=True)
     with torch.no_grad():
-        m.pt_head.bias.fill_(50.0)
+        m.pt_head[-1].bias.fill_(50.0)
     for charged in (1, 3):  # 211, 2212
         assert not m.sample_passthrough(*_inputs(m, charged)).any()
     for neutral in (0, 2):  # 22, 2112
@@ -81,7 +81,7 @@ def test_charged_incoming_never_fires_however_large_the_logit() -> None:
 def test_a_fired_event_emits_exactly_the_incoming_particle() -> None:
     m = _model(passthrough_head=True)
     with torch.no_grad():
-        m.pt_head.bias.fill_(50.0)
+        m.pt_head[-1].bias.fill_(50.0)
     in_tok, idx = _inputs(m, 2)  # neutron in, ptypes index 2
     skip = m.sample_passthrough(in_tok, idx)
     counts = m((in_tok, None, idx), skip=skip)
@@ -131,3 +131,84 @@ def test_training_step_without_the_head_ignores_a_fourth_element() -> None:
              torch.randint(0, m.rc.max_particles, (n, m.rc.max_seq_len)),
              torch.zeros(n, dtype=torch.long))
     assert torch.isfinite(m.training_step(batch, 0))
+
+
+def test_head_is_nonlinear_in_the_conditioning() -> None:
+    """A bare Linear would compose with proj_in into one affine map, which
+    cannot bend from 86% pass-through at low density to 24% at high."""
+    m = _model(passthrough_head=True)
+    x = torch.zeros(7, m.rc.in_dim)
+    x[:, 0] = torch.linspace(1.0, 10.0, 7)
+    idx = torch.zeros(7, dtype=torch.long)
+    with torch.no_grad():
+        logit = m.pt_head(m.proj_in(x) + m.embd_pp_(idx)).squeeze(-1)
+    slopes = torch.diff(logit) / torch.diff(x[:, 0])
+    assert not torch.allclose(slopes, slopes[0], rtol=1e-3)
+
+
+def test_passthrough_dim_is_configurable() -> None:
+    m = _model(passthrough_head=True, passthrough_dim=8)
+    assert m.pt_head[0].out_features == 8
+
+
+def _count_batch(m, n=64, seed=3):
+    torch.manual_seed(seed)
+    return (torch.randn(n, m.rc.in_dim),
+            torch.randint(0, m.rc.max_particles, (n, m.rc.max_seq_len)),
+            torch.zeros(n, dtype=torch.long))
+
+
+def _logits(m, in_tok, counts, idx):
+    in_embd = m.proj_in(in_tok) + m.embd_pp_(idx)
+    seq = torch.cat((in_embd.unsqueeze(1),
+                     m.embd_in_(counts[:, : m.rc.max_seq_len - 1] + m._in_offsets)), dim=1)
+    out = m.model(seq, mask=None, condition=in_embd)
+    return torch.einsum("bsh,shp->bsp", out, m.proj_out_w) + m.proj_out_b
+
+
+def test_count_loss_ignores_passthrough_rows() -> None:
+    """The decoder must model P(counts | interacted): rewriting the targets of
+    the rows the token owns may not move the loss, or their singles stack."""
+    m = _model(passthrough_head=True)
+    m.trainer = None
+    in_tok, counts, idx = _count_batch(m)
+    label = torch.zeros(len(in_tok))
+    label[::2] = 1.0
+    a = m.training_step((in_tok, counts, idx, label), 0)
+    masked = counts.clone()
+    masked[::2] = (counts[::2] + 1) % m.rc.max_particles
+    assert torch.allclose(a, m.training_step((in_tok, masked, idx, label), 0))
+    kept = counts.clone()
+    kept[1::2] = (counts[1::2] + 1) % m.rc.max_particles
+    assert not torch.allclose(a, m.training_step((in_tok, kept, idx, label), 0))
+
+
+def test_a_passthrough_row_the_token_cannot_own_still_trains_the_decoder() -> None:
+    m = _model(passthrough_head=True)
+    m.trainer = None
+    in_tok, counts, _ = _count_batch(m)
+    idx = torch.full((len(in_tok),), 1, dtype=torch.long)  # 211, charged
+    label = torch.ones(len(in_tok))
+    a = m.training_step((in_tok, counts, idx, label), 0)
+    other = (counts + 1) % m.rc.max_particles
+    assert not torch.allclose(a, m.training_step((in_tok, other, idx, label), 0))
+
+
+def test_an_unmasked_batch_is_the_plain_cross_entropy() -> None:
+    m = _model()
+    m.trainer = None
+    in_tok, counts, idx = _count_batch(m)
+    expect = torch.nn.functional.cross_entropy(
+        _logits(m, in_tok, counts, idx).reshape(-1, m.rc.max_particles), counts.reshape(-1))
+    assert torch.allclose(m.training_step((in_tok, counts, idx), 0), expect, atol=1e-6)
+
+
+def test_validation_rolls_out_with_the_token() -> None:
+    m = _model(passthrough_head=True)
+    with torch.no_grad():
+        m.pt_head[-1].bias.fill_(50.0)
+    in_tok, counts, _ = _count_batch(m, n=16)
+    idx = torch.full((16,), 2, dtype=torch.long)  # neutron in, ptypes index 2
+    m.on_validation_epoch_start()
+    m.validation_step((in_tok, counts, idx), 0)
+    assert m._val_acc[0].tolist() == [0.0, 0.0, 16.0]
