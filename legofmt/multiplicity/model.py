@@ -37,6 +37,24 @@ def _pt_pdgid_allowed(rc) -> torch.Tensor:
     return torch.tensor([int(p) in allowed for p in rc.ptypes_in], dtype=torch.bool)
 
 
+class _ResidualHead(nn.Module):
+    """depth x pre-norm [Linear -> Mish -> Linear] residual blocks, then a
+    linear read-out; the shape of the trunk's own slot-0 computation."""
+
+    def __init__(self, h: int, d: int, depth: int):
+        super().__init__()
+        self.blocks = nn.ModuleList([
+            nn.Sequential(nn.RMSNorm(h), nn.Linear(h, d), nn.Mish(), nn.Linear(d, h))
+            for _ in range(depth)
+        ])
+        self.out = nn.Sequential(nn.RMSNorm(h), nn.Linear(h, 1))
+
+    def forward(self, x):
+        for b in self.blocks:
+            x = x + b(x)
+        return self.out(x)
+
+
 class MultLoader(torch.utils.data.Dataset):
     """Flattens a prepped dataset into (in_tok, counts, pdgid_in_idx) plus the
     inverse-model tensors when train_inverse; assumes mm_conf.cond_scalars is
@@ -199,9 +217,11 @@ class MultModel(LightningModule):
         self.pt_head = None
         if rc.mm_conf.get("passthrough_head", False):
             pt_dim = rc.mm_conf.get("passthrough_dim", rc.h_dim)
-            self.pt_head = nn.Sequential(
+            depth = rc.mm_conf.get("passthrough_depth", 0)
+            self.pt_head = _ResidualHead(rc.h_dim, pt_dim, depth) if depth else nn.Sequential(
                 nn.Linear(rc.h_dim, pt_dim), nn.Mish(), nn.Linear(pt_dim, 1),
             )
+        self.pt_on_trunk = rc.mm_conf.get("passthrough_on", "in_embd") == "trunk"
         self.register_buffer("_pt_pdgid_allowed", _pt_pdgid_allowed(rc), persistent=False)
         self.proj_out_w = torch.nn.Parameter(torch.empty(rc.max_seq_len, rc.h_dim, rc.max_particles))
         self.proj_out_b = torch.nn.Parameter(torch.empty(rc.max_seq_len, rc.max_particles))
@@ -275,8 +295,9 @@ class MultModel(LightningModule):
             loss_count = (ce * w).sum() / w.sum().clamp(min=1.0)
             total = loss_count
             if allowed.any():
+                pt_in = out_f[:, 0] if self.pt_on_trunk else in_embd
                 loss_pt = F.binary_cross_entropy_with_logits(
-                    self.pt_head(in_embd).squeeze(-1)[allowed], batch[-1].float()[allowed],
+                    self.pt_head(pt_in).squeeze(-1)[allowed], batch[-1].float()[allowed],
                 )
                 total = loss_count + loss_pt
                 pt_logs = {"loss/passthrough": loss_pt.detach()}
@@ -304,7 +325,11 @@ class MultModel(LightningModule):
         if self.pt_head is None:
             return torch.zeros(in_tok.shape[0], dtype=torch.bool, device=in_tok.device)
         in_embd = self.proj_in(in_tok) + self.embd_pp_(pdgid_in_idx)
-        p = self.pt_head(in_embd).squeeze(-1).sigmoid()
+        pt_in = in_embd
+        if self.pt_on_trunk:
+            # slot 0 is causal, so this equals training's out_f[:, 0]
+            pt_in = self.model(in_embd.unsqueeze(1), mask=None, condition=in_embd)[:, 0]
+        p = self.pt_head(pt_in).squeeze(-1).sigmoid()
         return (torch.rand_like(p) < p) & self._pt_pdgid_allowed[pdgid_in_idx]
 
     def configure_optimizers(self):

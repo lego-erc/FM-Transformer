@@ -27,16 +27,30 @@ from legofmt.mod_comps.config import _amp_dtype
 class Solvers:
     """Sampling / likelihood mixin for :class:`~legofmt.main.modules.LEGOLtng`."""
 
-    def chunked(self, fn, *tensors, split_size=None, dim=0, cat_dim=None):
+    def chunked(self, fn, *tensors, split_size=None, dim=0, cat_dim=None, buckets=None):
         """Apply ``fn`` in ``split_size`` chunks along ``dim`` and concatenate along
         ``cat_dim`` (``-3`` is the batch axis of both a ``(B, L, C)`` solution and a
-        ``(T, B, L, C)`` intermediates stack)."""
-        if split_size is None or split_size >= tensors[0].shape[dim]:
-            return fn(*tensors)
+        ``(T, B, L, C)`` intermediates stack). With ``buckets`` every chunk is padded
+        to the smallest bucket that holds it, so a compiled ``fn`` only ever sees
+        ``len(buckets)`` batch shapes."""
         if cat_dim is None:
             cat_dim = dim
-        out = [fn(*chunk) for chunk in zip(*(t.split(split_size, dim) for t in tensors))]
+        if split_size is None or split_size >= tensors[0].shape[dim]:
+            return self._bucketed(fn, tensors, dim, cat_dim, buckets)
+        out = [self._bucketed(fn, chunk, dim, cat_dim, buckets)
+               for chunk in zip(*(t.split(split_size, dim) for t in tensors))]
         return torch.cat(out, dim=cat_dim)
+
+    @staticmethod
+    def _bucketed(fn, tensors, dim, cat_dim, buckets):
+        n = tensors[0].shape[dim]
+        target = next((b for b in sorted(buckets or ()) if b >= n), None)
+        if target is None or target == n:
+            return fn(*tensors)
+        # tile the chunk's own rows: valid inputs, discarded after the solve
+        reps = -(-target // n)
+        padded = [torch.cat([t] * reps, dim).narrow(dim, 0, target) for t in tensors]
+        return fn(*padded).narrow(cat_dim, 0, n)
 
     def _to_eval(self) -> None:
         if self.model.training:
@@ -95,6 +109,7 @@ class Solvers:
         method: str = "midpoint",
         time_grid: Tensor | None = None,
         return_intermediates: bool = False,
+        buckets: list[int] | None = None,
     ) -> Tensor:
         ds_t, pdgids_idx = self._prep_solve(ds_t)
         am = ds_t.am.full.unsqueeze(-1)
@@ -131,7 +146,7 @@ class Solvers:
 
         return self.chunked(
             _sample, x_init, ds_t.m.full, ds_t.am.full, pdgids_idx,
-            split_size=split_size, cat_dim=-3,
+            split_size=split_size, cat_dim=-3, buckets=buckets,
         )
 
     def _midpoint_steps(
@@ -205,6 +220,7 @@ class Solvers:
                     method=cfg.get("method", "midpoint"),
                     time_grid=cfg.get("time_grid"),
                     return_intermediates=cfg.get("return_timesteps", False),
+                    buckets=cfg.get("compile_buckets"),
                 )
             sols = sols.float()
             sols = sols.masked_fill_(~am, torch.nan)
