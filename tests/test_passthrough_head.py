@@ -212,3 +212,45 @@ def test_validation_rolls_out_with_the_token() -> None:
     m.on_validation_epoch_start()
     m.validation_step((in_tok, counts, idx), 0)
     assert m._val_acc[0].tolist() == [0.0, 0.0, 16.0]
+
+
+def test_deep_head_is_residual_and_configurable() -> None:
+    from legofmt.multiplicity.model import _ResidualHead
+    m = _model(passthrough_head=True, passthrough_depth=2, passthrough_dim=32)
+    assert isinstance(m.pt_head, _ResidualHead)
+    assert len(m.pt_head.blocks) == 2
+    assert m.pt_head.blocks[0][1].out_features == 32
+    in_tok, idx = _inputs(m, 2)
+    assert m.pt_head(m.proj_in(in_tok) + m.embd_pp_(idx)).shape == (len(in_tok), 1)
+    with torch.no_grad():
+        m.pt_head.out[-1].bias.fill_(50.0)
+    assert m.sample_passthrough(in_tok, idx).all()
+
+
+def test_trunk_head_sampling_matches_training_slot0() -> None:
+    """Slot 0 of the causal decoder sees only in_embd, so the sampler's
+    one-token pass must equal training's out_f[:, 0] whatever the counts."""
+    m = _model(passthrough_head=True, passthrough_on="trunk").eval()
+    in_tok, counts, idx = _count_batch(m, n=16)
+    with torch.no_grad():
+        in_embd = m.proj_in(in_tok) + m.embd_pp_(idx)
+        seq = torch.cat((in_embd.unsqueeze(1),
+                         m.embd_in_(counts[:, : m.rc.max_seq_len - 1] + m._in_offsets)), dim=1)
+        train_slot0 = m.model(seq, mask=None, condition=in_embd)[:, 0]
+        sample_slot0 = m.model(in_embd.unsqueeze(1), mask=None, condition=in_embd)[:, 0]
+    assert torch.allclose(train_slot0, sample_slot0, atol=1e-5)
+
+
+def test_trunk_head_trains_the_trunk_and_in_embd_head_does_not() -> None:
+    """With every row a pass-through the count loss carries zero weight, so any
+    gradient reaching the decoder comes from the pass-through BCE alone."""
+    def trunk_grad(**mm):
+        m = _model(passthrough_head=True, **mm)
+        m.trainer = None
+        in_tok, counts, _ = _count_batch(m, n=16)
+        idx = torch.full((16,), 2, dtype=torch.long)  # neutron, allowed
+        m.training_step((in_tok, counts, idx, torch.ones(16)), 0).backward()
+        return max(float(p.grad.abs().max()) for p in m.model.parameters()
+                   if p.grad is not None)
+    assert trunk_grad(passthrough_on="trunk") > 0.0
+    assert trunk_grad() == 0.0
