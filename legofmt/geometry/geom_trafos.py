@@ -39,6 +39,11 @@ class GeomTrafos:
         x = x_ / x_.abs().max(-1, keepdim=True).values.clamp_min(1e-8) * d
         return torch.cat((p, x), dim=-1)
 
+    def to_cuboid(self, p_and_x, d=1.0):
+        p, x_ = p_and_x.split(3, -1)
+        x = x_ / (x_.abs() / d).max(-1, keepdim=True).values.clamp_min(1e-8)
+        return torch.cat((p, x), dim=-1)
+
     def rotate(self, sph, alpha, beta):
         """Rotate about x-axis by alpha, then about z-axis by beta, in spherical coords."""
         st, ct = sph[..., 0:1].sin(), sph[..., 0:1].cos()
