@@ -135,7 +135,7 @@ def test_nout_conditioning_separates_the_bimodal_edep() -> None:
         model = LEGOLtng(_config(flag))
         model.pretrain_base(_mixed(512, s) for s in range(300))
         probe = torch.tensor([1, 2])
-        _, mu, sig, _ = model.base_head_params(_batch(torch.full((2,), 0.1), probe))
+        _, mu, sig, _, _ = model.base_head_params(_batch(torch.full((2,), 0.1), probe))
         got[flag] = (mu.flatten().tolist(), sig.flatten().tolist())
 
     (mu1_off, mu2_off), _ = got[False]
@@ -154,7 +154,7 @@ def test_only_edep_sees_the_outgoing_set() -> None:
     outgoing priors 8x across branches and cost 2x on the direction losses."""
     model = LEGOLtng(_config(True))
     model.pretrain_base(_mixed(512, s) for s in range(150))
-    s, mu, sig, kap = model.base_head_params(_batch(torch.full((2,), 0.1), torch.tensor([1, 2])))
+    s, mu, sig, kap, _ = model.base_head_params(_batch(torch.full((2,), 0.1), torch.tensor([1, 2])))
     assert abs(float(mu[0] - mu[1])) > 0.5, "E_dep prior should separate the branches"
     assert torch.allclose(s[0], s[1]) and torch.allclose(kap[0], kap[1]), (
         "sm_scale / kappa leaked n_out")

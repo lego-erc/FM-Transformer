@@ -91,7 +91,7 @@ def _batches(n: int, bs: int = 512):
 def test_pretrain_recovers_logit_normal_params() -> None:
     model = LEGOLtng(_config())
     model.pretrain_base(_batches(300))
-    _, mu, sig, _ = model.base_head_params(_batch(4, torch.full((4,), 0.1)))
+    _, mu, sig, _, _ = model.base_head_params(_batch(4, torch.full((4,), 0.1)))
     mu, sig = float(mu.mean()), float(sig.mean())
     assert abs(mu - MU_TRUE) < 0.3, f"mu {mu} vs {MU_TRUE}"
     assert abs(sig - SIG_TRUE) / SIG_TRUE < 0.3, f"sig {sig} vs {SIG_TRUE}"

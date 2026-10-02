@@ -50,11 +50,13 @@ class GeomTrafos:
 
     def sample(
         self, n: tuple, loc_cc, kappa: torch.Tensor,
-        bs_frac: float = 0.0, tanh_theta: bool = False,
+        bs_frac: float = 0.0, tanh_theta: bool = False, ang_pow=None,
     ):
         """Directions concentrated (kappa) around loc_cc, wrapped-normal or
         tanh-normal theta; bs_frac sends the first round(bs_frac*B) events --
-        all their particles -- to the antipode."""
+        all their particles -- to the antipode. ``ang_pow`` raises the
+        tanh-normal theta to a power, so kappa sets the angular scale and
+        ang_pow the shape: one moment each, instead of one for both."""
         loc = self.to_sph(loc_cc).expand((*n, -1))
         if bs_frac > 0.0:
             loc = loc.clone()
@@ -62,7 +64,8 @@ class GeomTrafos:
             loc[:k, ..., 0] += torch.pi
         loc_theta, loc_phi = loc.split(1, -1)
         if tanh_theta:
-            samples_theta = torch.pi * (torch.randn(n, device=loc_cc.device) / kappa).tanh().abs()
+            t = (torch.randn(n, device=loc_cc.device) / kappa).tanh().abs()
+            samples_theta = torch.pi * (t if ang_pow is None else t.pow(ang_pow))
         else:
             samples_theta = ((
                 2 / kappa * torch.randn(n, device=loc_cc.device) + torch.pi

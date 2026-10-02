@@ -64,16 +64,19 @@ def build_base_head(rc, gen_base) -> nn.Sequential | None:
     n_in = 4 + len(rc.pdgids_template)
     if bc.get("base_head_nout", False):
         n_in += len(rc.pdgids_template) + 2
-    head = nn.Sequential(nn.Linear(n_in, 16), nn.Mish(), nn.Linear(16, 4))
+    n_out = 4 + int(bc.get("ang_shape", False))
+    head = nn.Sequential(nn.Linear(n_in, 16), nn.Mish(), nn.Linear(16, n_out))
     with torch.no_grad():
         head[-1].weight.zero_()
         head[-1].bias.copy_(torch.tensor(
             [float(gen_base.sm_scale), 1.0, 1.0,
-             float(gen_base.kappa)]).log())
+             float(gen_base.kappa)] + [1.0] * (n_out - 4)).log())
         if hs is None or hs.keys() != head.state_dict().keys():
             return head  # fresh head: zero-init output layer, priors in the bias
         if hs["0.weight"].shape != head[0].weight.shape:
             return head   # base_head_nout toggled: re-pretrain, do not mis-load
+        if bc.get("ang_shape", False) and hs["2.weight"].shape[0] < head[-1].weight.shape[0]:
+            return head   # ang_shape toggled on: re-pretrain, do not freeze at pow=1
         if hs["2.weight"].shape == head[-1].weight.shape:
             head.load_state_dict(hs)
         else:
@@ -85,9 +88,10 @@ def build_base_head(rc, gen_base) -> nn.Sequential | None:
 class BaseDist:
     """Base-distribution mixin for :class:`~legofmt.main.modules.LEGOLtng`."""
 
-    def base_head_params(self, ds_t: DataStruct) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """Per-event ``(sm_scale, edep_mu, edep_sig, kappa)`` from the head's inputs:
-        incoming kinematics, species one-hot, cube chord, ``log(Size*Density/X0)``."""
+    def base_head_params(self, ds_t: DataStruct):
+        """Per-event ``(sm_scale, edep_mu, edep_sig, kappa, ang_pow)`` from the head's
+        inputs: incoming kinematics, species one-hot, cube chord,
+        ``log(Size*Density/X0)``. ``ang_pow`` is None unless base_conf.ang_shape."""
         pid     = ds_t.f.in_p[..., 0, -1]
         idx     = pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)
         species = nn.functional.one_hot(
@@ -115,11 +119,13 @@ class BaseDist:
             extra   = torch.cat(self._out_set_feats(ds_t), dim=-1)
             both    = torch.cat((torch.cat((x, extra), -1), torch.cat((x, torch.zeros_like(extra)), -1)))
             out_e, out = self.base_head(both).chunk(2)  # one forward for both passes
-            out     = torch.cat((out[..., 0:1], out_e[..., 1:3], out[..., 3:4]), dim=-1)
+            ang     = out_e if (self.rc.config.get("base_conf") or {}).get("ang_nout", False) else out
+            out     = torch.cat((out[..., 0:1], out_e[..., 1:3], ang[..., 3:]), dim=-1)
         else:
             out     = self.base_head(x)
         return (out[..., 0:1].exp(), out[..., 1:2], out[..., 2:3].exp(),
-                out[..., 3:4].exp().clamp_min(1e-3))  # kap: divisor in sample()
+                out[..., 3:4].exp().clamp_min(1e-3),  # kap: divisor in sample()
+                out[..., 4:5].exp().clamp(0.1, 10.0) if out.shape[-1] > 4 else None)
 
     def _out_set_feats(self, ds_t: DataStruct) -> list[Tensor]:
         """Outgoing multiplicity and per-pdgid composition, both fixed before the
@@ -132,7 +138,7 @@ class BaseDist:
         cnt   = (oh * valid.unsqueeze(-1)).sum(-2).float()
         return [valid.sum(-1, keepdim=True).float().log1p(), cnt.log1p()]
 
-    def _base_moment_loss(self, ds_t, fwd, s, mu, sig, kap) -> Tensor:
+    def _base_moment_loss(self, ds_t, fwd, s, mu, sig, kap, pw=None) -> Tensor:
         """Moment-match the prior to the batch: quantile-node mean of the energy scale,
         logit-normal NLL for E_dep, and (``tanh_theta``) the mean opening angle for kappa."""
         z  = 2 ** 0.5 * torch.erfinv(torch.linspace(
@@ -155,13 +161,20 @@ class BaseDist:
         if not self.gen_base.tanh_theta:
             return l_scale + l_edep
 
-        th_b = (z.abs() / kap).tanh().mean(-1)
+        tb   = (z.abs() / kap).tanh()
+        if pw is not None:
+            tb = tb.pow(pw)
         u_i  = nn.functional.normalize(ds_t.f.in_cc[..., 0, 1:4], dim=-1).unsqueeze(1)
         p_i  = nn.functional.normalize(ds_t.f.in_cc[..., 0, 4:7], dim=-1).unsqueeze(1)
         a_m  = (ds_t.f.out_cc[..., 1:4] * u_i).sum(-1).clamp(-1, 1).acos()
         a_p  = (ds_t.f.out_cc[..., 4:7] * p_i).sum(-1).clamp(-1, 1).acos()
-        th_t = (((a_m + a_p) / 2) * v).sum(-1) / n / torch.pi
-        l_kappa = ((th_b - th_t) ** 2 * ev).sum() / ev.sum().clamp(min=1)
+        ang  = (a_m + a_p) / 2 / torch.pi
+        den  = ev.sum().clamp(min=1)
+        l_kappa = ((tb.mean(-1) - (ang * v).sum(-1) / n) ** 2 * ev).sum() / den
+        if pw is not None:
+            l_kappa = l_kappa + (
+                (tb.square().mean(-1) - (ang.square() * v).sum(-1) / n) ** 2 * ev).sum() / den
+        l_kappa = l_kappa * (self.rc.config.get("base_conf") or {}).get("ang_weight", 1.0)
         return l_scale + l_edep + l_kappa
 
     def _fit_base_head(self, ds_t, fwd) -> None:
@@ -169,13 +182,14 @@ class BaseDist:
         while the head is trainable."""
         learn = self.model.training and self.base_head[-1].weight.requires_grad
         with torch.set_grad_enabled(learn):
-            s, mu, sig, kap = self.base_head_params(ds_t)
+            s, mu, sig, kap, pw = self.base_head_params(ds_t)
             if learn:
-                self._base_head_loss = self._base_moment_loss(ds_t, fwd, s, mu, sig, kap)
+                self._base_head_loss = self._base_moment_loss(ds_t, fwd, s, mu, sig, kap, pw)
         self.gen_base.sm_scale = s.detach().unsqueeze(-1)
         self.gen_base.edep_mu  = mu.detach()
         self.gen_base.edep_sig = sig.detach()
         self.gen_base.kappa    = kap.detach()
+        self.gen_base.ang_pow  = None if pw is None else pw.detach()
 
     def _ot_couple(self, base: Tensor, ds_t, data: Tensor) -> Tensor:
         """Per-event Hungarian assignment of base slots to data slots, blocked across

@@ -30,6 +30,7 @@ class GenerateBase:
         self.sm_scale = base_conf.get("sm_scale", 0.5)  # sm_norm tanh temperature; larger -> flatter energy base
         self.edep_mu = 0.0   # per-event edep base params; overwritten by LEGOLtng's base_head
         self.edep_sig = 1.0
+        self.ang_pow = None  # per-event angular shape; set by base_head when ang_shape
 
         if self.base_dist not in ("poles", "iso", "iso_pos"):
             raise ValueError(f"base_dist must be 'poles', 'iso', or 'iso_pos', got {self.base_dist!r}")
@@ -64,8 +65,9 @@ class GenerateBase:
         if iso_pos:
             x = self.geom_trafos.sample_iso(shape, 1, device=incoming_rt.device)
         else:
-            x = self.geom_trafos.sample(shape, loc_cc, self.kappa, self.bs_frac, self.tanh_theta)
-        p_ = self.geom_trafos.sample(shape, p_cc, self.kappa, 0.0, self.tanh_theta)
+            x = self.geom_trafos.sample(
+                shape, loc_cc, self.kappa, self.bs_frac, self.tanh_theta, self.ang_pow)
+        p_ = self.geom_trafos.sample(shape, p_cc, self.kappa, 0.0, self.tanh_theta, self.ang_pow)
         base = torch.cat((e_sc, p_, x), dim=-1)
         return torch.cat((incoming_rt, base), dim=1)
 
