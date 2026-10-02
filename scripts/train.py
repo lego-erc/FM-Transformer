@@ -112,6 +112,8 @@ trainer = ltng.Trainer(
 )
 
 train_model = run["train_model"]
+if run.get("init_seed") is not None:
+    ltng.seed_everything(int(run["init_seed"]), workers=True)
 compile_mode = run["compile"]  # false | model
 if train_model == "fm":
     model = LEGOLtng(config)
@@ -132,7 +134,9 @@ if resume_from:
 if compile_mode == "model":  # fm: the ProjectModel; mult: the count Decoder wrapper
     model.model = torch.compile(model.model, dynamic=False)
 
-trainer.fit(model=model)
+if run.get("data_seed") is not None:
+    torch.manual_seed(int(run["data_seed"]))
+trainer.fit(model=model, ckpt_path=run.get("resume_ckpt"))  # Lightning checkpoint (optimizer, scheduler, epoch) to continue from
 if not trainer.is_global_zero:  # one writer: concurrent torch.save to one path can corrupt it
     raise SystemExit(0)
 
