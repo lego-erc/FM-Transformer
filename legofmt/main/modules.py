@@ -153,9 +153,10 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         unknown   = torch.isnan(pdgids) | (pdgids == 0) | (pdgids >= 1e8) | (template[pos] != pdgids)
         return (pos + 1).masked_fill_(unknown, 0)
 
-    def _canon_dirs(self, x: Tensor, face: Tensor, fwd: Tensor, inverse: bool = False) -> Tensor:
+    def _canon_dirs(self, x: Tensor, face: Tensor, fwd: Tensor, inverse: bool = False,
+                    g: Tensor | None = None) -> Tensor:
         rot  = self.sym.uncanonicalize if inverse else self.sym.canonicalize
-        dirs = rot(torch.stack((x[..., 1:4], x[..., 4:7]), dim=-2), face)
+        dirs = rot(torch.stack((x[..., 1:4], x[..., 4:7]), dim=-2), face, g)
         new  = torch.cat((x[..., 0:1], dirs[..., 0, :], dirs[..., 1, :], x[..., 7:]), dim=-1)
         rows = torch.arange(x.shape[-2], device=x.device) >= self.rc.n_prefix
         new  = torch.where(rows.view(1, -1, 1), new, x)

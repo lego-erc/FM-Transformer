@@ -152,7 +152,8 @@ class TrainStep:
             if self.sym is not None:
                 fwd  = ds_t.m.full[:, self.rc.n_prefix] == 0
                 face = self.sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
-                ds_t = DataStruct(self._canon_dirs(ds_t.f.full, face, fwd), ds_t.m.full, ds_t.am.full)
+                g    = torch.randint(8, face.shape, device=face.device) if self.rc.sym_aug else None
+                ds_t = DataStruct(self._canon_dirs(ds_t.f.full, face, fwd, g=g), ds_t.m.full, ds_t.am.full)
             base      = self.gen_base_wrapper(ds_t)
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
             t = self._sample_t(ds_t)

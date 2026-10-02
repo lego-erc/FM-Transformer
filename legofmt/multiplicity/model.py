@@ -255,7 +255,8 @@ class MultModel(LightningModule):
         x = x.clone()
         if self.sym is not None:
             face = self.sym.face_of(x[..., -3:])
-            dirs = self.sym.canonicalize(torch.stack((x[..., -6:-3], x[..., -3:]), dim=-2), face)
+            g    = torch.randint(8, face.shape, device=face.device) if self.rc.sym_aug else None
+            dirs = self.sym.canonicalize(torch.stack((x[..., -6:-3], x[..., -3:]), dim=-2), face, g)
             x[..., -6:-3], x[..., -3:] = dirs[..., 0, :], dirs[..., 1, :]
         x[..., -6:] = self.geom_trafos.to_cube(x[..., -6:], d=self.rc.pos_scale)
         return self.proj_in_(x)

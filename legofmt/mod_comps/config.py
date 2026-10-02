@@ -68,6 +68,7 @@ class ResolvedLEGOConfig:
     max_loss_weight_edep: float
     overflow_delta: float
     canon_sym: bool
+    sym_aug: bool
     cond_scalars: tuple[str, ...]
     n_prefix: int
 
@@ -259,6 +260,7 @@ def _build_resolved(
         max_loss_weight_edep=model_conf.get("max_loss_weight_edep", max_loss_weight),
         overflow_delta=overflow_delta,
         canon_sym=model_conf.get("canon_sym", False),
+        sym_aug=model_conf.get("sym_aug", False),
         cond_scalars=cond_scalars,
         n_prefix=n_prefix,
         mask_conf=model_conf.get("mask_conf", {}),
@@ -296,6 +298,7 @@ class ResolvedMultConfig:
     post_emb_norm: bool
     pos_scale: float
     canon_sym: bool
+    sym_aug: bool
     model_args: dict[str, Any]
 
     dl_conf: dict
@@ -408,6 +411,7 @@ def _build_resolved_mult(
         post_emb_norm=mm_conf.get("post_emb_norm", True),
         pos_scale=mm_conf.get("pos_scale", 50.0),
         canon_sym=mm_conf.get("canon_sym", False),
+        sym_aug=mm_conf.get("sym_aug", False),
         model_args=mm_conf.get("model_args", {}),
         dl_conf=dl_conf,
         mm_conf=mm_conf,

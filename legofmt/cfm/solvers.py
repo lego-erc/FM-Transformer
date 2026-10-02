@@ -200,7 +200,9 @@ class Solvers:
         if self.sym is not None:
             fwd  = ds_t.m.full[:, self.rc.n_prefix] == 0
             face = self.sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
-            ds_t = DataStruct(self._canon_dirs(ds_t.f.full, face, fwd), ds_t.m.full, ds_t.am.full)
+            g    = (torch.randint(8, face.shape, device=face.device)
+                    if (self.rc.sym_aug or cfg.get("sym_rand", False)) else None)
+            ds_t = DataStruct(self._canon_dirs(ds_t.f.full, face, fwd, g=g), ds_t.m.full, ds_t.am.full)
         base = self.gen_base_wrapper(ds_t)
 
         pdgids = ds_t.f.pdgids
@@ -233,9 +235,9 @@ class Solvers:
 
         if self.sym is not None:
             if sols.dim() == 4:
-                sols = torch.stack([self._canon_dirs(s, face, fwd, inverse=True) for s in sols])
+                sols = torch.stack([self._canon_dirs(s, face, fwd, inverse=True, g=g) for s in sols])
             else:
-                sols = self._canon_dirs(sols, face, fwd, inverse=True)
+                sols = self._canon_dirs(sols, face, fwd, inverse=True, g=g)
 
         if sols.dim() == 4:
             pdgids = pdgids.unsqueeze(0).expand(sols.shape[0], -1, -1, -1)
