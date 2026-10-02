@@ -62,8 +62,10 @@ class ResolvedLEGOConfig:
     one_step_euler_sections: int
     one_step_euler_every: int
     learned_loss_weights: bool
+    edep_cell: bool
     max_loss_weight: float       # floors lv, so weight_bound = e^-max_loss_weight
     max_loss_weight_flow: float  # the same bound for the flow-map's own cell
+    max_loss_weight_edep: float
     overflow_delta: float
     canon_sym: bool
     cond_scalars: tuple[str, ...]
@@ -199,8 +201,9 @@ def migrate_loss_weight_keys(model_conf: dict) -> dict:
             model_conf.setdefault(new, model_conf.pop(old))
     model_conf.pop("uncert_bins", None)
     lv = (model_conf.get("loss_weights") or {}).get("lv")
-    if lv is not None and lv.numel() > 3:
-        model_conf["loss_weights"]["lv"] = lv.view(-1, 3).exp().mean(0).log()
+    n_cells = 3 + int(model_conf.get("edep_cell", False))
+    if lv is not None and lv.numel() > n_cells:
+        model_conf["loss_weights"]["lv"] = lv.view(-1, n_cells).exp().mean(0).log()
     return model_conf
 
 
@@ -250,8 +253,10 @@ def _build_resolved(
         one_step_euler_sections=sections,
         one_step_euler_every=model_conf.get("one_step_euler_every", 1),
         learned_loss_weights=model_conf.get("learned_loss_weights", False),
+        edep_cell=model_conf.get("edep_cell", False),
         max_loss_weight=max_loss_weight,
         max_loss_weight_flow=model_conf.get("max_loss_weight_flow", max_loss_weight),
+        max_loss_weight_edep=model_conf.get("max_loss_weight_edep", max_loss_weight),
         overflow_delta=overflow_delta,
         canon_sym=model_conf.get("canon_sym", False),
         cond_scalars=cond_scalars,

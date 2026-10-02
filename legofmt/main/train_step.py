@@ -43,30 +43,42 @@ class TrainStep:
         denom    = g.sum().clamp(min=1)
         out      = sq * g
         loss_e   = out[..., 0:1].sum() / denom
+        loss_ed  = None
+        if self.rc.edep_cell:
+            n_ed    = g[:, 1].sum().clamp(min=1)
+            loss_ed = out[:, 1, 0].sum() / n_ed
+            loss_e  = (out[..., 0:1].sum() - out[:, 1, 0].sum()) / (denom - n_ed).clamp(min=1)
         loss_dir = out[..., 1:4].sum() / (denom * 3)
         loss_x   = out[..., 4:7].sum() / (denom * 3)
         logs     = {}
         if not self.rc.learned_loss_weights:
-            total = loss_e + loss_dir + loss_x
+            total = loss_e + loss_dir + loss_x + (loss_ed if loss_ed is not None else 0.0)
         else:
             # clamp in place: below the floor clamp() has zero gradient, so a cell
             # that overshoots would latch there and stop responding to its loss
+            lo = torch.full_like(self.lv, self.rc.max_loss_weight)
+            if self.rc.edep_cell:
+                lo[3] = self.rc.max_loss_weight_edep
             with torch.no_grad():
-                self.lv.clamp_(min=self.rc.max_loss_weight)
-            lv  = self.lv.clamp(min=self.rc.max_loss_weight)  # (3,), one per channel
+                self.lv.clamp_(min=lo)
+            lv  = self.lv.clamp(min=lo)  # (3,) or (4,), one per channel
             w   = torch.exp(-lv)
             total = (
                 w[0] * loss_e + w[1] * loss_dir + w[2] * loss_x
+                + (w[3] * loss_ed if loss_ed is not None else 0.0)
                 + lv.sum()  # the +log(sigma^2) barrier; zero at init
             )
             v = lv.detach().exp()
             logs = {"loss_weight/var_energy": v[0], "loss_weight/var_dir": v[1],
                     "loss_weight/var_pos": v[2]}
+            if loss_ed is not None:
+                logs["loss_weight/var_edep"] = v[3]
         out_logs = {}
         if self.training:
             out_logs = {
                 # unweighted, so these stay comparable across loss-weight settings
                 "loss/energy": loss_e.detach(),
+                **({"loss/edep": loss_ed.detach()} if loss_ed is not None else {}),
                 "loss/out_dir": loss_dir.detach(),
                 "loss/out_pos": loss_x.detach(),
                 "loss/raw": (loss_e + loss_dir + loss_x).detach(),

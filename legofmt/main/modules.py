@@ -83,7 +83,7 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
             params += [p for p in self.base_head.parameters() if p.requires_grad]
 
         if self.rc.learned_loss_weights:
-            self.lv = nn.Parameter(torch.zeros(3))  # one cell per channel
+            self.lv = nn.Parameter(torch.zeros(3 + int(self.rc.edep_cell)))  # one cell per channel
             params += [self.lv]
             if self.rc.one_step_euler_fac > 0:
                 self.lv_flow = nn.Parameter(torch.zeros(1))
