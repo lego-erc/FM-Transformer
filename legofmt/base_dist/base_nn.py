@@ -64,19 +64,20 @@ def build_base_head(rc, gen_base) -> nn.Sequential | None:
     n_in = 4 + len(rc.pdgids_template)
     if bc.get("base_head_nout", False):
         n_in += len(rc.pdgids_template) + 2
-    n_out = 4 + int(bc.get("ang_shape", False))
+    n_ang = len(rc.pdgids_template) + 1 if bc.get("ang_species", False) else 1
+    n_out = 3 + n_ang * (1 + int(bc.get("ang_shape", False)))
     head = nn.Sequential(nn.Linear(n_in, 16), nn.Mish(), nn.Linear(16, n_out))
     with torch.no_grad():
         head[-1].weight.zero_()
         head[-1].bias.copy_(torch.tensor(
-            [float(gen_base.sm_scale), 1.0, 1.0,
-             float(gen_base.kappa)] + [1.0] * (n_out - 4)).log())
+            [float(gen_base.sm_scale), 1.0, 1.0]
+            + [float(gen_base.kappa)] * n_ang + [1.0] * (n_out - 3 - n_ang)).log())
         if hs is None or hs.keys() != head.state_dict().keys():
             return head  # fresh head: zero-init output layer, priors in the bias
         if hs["0.weight"].shape != head[0].weight.shape:
             return head   # base_head_nout toggled: re-pretrain, do not mis-load
-        if bc.get("ang_shape", False) and hs["2.weight"].shape[0] < head[-1].weight.shape[0]:
-            return head   # ang_shape toggled on: re-pretrain, do not freeze at pow=1
+        if hs["2.weight"].shape[0] < head[-1].weight.shape[0]:
+            return head   # ang_shape / ang_species toggled on: re-pretrain, do not freeze at pow=1
         if hs["2.weight"].shape == head[-1].weight.shape:
             head.load_state_dict(hs)
         else:
@@ -125,9 +126,11 @@ class BaseDist:
             out     = torch.cat((out[..., 0:1], out_e[..., 1:3], ang[..., 3:]), dim=-1)
         else:
             out     = self.base_head(x)
+        bc      = self.rc.config.get("base_conf") or {}
+        n_ang   = len(self.pdgids_template) + 1 if bc.get("ang_species", False) else 1
         return (out[..., 0:1].exp(), out[..., 1:2], out[..., 2:3].exp(),
-                out[..., 3:4].exp().clamp_min(1e-3),  # kap: divisor in sample()
-                out[..., 4:5].exp().clamp(0.1, 10.0) if out.shape[-1] > 4 else None)
+                out[..., 3:3 + n_ang].exp().clamp_min(1e-3),  # kap: divisor in sample()
+                out[..., 3 + n_ang:].exp().clamp(0.1, 10.0) if out.shape[-1] > 3 + n_ang else None)
 
     def _out_set_feats(self, ds_t: DataStruct) -> list[Tensor]:
         """Outgoing multiplicity and per-pdgid composition, both fixed before the
@@ -163,19 +166,26 @@ class BaseDist:
         if not self.gen_base.tanh_theta:
             return l_scale + l_edep
 
-        tb   = (z.abs() / kap).tanh()
+        tb   = (z.abs() / kap.unsqueeze(-1)).tanh()          # (B, 1, nodes) or (B, K, nodes) per slot
         if pw is not None:
-            tb = tb.pow(pw)
+            tb = tb.pow(pw.unsqueeze(-1))
+        m1, m2 = tb.mean(-1), tb.square().mean(-1)
         u_i  = nn.functional.normalize(ds_t.f.in_cc[..., 0, 1:4], dim=-1).unsqueeze(1)
         p_i  = nn.functional.normalize(ds_t.f.in_cc[..., 0, 4:7], dim=-1).unsqueeze(1)
         a_m  = (ds_t.f.out_cc[..., 1:4] * u_i).sum(-1).clamp(-1, 1).acos()
         a_p  = (ds_t.f.out_cc[..., 4:7] * p_i).sum(-1).clamp(-1, 1).acos()
         ang  = (a_m + a_p) / 2 / torch.pi
         den  = ev.sum().clamp(min=1)
-        l_kappa = ((tb.mean(-1) - (ang * v).sum(-1) / n) ** 2 * ev).sum() / den
-        if pw is not None:
-            l_kappa = l_kappa + (
-                (tb.square().mean(-1) - (ang.square() * v).sum(-1) / n) ** 2 * ev).sum() / den
+        if kap.shape[-1] > 1:   # per-slot prior: match each slot's own moments (ang_species)
+            vs = v.sum().clamp(min=1)
+            l_kappa = (((m1 - ang) ** 2) * v).sum() / vs
+            if pw is not None:
+                l_kappa = l_kappa + (((m2 - ang.square()) ** 2) * v).sum() / vs
+        else:
+            l_kappa = ((m1.squeeze(-1) - (ang * v).sum(-1) / n) ** 2 * ev).sum() / den
+            if pw is not None:
+                l_kappa = l_kappa + (
+                    (m2.squeeze(-1) - (ang.square() * v).sum(-1) / n) ** 2 * ev).sum() / den
         l_kappa = l_kappa * (self.rc.config.get("base_conf") or {}).get("ang_weight", 1.0)
         return l_scale + l_edep + l_kappa
 
@@ -185,6 +195,12 @@ class BaseDist:
         learn = self.model.training and self.base_head[-1].weight.requires_grad
         with torch.set_grad_enabled(learn):
             s, mu, sig, kap, pw = self.base_head_params(ds_t)
+            if kap.shape[-1] > 1:   # ang_species: one column per species -> one value per slot
+                pid = ds_t.f.out_p[..., -1]
+                idx = (pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid))
+                idx = idx.long().clamp(0, kap.shape[-1] - 1)
+                kap = kap.gather(1, idx)
+                pw  = None if pw is None else pw.gather(1, idx)
             if learn:
                 self._base_head_loss = self._base_moment_loss(ds_t, fwd, s, mu, sig, kap, pw)
         self.gen_base.sm_scale = s.detach().unsqueeze(-1)
