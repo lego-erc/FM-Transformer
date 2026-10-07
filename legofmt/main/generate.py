@@ -73,7 +73,8 @@ class GenerateOut(torch.nn.Module):
         self.pdgids = flow_conf["config"]["model_conf"]["pdgids"].to(device)
         self.ptype_idx = torch.searchsorted(self.ptypes, self.pdgids).clamp(max=len(self.ptypes) - 1)
         self.ptype_in_mask = self.ptypes[self.ptype_idx] == self.pdgids
-        self.proj_ray = CubeTrace()
+        self.proj_ray = CubeTrace(flow_conf["config"]["model_conf"].get("cuboid_dim"))
+        self.cuboid_dim = self.proj_ray.cuboid_dim  # kept apart: no_raytrace models stub proj_ray
         self.pen = EnergyProjections(
             cutoff_mev=self.model.rc.cutoff_mev, max_energy=self.model.rc.max_energy,
         )
@@ -87,7 +88,7 @@ class GenerateOut(torch.nn.Module):
             nc = self.n_cond
             mom, pos = cond_model[:, nc:nc + 3], cond_model[:, nc + 3:nc + 6]
             pos = F.normalize(
-                self.proj_ray(torch.cat((mom, pos), dim=-1))[..., 3:], dim=-1
+                self.proj_ray(torch.cat((mom, pos), dim=-1))[..., 3:] / self.cuboid_dim.to(pos), dim=-1
             )
             dir_, e = self.pen.to_scalar(mom)
             cond_model = torch.cat(

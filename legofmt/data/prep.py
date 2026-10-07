@@ -29,6 +29,7 @@ class DataPrep:
             cond = model_conf.get("cond_scalars", ("Density",))
             self.energy_kin = model_conf.get("energy_kin", True)
             self.edep_log_min = model_conf.get("edep_log_min")
+            cuboid_dim = model_conf.get("cuboid_dim")
         else:
             # manifold is only needed by cc_trafo (the dict path); norm_e-only
             # users (MultLoader) legitimately have no manifold to give.
@@ -40,9 +41,10 @@ class DataPrep:
             cond = config.get("cond_scalars", ("Density",))
             self.energy_kin = config.get("energy_kin", True)
             self.edep_log_min = config.get("edep_log_min")
+            cuboid_dim = config.get("cuboid_dim")
         set_layout(cond)
         self.pen = EnergyProjections(cutoff_mev=cutoff_mev, max_energy=max_energy)
-        self.ppa = CubeTrace()
+        self.ppa = CubeTrace(cuboid_dim)
 
     def __call__(self, batch: tuple) -> Tensor:
         return self.prep(batch)
@@ -62,7 +64,8 @@ class DataPrep:
     def cc_trafo(self, cc: Tensor, e_kin: Tensor | None = None) -> Tensor:
         """MeV momenta/positions -> (energy scalar, unit mom dir, unit pos dir)
         projected onto the manifold; col 0 keeps MeV for the incoming row and
-        stores 1 - log(e_out/cutoff)/log(e_in/cutoff) for outgoing rows."""
+        stores 1 - log(e_out/cutoff)/log(e_in/cutoff) for outgoing rows. The pos
+        dir is that of x / cuboid_dim: the point on the unit cube the cuboid maps to."""
         cc = cc.nan_to_num(1)
         mom, pos = cc.split(3, -1)
         dir_ = F.normalize(mom, dim=-1)
@@ -79,7 +82,7 @@ class DataPrep:
             pos = pos.clone()
             pos[:, 0] = self.ppa(ray)[..., 3:]
         return self.manifold.projx(
-            torch.cat((e, dir_, F.normalize(pos, dim=-1)), dim=-1)
+            torch.cat((e, dir_, F.normalize(pos / self.ppa.cuboid_dim.to(pos), dim=-1)), dim=-1)
         )
 
     @torch.no_grad()

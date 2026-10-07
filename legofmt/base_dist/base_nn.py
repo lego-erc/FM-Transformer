@@ -90,7 +90,7 @@ class BaseDist:
 
     def base_head_params(self, ds_t: DataStruct):
         """Per-event ``(sm_scale, edep_mu, edep_sig, kappa, ang_pow)`` from the head's
-        inputs: incoming kinematics, species one-hot, cube chord,
+        inputs: incoming kinematics, species one-hot, cuboid chord,
         ``log(Size*Density/X0)``. ``ang_pow`` is None unless base_conf.ang_shape."""
         pid     = ds_t.f.in_p[..., 0, -1]
         idx     = pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)
@@ -100,14 +100,16 @@ class BaseDist:
         Z, A    = ds_t.f.cond("Z"), ds_t.f.cond("A")
         x0      = 716.4 * A / (Z * (Z + 1) * (287.0 / Z.sqrt()).log())
         t       = ds_t.f.cond("Size") * ds_t.f.cond("Density") / x0
-        # chord length: full chord through the cube along the incoming
-        # ray (edge lengths); fwd+bwd -> entry/exit-storage invariant
+        # chord length: full chord through the cuboid along the incoming ray
+        # (longest-edge lengths); fwd+bwd -> entry/exit-storage invariant
         inc     = ds_t.f.in_cc[..., 0, 1:7].nan_to_num(1.0)
         u, pos  = inc[..., :3], inc[..., 3:]
-        p       = pos / pos.abs().amax(-1, keepdim=True).clamp_min(1e-8)
+        d       = u.new_tensor(self.rc.config["model_conf"].get("cuboid_dim") or [1.0, 1.0, 1.0])
+        d       = d / d.max()
+        p       = pos / pos.abs().amax(-1, keepdim=True).clamp_min(1e-8) * d  # pos is dir(x / d)
         ok_u    = u.abs() > 1e-6
-        tf      = torch.where(ok_u, (u.sign() - p) / u, torch.full_like(u, 4.0))
-        tb      = torch.where(ok_u, (p + u.sign()) / u, torch.full_like(u, 4.0))
+        tf      = torch.where(ok_u, (u.sign() * d - p) / u, torch.full_like(u, 4.0))
+        tb      = torch.where(ok_u, (p + u.sign() * d) / u, torch.full_like(u, 4.0))
         chord   = ((tf.amin(-1) + tb.amin(-1)).clamp(0.0, 3.5) / 2).unsqueeze(-1)
         x       = torch.cat((ds_t.f.in_cc[..., 0], species, chord, t.log().unsqueeze(-1)), dim=-1)
         if (self.rc.config.get("base_conf") or {}).get("base_head_nout", False):

@@ -155,6 +155,8 @@ def _resolve_fresh(config: dict) -> ResolvedLEGOConfig:
     model_conf.setdefault("cond_scalars", tuple(meta.get("cond_scalars", ("Density",))))
     if "energy_kin" in meta:
         model_conf.setdefault("energy_kin", bool(meta["energy_kin"]))
+    if "cuboid_dim" in meta:
+        model_conf.setdefault("cuboid_dim", meta["cuboid_dim"])
     model_args.setdefault("ntypes", len(model_conf["cond_scalars"]) + 3)
     # ``pdgids`` lives at model_conf scope (one level above model_args) so
     # it is preserved by the manual torch.save round-trip in scripts/train.py.
@@ -236,6 +238,12 @@ def _build_resolved(
     overflow_delta = model_conf.get("overflow_delta", 0.0)
     if overflow_delta < 0:
         raise ValueError(f"overflow_delta must be >= 0, got {overflow_delta}.")
+    cuboid_dim = model_conf.get("cuboid_dim")
+    if model_conf.get("canon_sym", False) and cuboid_dim and len(set(cuboid_dim)) > 1:
+        raise ValueError(
+            f"canon_sym rotates every face onto +x, which is a symmetry of a cube only; "
+            f"got cuboid_dim={cuboid_dim}."
+        )
     max_loss_weight = model_conf.get("max_loss_weight", -6.0)
 
     return ResolvedLEGOConfig(

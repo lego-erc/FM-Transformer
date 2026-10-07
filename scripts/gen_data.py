@@ -59,6 +59,10 @@ manifold = [{"name": "euclidean", "dim": 1 }, {"name": "sphere", "dim": 3 }, {"n
 # extra scalars are silently dropped / the slot layout mismatches.
 cond_scalars = ["Density", "Z", "A", "Size"]
 
+# Edge lengths [Lx, Ly, Lz] of a cuboid target (only their ratios are used); None = cube.
+# Positions are stored as the direction of x / cuboid_dim, so the model needs the same value.
+cuboid_dim = None
+
 # max_energy is not used by DataPrep.prep -- the stored file keeps the
 # max_energy-dependent channels in MeV and DataPrep.norm_e converts them at
 # load time. It goes into meta.json only as the default for a fresh model.
@@ -67,6 +71,7 @@ config = {
     "manifold": manifold,
     "proj_ray": True,
     "cond_scalars": cond_scalars,
+    "cuboid_dim": cuboid_dim,
 }
 
 dataset = LEGODataset(
@@ -96,6 +101,7 @@ meta_dict = {
     "cutoff_mev": energy_min,
     "cond_scalars": cond_scalars,
     "energy_kin": True,
+    "cuboid_dim": cuboid_dim,
 }
 
 with open(f"{out_dir}/meta.json", "w") as f:
