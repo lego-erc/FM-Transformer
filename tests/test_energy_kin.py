@@ -15,6 +15,7 @@ import torch
 from legofmt.data.dataloaders import GetLEGOData
 from legofmt.data.prep import DataPrep
 from legofmt.data.struct import _F
+from legofmt.geometry.energy_proj import EnergyProjections
 
 CUTOFF, MAX_E = 10.0, 1000.0
 
@@ -165,3 +166,20 @@ def test_edep_is_normalised_by_model_max_energy() -> None:
     assert abs(raw - 50.0) < 1e-6, f"the file should keep E_dep in MeV, got {raw}"
     got = float(_F(loaded).edep.flatten()[0])
     assert abs(got - 50.0 / MAX_E) < 1e-6, f"E_dep should be 50/{MAX_E}, got {got}"
+
+
+def test_mult_energy_rescale_is_the_same_physical_energy() -> None:
+    """``GenerateOut`` normalises `cond` with the FLOW's max_energy, so a mult
+    trained at a different ceiling needs its column rebased. Pure change of
+    logarithmic base: the MeV it decodes to must not move."""
+    cut, max_flow, max_mult = 10.0, 2000.0, 1000.0
+    p_flow = EnergyProjections(cutoff_mev=cut, max_energy=max_flow)
+    p_mult = EnergyProjections(cutoff_mev=cut, max_energy=max_mult)
+    scale = float(torch.tensor(max_flow / cut).log() / torch.tensor(max_mult / cut).log())
+    e = torch.tensor([10.0, 100.0, 548.0, 1000.0])
+    assert torch.allclose(
+        (p_flow.to_scalar_e(e) * scale).clamp(0.0, 1.0), p_mult.to_scalar_e(e), atol=1e-6,
+    )
+    # the failure it prevents: 1 GeV read on the wrong ceiling is 548 MeV
+    off = p_flow.to_scalar_e(torch.tensor([1000.0]))
+    assert abs(float(p_mult.cutoff * (max_mult / cut) ** off) - 548.0) < 2.0

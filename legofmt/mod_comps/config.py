@@ -18,7 +18,7 @@ import torch
 from flow_matching.utils.manifolds import Euclidean, Sphere
 
 from legofmt.compat import (
-    XT_QK_NORM_FIX, XT_VERSION, apply_legacy_projection_in_out,
+    XT_VERSION, apply_legacy_projection_in_out,
     build_manifold_from_string, migrate_legacy_mult_heads,
     qk_norm_scale_compat, rename_ntokens,
 )
@@ -55,18 +55,20 @@ class ResolvedLEGOConfig:
     t_dist_scale: float
     t_dist_shift: float
     ot_coupling: bool
-    base_dist_loss: float
     base_pretrain_batches: int
     base_pretrain_bs: int | None
     pdgid_is_idx: bool
     one_step_euler_fac: float
     one_step_euler_sections: int
     one_step_euler_every: int
-    uncert_weighting: bool
-    uncert_bins: int
-    uncert_min: float
+    learned_loss_weights: bool
+    edep_cell: bool
+    max_loss_weight: float       # floors lv, so weight_bound = e^-max_loss_weight
+    max_loss_weight_flow: float  # the same bound for the flow-map's own cell
+    max_loss_weight_edep: float
     overflow_delta: float
     canon_sym: bool
+    sym_aug: bool
     cond_scalars: tuple[str, ...]
     n_prefix: int
 
@@ -153,6 +155,8 @@ def _resolve_fresh(config: dict) -> ResolvedLEGOConfig:
     model_conf.setdefault("cond_scalars", tuple(meta.get("cond_scalars", ("Density",))))
     if "energy_kin" in meta:
         model_conf.setdefault("energy_kin", bool(meta["energy_kin"]))
+    if "cuboid_dim" in meta:
+        model_conf.setdefault("cuboid_dim", meta["cuboid_dim"])
     model_args.setdefault("ntypes", len(model_conf["cond_scalars"]) + 3)
     # ``pdgids`` lives at model_conf scope (one level above model_args) so
     # it is preserved by the manual torch.save round-trip in scripts/train.py.
@@ -180,6 +184,32 @@ def _resolve_from_checkpoint(config: dict, state_dict: dict) -> ResolvedLEGOConf
     )
 
 
+# --- back-compat: the 2026-09 loss-weighting rename and the removal of the t-bins ---
+# `uncert_bins` 16 vs 1 measured as a null on generated E_dep (paired dW1 +0.015 +- 0.124
+# MeV against a 0.75 seed sd), so the per-t-bin table is gone and `lv` is one cell per
+# channel. A saved `lv` of size `bins*3` collapses through the mean of its variances,
+# because a converged Kendall cell sits at `lv = log(L)`.
+_RENAMED_KEYS = {
+    "uncert_weighting": "learned_loss_weights",
+    "uncert_min": "max_loss_weight",
+    "uncert_min_flow": "max_loss_weight_flow",
+    "uncert_lv": "loss_weights",
+}
+
+
+def migrate_loss_weight_keys(model_conf: dict) -> dict:
+    """Rewrite the pre-2026-09 ``uncert_*`` keys and drop the removed t-bin axis."""
+    for old, new in _RENAMED_KEYS.items():
+        if old in model_conf:
+            model_conf.setdefault(new, model_conf.pop(old))
+    model_conf.pop("uncert_bins", None)
+    lv = (model_conf.get("loss_weights") or {}).get("lv")
+    n_cells = 3 + int(model_conf.get("edep_cell", False))
+    if lv is not None and lv.numel() > n_cells:
+        model_conf["loss_weights"]["lv"] = lv.view(-1, n_cells).exp().mean(0).log()
+    return model_conf
+
+
 def _build_resolved(
     config: dict,
     model_conf: dict,
@@ -188,6 +218,7 @@ def _build_resolved(
     pdgids: torch.Tensor,
     state_dict: dict | None,
 ) -> ResolvedLEGOConfig:
+    migrate_loss_weight_keys(model_conf)
     cond_scalars = tuple(model_conf.get("cond_scalars", ("Density",)))
     n_prefix = len(cond_scalars) + 1  # + edep slot (generated)
     set_layout(cond_scalars)
@@ -207,6 +238,13 @@ def _build_resolved(
     overflow_delta = model_conf.get("overflow_delta", 0.0)
     if overflow_delta < 0:
         raise ValueError(f"overflow_delta must be >= 0, got {overflow_delta}.")
+    cuboid_dim = model_conf.get("cuboid_dim")
+    if model_conf.get("canon_sym", False) and cuboid_dim and len(set(cuboid_dim)) > 1:
+        raise ValueError(
+            f"canon_sym rotates every face onto +x, which is a symmetry of a cube only; "
+            f"got cuboid_dim={cuboid_dim}."
+        )
+    max_loss_weight = model_conf.get("max_loss_weight", -6.0)
 
     return ResolvedLEGOConfig(
         max_seq_l=max_seq_l,
@@ -217,18 +255,20 @@ def _build_resolved(
         t_dist_scale=model_conf.get("t_dist_scale", 1.4),
         t_dist_shift=model_conf.get("t_dist_shift", 1.0),
         ot_coupling=model_conf.get("ot_coupling", False),
-        base_dist_loss=model_conf.get("base_dist_loss", 0.0),
         base_pretrain_batches=model_conf.get("base_pretrain_batches", 300),
         base_pretrain_bs=model_conf.get("base_pretrain_bs"),
         pdgid_is_idx=model_conf.get("pdgid_is_idx", False),
         one_step_euler_fac=model_conf.get("one_step_euler_fac", 0.0),
         one_step_euler_sections=sections,
         one_step_euler_every=model_conf.get("one_step_euler_every", 1),
-        uncert_weighting=model_conf.get("uncert_weighting", False),
-        uncert_bins=model_conf.get("uncert_bins", 16),
-        uncert_min=model_conf.get("uncert_min", -6.0),
+        learned_loss_weights=model_conf.get("learned_loss_weights", False),
+        edep_cell=model_conf.get("edep_cell", False),
+        max_loss_weight=max_loss_weight,
+        max_loss_weight_flow=model_conf.get("max_loss_weight_flow", max_loss_weight),
+        max_loss_weight_edep=model_conf.get("max_loss_weight_edep", max_loss_weight),
         overflow_delta=overflow_delta,
         canon_sym=model_conf.get("canon_sym", False),
+        sym_aug=model_conf.get("sym_aug", False),
         cond_scalars=cond_scalars,
         n_prefix=n_prefix,
         mask_conf=model_conf.get("mask_conf", {}),
@@ -266,11 +306,13 @@ class ResolvedMultConfig:
     post_emb_norm: bool
     pos_scale: float
     canon_sym: bool
+    sym_aug: bool
     model_args: dict[str, Any]
 
     dl_conf: dict
     mm_conf: dict
     opt_conf: dict | None
+    val_conf: dict
     config: dict
 
     state_dict: dict | None
@@ -377,10 +419,12 @@ def _build_resolved_mult(
         post_emb_norm=mm_conf.get("post_emb_norm", True),
         pos_scale=mm_conf.get("pos_scale", 50.0),
         canon_sym=mm_conf.get("canon_sym", False),
+        sym_aug=mm_conf.get("sym_aug", False),
         model_args=mm_conf.get("model_args", {}),
         dl_conf=dl_conf,
         mm_conf=mm_conf,
         opt_conf=config.get("opt_conf", mm_conf.get("opt_conf")),  # top-level first, mm_conf for back-compat
+        val_conf=config.get("val_conf", {}),
         config=config,
         state_dict=state_dict,
         train_inverse=mm_conf.get("train_inverse", False),

@@ -23,6 +23,9 @@ class ProjectModel(nn.Module):
         self.no_detach = kwargs.get("no_detach", False)
 
     def _prep_x(self, x: Tensor, attn_mask: Tensor) -> tuple[Tensor, Tensor]:
+        """Project ``x`` onto the manifold. The network sees the projected value on
+        every ``attn_mask`` slot (off-manifold conditioning filler never reaches it),
+        detached unless ``no_detach`` -- which ``log_likelihood`` sets."""
         x_proj = self.manifold.projx(x)
         x_att  = torch.where(attn_mask.unsqueeze(-1), x_proj, x)
         if not self.no_detach:

@@ -26,10 +26,9 @@ from legofmt.main.train_step import TrainStep
 
 from legofmt.data.dataloaders import LEGODataset, make_loader
 from legofmt.data.prep import DataPrep
-from legofmt.data.struct import DataStruct
+from legofmt.data.struct import _F
 
 from legofmt.cfm.path_sampler import ProductPathSampler
-from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.geometry.symmetry_projections import CubeSymmetry
 
 from legofmt.mod_comps.config import resolve_legoltng_config
@@ -38,6 +37,25 @@ from legofmt.mod_comps.optimizers import (
 )
 
 from legofmt.log_metrics.val_metrics import ShowerValMetrics
+
+
+class _Interacting:
+    """Index view over the events that deposited energy, without copying them."""
+
+    def __init__(self, ds, keep_idx: Tensor) -> None:
+        self.ds, self.keep_idx = ds, keep_idx
+
+    def __len__(self) -> int:
+        return len(self.keep_idx)
+
+    def __getitem__(self, i):
+        return self.ds[self.keep_idx[i]]
+
+
+def _interacting_only(ds) -> _Interacting:
+    keep_idx = ((_F(ds.data.f.full).edep.reshape(-1) > 0)
+                | (ds.data.am.out_p.sum(-1) != 1)).nonzero(as_tuple=True)[0]
+    return _Interacting(ds, keep_idx)
 
 
 class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
@@ -57,15 +75,15 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         self.val_metrics = ShowerValMetrics()
         self.ps          = ProductPathSampler(self.rc.manifold)
 
-        self._base_dist_loss = None
+        self._base_head_loss = None
         params = list(self.model.parameters())
         head = build_base_head(self.rc, self.gen_base)
         if head is not None:
             self.base_head = head
             params += [p for p in self.base_head.parameters() if p.requires_grad]
 
-        if self.rc.uncert_weighting:
-            self.lv = nn.Parameter(torch.zeros(self.rc.uncert_bins * 3))
+        if self.rc.learned_loss_weights:
+            self.lv = nn.Parameter(torch.zeros(3 + int(self.rc.edep_cell)))  # one cell per channel
             params += [self.lv]
             if self.rc.one_step_euler_fac > 0:
                 self.lv_flow = nn.Parameter(torch.zeros(1))
@@ -128,14 +146,17 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
 
     @torch.no_grad()
     def convert_pdgids(self, pdgids: Tensor) -> Tensor:
-        cond = torch.isnan(pdgids) | (pdgids == 0) | (pdgids >= 1e8)
-        pdgid_idx = torch.searchsorted(
-            self.pdgids_template.to(pdgids.device), pdgids.contiguous()) + 1
-        return pdgid_idx.masked_fill_(cond, 0)
+        """Raw pdgids -> 1-based indices into ``pdgids_template``; NaN, 0, ions
+        (>= 1e8) and ids outside the vocabulary map to the unknown/pad index 0."""
+        template  = self.pdgids_template.to(pdgids.device)
+        pos       = torch.searchsorted(template, pdgids.contiguous()).clamp_max(len(template) - 1)
+        unknown   = torch.isnan(pdgids) | (pdgids == 0) | (pdgids >= 1e8) | (template[pos] != pdgids)
+        return (pos + 1).masked_fill_(unknown, 0)
 
-    def _canon_dirs(self, x: Tensor, face: Tensor, fwd: Tensor, inverse: bool = False) -> Tensor:
+    def _canon_dirs(self, x: Tensor, face: Tensor, fwd: Tensor, inverse: bool = False,
+                    g: Tensor | None = None) -> Tensor:
         rot  = self.sym.uncanonicalize if inverse else self.sym.canonicalize
-        dirs = rot(torch.stack((x[..., 1:4], x[..., 4:7]), dim=-2), face)
+        dirs = rot(torch.stack((x[..., 1:4], x[..., 4:7]), dim=-2), face, g)
         new  = torch.cat((x[..., 0:1], dirs[..., 0, :], dirs[..., 1, :], x[..., 7:]), dim=-1)
         rows = torch.arange(x.shape[-2], device=x.device) >= self.rc.n_prefix
         new  = torch.where(rows.view(1, -1, 1), new, x)
@@ -150,6 +171,8 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         if getattr(self, "_val_ds", None) is not None:
             return
         full  = LEGODataset(**self.rc.dl_conf["lds_args"], prep=DataPrep(self.rc.config))
+        if self.rc.config.get("model_conf", {}).get("exclude_passthrough", False):
+            full = _interacting_only(full)
         n_val = max(1, int(len(full) * self.rc.val_conf.get("val_frac", 0.01)))
         gen   = torch.Generator().manual_seed(self.rc.val_conf.get("seed", 0))
         self._train_ds, self._val_ds = random_split(

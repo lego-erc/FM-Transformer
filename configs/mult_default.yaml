@@ -34,19 +34,18 @@ config:
     num_workers: 16
 
   mm_conf:
-    in_dim: 11
-    cond_scalars: ["Density", "Z", "A", "Size"]
+    cond_scalars: ["Density", "Z", "A", "Size"]   # in_dim is derived: len(cond_scalars) + 7
     dropout: 0.05
     h_dim: 128
     n_layers: 6
     n_heads: 6
-    in_dim: 8
     bs: 4096
     lr: 1.0e-3
     weight_decay: 1.0e-2
     warmup_steps: 0
     post_emb_norm: false
     use_abs_pos_emb: true
+    canon_sym: false
     train_inverse: false       # co-train the separate inverse-PID model (InvModel)
     model_args:                # splatted into the count model's Decoder
       ff_swish: true
@@ -67,6 +66,11 @@ config:
       use_adaptive_rmsnorm: true
       use_adaptive_layerscale: true
       residual_attn: true
+
+  val_conf:
+    val_frac: 0.01             # held out from training; MultModel.setup does the split
+    seed: 0
+    count_floor: 0.005         # species below this mean count are left out of val/count_mae
 
   opt_conf:
     opt: muon

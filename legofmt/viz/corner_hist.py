@@ -59,9 +59,6 @@ class CornerHist:
                 }
             )
             self.model = LEGOLtng(config).to(device)
-            self.cutoff_en = config["config"]["dl_conf"]["lds_args"].get("cutoff_mev", cutoff_en)
-        else:
-            self.cutoff_en = cutoff_en
         self.anim_intermediates = anim_intermediates
         self.geom_trafos = GeomTrafos()
         self.disp_man = ProductManifold([Euclidean(), Sphere(), Sphere()], (1, 3, 3))
@@ -169,7 +166,7 @@ class CornerHist:
 
     def prep(self, batch, sols=None):
         if sols is None:
-            sols, mask, attn_mask = self.model(batch)
+            sols, _, _ = self.model(batch)
 
         is_8d = sols.shape[-1] == 8
         e_dep = _F(sols).edep if is_8d else sols[:, 1, 0]
@@ -284,7 +281,7 @@ class CornerHist:
         self, fig_sup, fig, sols, sols_true=None, incoming=None, data_add=None,
     ):
         if self.cube:
-            _, fig_inner, pc_s, pc_t = fig
+            _, _, pc_s, pc_t = fig
             self.make_cube(
                 sols[: 2**10], pc_s, incoming[: 2**10] if incoming is not None else None
             )

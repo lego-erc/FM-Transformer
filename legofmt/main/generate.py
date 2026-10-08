@@ -55,6 +55,15 @@ class GenerateOut(torch.nn.Module):
                 f"{self.cond_names}; cond carries only the flow's scalars."
             )
 
+        mm_max = mult_conf["config"]["mm_conf"].get("max_energy")
+        self.mult_e_scale = 1.0
+        if mm_max and mm_max != self.model.rc.max_energy:
+            cut = self.model.rc.cutoff_mev
+            self.mult_e_scale = float(
+                torch.tensor(self.model.rc.max_energy / cut).log()
+                / torch.tensor(mm_max / cut).log()
+            )
+
         set_layout(self.cond_names)
 
         if couple_in_out_pdgids:
@@ -64,29 +73,46 @@ class GenerateOut(torch.nn.Module):
         self.pdgids = flow_conf["config"]["model_conf"]["pdgids"].to(device)
         self.ptype_idx = torch.searchsorted(self.ptypes, self.pdgids).clamp(max=len(self.ptypes) - 1)
         self.ptype_in_mask = self.ptypes[self.ptype_idx] == self.pdgids
-        self.proj_ray = CubeTrace()
+        self.proj_ray = CubeTrace(flow_conf["config"]["model_conf"].get("cuboid_dim"))
+        self.cuboid_dim = self.proj_ray.cuboid_dim  # kept apart: no_raytrace models stub proj_ray
         self.pen = EnergyProjections(
             cutoff_mev=self.model.rc.cutoff_mev, max_energy=self.model.rc.max_energy,
         )
 
     def __call__(self, cond: torch.Tensor, prepped: bool = False):
+        """``cond`` is ``[B, n_cond + 7] = [*cond_scalars, mom * E_MeV (3), pos (3), pdgid]``;
+        the momentum must be energy-scaled. ``prepped=True`` skips the ray-trace and
+        the energy split. Returns ``(sols, mask, attn_mask)`` in the ``(B, L, 8)`` layout."""
         cond_model = cond.clone()
         if not prepped:
             nc = self.n_cond
             mom, pos = cond_model[:, nc:nc + 3], cond_model[:, nc + 3:nc + 6]
             pos = F.normalize(
-                self.proj_ray(torch.cat((mom, pos), dim=-1))[..., 3:], dim=-1
+                self.proj_ray(torch.cat((mom, pos), dim=-1))[..., 3:] / self.cuboid_dim.to(pos), dim=-1
             )
             dir_, e = self.pen.to_scalar(mom)
             cond_model = torch.cat(
                 (cond_model[:, :nc], e, dir_, pos, cond_model[:, nc + 6:]), dim=-1
             )
-        batch = self.gen_batch(cond_model)
-        sols, mask, attn_mask = self.model(batch)
+        cond_fm, mask, attn_mask = self.gen_batch(cond_model)
+        pt_mask = mask.sum(-1) == 0
+        if pt_mask.all():
+            sols = cond_fm.clone()
+        elif pt_mask.any():
+            keep_events = ~pt_mask
+            sub, _, _ = self.model(
+                (cond_fm[keep_events], mask[keep_events], attn_mask[keep_events]))
+            sols = cond_fm.clone()
+            sols[keep_events] = sub.to(sols.dtype)
+        else:
+            sols, mask, attn_mask = self.model((cond_fm, mask, attn_mask))
         sols[..., -1] = torch.cat([sols.new_zeros(1), self.pdgids.to(sols.dtype)])[sols[..., -1].long()]
         return sols, mask, attn_mask
 
     def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None):
+        """Geant4-shaped entry point: broadcast the per-gun arguments to ``B * n`` events
+        and return ``{per_event, per_particle, per_voxel}`` in *model* normalisation
+        (``per_event["E_dep"]`` is the normalised scalar, not MeV)."""
         device = next(self.model.parameters()).device
         pos, mom, energy, density, size, pdgids = (
             t.to(device) for t in (pos, mom, energy, density, size, pdgids)
@@ -140,12 +166,21 @@ class GenerateOut(torch.nn.Module):
         }
 
     def gen_batch(self, cond: torch.Tensor):
+        """Sample per-pdgid counts, truncate to ``max_seq_l``, and build the padded
+        ``(cond_fm, mask, attn_mask)`` triple the flow consumes."""
         pdgid_in = cond[:, -1].long()
-        pdgid_in_idx = torch.searchsorted(self.pdgid_in, pdgid_in)
+        pdgid_in_idx = torch.searchsorted(self.pdgid_in, pdgid_in).clamp(max=len(self.pdgid_in) - 1)
+        if (self.pdgid_in[pdgid_in_idx] != pdgid_in).any():
+            raise ValueError(f"incoming pdgid(s) not in the mult model's ptypes_in={self.pdgid_in.tolist()}")
         mult_in = torch.cat(
             (cond[:, :self.n_mult_cond], cond[:, self.n_cond:self.n_cond + 7]), dim=-1
         )
-        mult = self.gen_mult((mult_in, None, pdgid_in_idx))
+        if self.mult_e_scale != 1.0:
+            mult_in[:, self.n_mult_cond] = (
+                mult_in[:, self.n_mult_cond] * self.mult_e_scale
+            ).clamp(0.0, 1.0)
+        pt_mask = self.gen_mult.sample_passthrough(mult_in, pdgid_in_idx)
+        mult = self.gen_mult((mult_in, None, pdgid_in_idx), pt_mask=pt_mask)
         mult = mult[:, self.ptype_idx] * self.ptype_in_mask
 
         max_particles = self.max_seq_l - (self.n_prefix + 1)
@@ -160,13 +195,16 @@ class GenerateOut(torch.nn.Module):
 
         idx = torch.arange(max_particles, device=mult.device)
         occupied = idx < mult.sum(-1, keepdim=True)
-        pdgid_pad = torch.zeros_like(occupied, dtype=torch.long)
-        cumsum_idx = mult.cumsum(-1)[..., :-1].clamp(max=max_particles - 1)
-        pdgid_pad.scatter_add_(-1, cumsum_idx, torch.ones_like(pdgid_pad)).cumsum_(-1)
+        # species boundaries at the cumulative counts; the extra column absorbs
+        # boundaries landing on max_particles so a saturated event's last slot is
+        # not relabelled with a species the model predicted zero of
+        bounds = mult.new_zeros(mult.shape[0], max_particles + 1)
+        bounds.scatter_add_(-1, mult.cumsum(-1)[..., :-1], torch.ones_like(bounds))
+        pdgid_pad = bounds.cumsum_(-1)[:, :max_particles]
 
-        conds = cond[:, :self.n_cond]          # per-event conditioning scalars
-        in_tok = cond[:, self.n_cond:]         # [e, dir(3), pos(3), pdgid] (8 cols)
-        in_tok[..., -1] = torch.searchsorted(self.pdgids, pdgid_in) + 1
+        conds = cond[:, :self.n_cond]           # per-event conditioning scalars
+        in_tok = cond[:, self.n_cond:].clone()  # [e, dir(3), pos(3), pdgid] (8 cols)
+        in_tok[..., -1] = self.model.convert_pdgids(in_tok[..., -1])
         in_tok = in_tok[:, None, :]
         out_tok = in_tok.repeat(1, max_particles, 1)
         out_tok[..., -1] = occupied * (pdgid_pad + 1)
@@ -184,6 +222,13 @@ class GenerateOut(torch.nn.Module):
         for j in range(1, self.n_cond):
             cond_fm[:, j + 1, 0] = conds[:, j]
         _F(cond_fm).non_p[..., 1:-1] = 1
+        if pt_mask.any():
+            edep = _F(cond_fm).edep
+            edep[pt_mask] = 0.0
+            out = _F(cond_fm).out_p
+            out[pt_mask, :, 0] = 0.0
+            mask = mask.clone()
+            mask[pt_mask] = 0
         return cond_fm, mask, attn_mask
 
 
@@ -207,9 +252,7 @@ class GenerateIn(GenerateOut):
         # The flow runs with pdgid_is_idx=True: swap the raw ids the mult
         # model consumed above for flow-vocabulary indices.
         f[..., -1] = self.model.convert_pdgids(f[..., -1]).to(f.dtype)
-        f[:, self.n_prefix, -1] = torch.searchsorted(
-            self.pdgids, self.pdgid_in[pid_in_idx]
-        ).clamp(max=len(self.pdgids) - 1) + 1
+        f[:, self.n_prefix, -1] = self.model.convert_pdgids(self.pdgid_in[pid_in_idx].to(f.dtype))
         sols, _, _ = self.model(ds)
         sols[..., -1] = torch.cat(
             [sols.new_zeros(1), self.pdgids.to(sols.dtype)]

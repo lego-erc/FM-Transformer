@@ -31,9 +31,11 @@ class EnergyProjections:
         return mom / norm.clamp_min(eps), self.to_scalar_e(norm, eps)
 
     def to_scalar_e(self, e_mev: Tensor, eps: float = 1e-8) -> Tensor:
+        """to_scalar's energy half: MeV magnitude -> the bounded [0, 1] log scalar."""
         return (torch.log(e_mev.clamp_min(eps) / self.cutoff) / self.log_range).clamp(0.0, 1.0)
 
     def from_scalar(self, dir_: Tensor, e: Tensor) -> Tensor:
+        """Inverse of to_scalar: bounded scalar + unit direction -> momentum vector."""
         norm = self.cutoff * (self.max_energy / self.cutoff) ** e.clamp(0.0, 1.0)
         return dir_ * norm
 
@@ -41,6 +43,9 @@ class EnergyProjections:
         s_out = (1 - e_model.clamp(0.0, 1.0)) * e_in.clamp(0.0, 1.0)
         return self.cutoff * (self.max_energy / self.cutoff) ** s_out
 
+    # Legacy prefix-free 6-column transforms (row 0 = the incoming particle), kept
+    # for lego_eval's EnergyProjections("in_frac_log"); they do NOT follow the
+    # padded _F layout.
     def identity(self, p_x: Tensor) -> Tensor:
         return p_x
 

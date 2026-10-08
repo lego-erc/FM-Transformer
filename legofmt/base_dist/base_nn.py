@@ -11,7 +11,7 @@ than owning it here.
 
 Members resolved through ``self`` and owned by ``LEGOLtng``: ``rc``, ``model``,
 ``gen_base``, ``base_head``, ``pdgids_template``, ``convert_pdgids``,
-``_base_dist_loss``, ``_make_loader``, ``_train_ds``.
+``_base_head_loss``, ``_make_loader``, ``_train_ds``.
 """
 
 from dataclasses import replace
@@ -47,9 +47,9 @@ def build_base_head(rc, gen_base) -> nn.Sequential | None:
     bc = rc.config.get("base_conf") or {}
     hs = bc.get("base_head")
     # base_head_params reads Z/A/Size, so there is no head without them: an
-    # explicit ask (base_dist_loss, or a saved head that would otherwise
-    # vanish silently) is an error, the base_pretrain_batches default is not.
-    asked = rc.base_dist_loss > 0 or hs is not None
+    # explicit ask (a saved head that would otherwise vanish silently) is an
+    # error, the base_pretrain_batches default is not.
+    asked = hs is not None
     if not ((asked or rc.base_pretrain_batches > 0)
             and gen_base.scale_dist == "sm_norm"):
         return None
@@ -61,28 +61,38 @@ def build_base_head(rc, gen_base) -> nn.Sequential | None:
             )
         return None
 
-    head = nn.Sequential(
-        nn.Linear(4 + len(rc.pdgids_template), 16), nn.Mish(),
-        nn.Linear(16, 4))
+    n_in = 4 + len(rc.pdgids_template)
+    if bc.get("base_head_nout", False):
+        n_in += len(rc.pdgids_template) + 2
+    n_ang = len(rc.pdgids_template) + 1 if bc.get("ang_species", False) else 1
+    n_out = 3 + n_ang * (1 + int(bc.get("ang_shape", False)))
+    head = nn.Sequential(nn.Linear(n_in, 16), nn.Mish(), nn.Linear(16, n_out))
     with torch.no_grad():
         head[-1].weight.zero_()
         head[-1].bias.copy_(torch.tensor(
-            [float(gen_base.sm_scale), 1.0, 1.0,
-             float(gen_base.kappa)]).log())
+            [float(gen_base.sm_scale), 1.0, 1.0]
+            + [float(gen_base.kappa)] * n_ang + [1.0] * (n_out - 3 - n_ang)).log())
         if hs is None or hs.keys() != head.state_dict().keys():
             return head  # fresh head: zero-init output layer, priors in the bias
+        if hs["0.weight"].shape != head[0].weight.shape:
+            return head   # base_head_nout toggled: re-pretrain, do not mis-load
+        if hs["2.weight"].shape[0] < head[-1].weight.shape[0]:
+            return head   # ang_shape / ang_species toggled on: re-pretrain, do not freeze at pow=1
         if hs["2.weight"].shape == head[-1].weight.shape:
             head.load_state_dict(hs)
         else:
             load_legacy_base_head(head, hs)
-        head.requires_grad_(not bc.get("base_head_frozen", False))
+        head.requires_grad_(False)  # already fitted; the flow never trains the head
     return head
 
 
 class BaseDist:
     """Base-distribution mixin for :class:`~legofmt.main.modules.LEGOLtng`."""
 
-    def base_head_params(self, ds_t: DataStruct) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    def base_head_params(self, ds_t: DataStruct):
+        """Per-event ``(sm_scale, edep_mu, edep_sig, kappa, ang_pow)`` from the head's
+        inputs: incoming kinematics, species one-hot, cuboid chord,
+        ``log(Size*Density/X0)``. ``ang_pow`` is None unless base_conf.ang_shape."""
         pid     = ds_t.f.in_p[..., 0, -1]
         idx     = pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)
         species = nn.functional.one_hot(
@@ -91,22 +101,51 @@ class BaseDist:
         Z, A    = ds_t.f.cond("Z"), ds_t.f.cond("A")
         x0      = 716.4 * A / (Z * (Z + 1) * (287.0 / Z.sqrt()).log())
         t       = ds_t.f.cond("Size") * ds_t.f.cond("Density") / x0
-        # chord length: full chord through the cube along the incoming
-        # ray (edge lengths); fwd+bwd -> entry/exit-storage invariant
+        # chord length: full chord through the cuboid along the incoming ray
+        # (longest-edge lengths); fwd+bwd -> entry/exit-storage invariant
         inc     = ds_t.f.in_cc[..., 0, 1:7].nan_to_num(1.0)
         u, pos  = inc[..., :3], inc[..., 3:]
-        p       = pos / pos.abs().amax(-1, keepdim=True).clamp_min(1e-8)
+        d       = u.new_tensor(self.rc.config["model_conf"].get("cuboid_dim") or [1.0, 1.0, 1.0])
+        d       = d / d.max()
+        p       = pos / pos.abs().amax(-1, keepdim=True).clamp_min(1e-8) * d  # pos is dir(x / d)
         ok_u    = u.abs() > 1e-6
-        tf      = torch.where(ok_u, (u.sign() - p) / u, torch.full_like(u, 4.0))
-        tb      = torch.where(ok_u, (p + u.sign()) / u, torch.full_like(u, 4.0))
+        tf      = torch.where(ok_u, (u.sign() * d - p) / u, torch.full_like(u, 4.0))
+        tb      = torch.where(ok_u, (p + u.sign() * d) / u, torch.full_like(u, 4.0))
         chord   = ((tf.amin(-1) + tb.amin(-1)).clamp(0.0, 3.5) / 2).unsqueeze(-1)
-        x       = torch.cat((ds_t.f.in_cc[..., 0], species, chord,
-                             t.log().unsqueeze(-1)), dim=-1)
-        out     = self.base_head(x)
+        x       = torch.cat((ds_t.f.in_cc[..., 0], species, chord, t.log().unsqueeze(-1)), dim=-1)
+        if (self.rc.config.get("base_conf") or {}).get("base_head_nout", False):
+            # Only E_dep's (mu, sig) see the outgoing set. sm_scale and kappa are
+            # read from a second pass with those inputs zeroed -- a constant, so
+            # the NLL fits them to the marginal over n_out, as without the flag.
+            # Conditioning them too moved kappa 5.6..44.7 across branches and cost
+            # 2x on direction losses; conditioning E_dep alone kept the gain.
+            extra   = torch.cat(self._out_set_feats(ds_t), dim=-1)
+            both    = torch.cat((torch.cat((x, extra), -1), torch.cat((x, torch.zeros_like(extra)), -1)))
+            out_e, out = self.base_head(both).chunk(2)  # one forward for both passes
+            ang     = out_e if (self.rc.config.get("base_conf") or {}).get("ang_nout", False) else out
+            out     = torch.cat((out[..., 0:1], out_e[..., 1:3], ang[..., 3:]), dim=-1)
+        else:
+            out     = self.base_head(x)
+        bc      = self.rc.config.get("base_conf") or {}
+        n_ang   = len(self.pdgids_template) + 1 if bc.get("ang_species", False) else 1
         return (out[..., 0:1].exp(), out[..., 1:2], out[..., 2:3].exp(),
-                out[..., 3:4].exp().clamp_min(1e-3))  # kap: divisor in sample()
+                out[..., 3:3 + n_ang].exp().clamp_min(1e-3),  # kap: divisor in sample()
+                out[..., 3 + n_ang:].exp().clamp(0.1, 10.0) if out.shape[-1] > 3 + n_ang else None)
 
-    def _base_moment_loss(self, ds_t, fwd, s, mu, sig, kap) -> Tensor:
+    def _out_set_feats(self, ds_t: DataStruct) -> list[Tensor]:
+        """Outgoing multiplicity and per-pdgid composition, both fixed before the
+        flow runs. E_dep is bimodal in them, which one logit-normal cannot hold."""
+        valid = ds_t.am.out_p
+        pid   = ds_t.f.out_p[..., -1]
+        idx   = pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)
+        n_cls = len(self.pdgids_template) + 1
+        oh    = nn.functional.one_hot(idx.long().clamp(0, n_cls - 1), n_cls)
+        cnt   = (oh * valid.unsqueeze(-1)).sum(-2).float()
+        return [valid.sum(-1, keepdim=True).float().log1p(), cnt.log1p()]
+
+    def _base_moment_loss(self, ds_t, fwd, s, mu, sig, kap, pw=None) -> Tensor:
+        """Moment-match the prior to the batch: quantile-node mean of the energy scale,
+        logit-normal NLL for E_dep, and (``tanh_theta``) the mean opening angle for kappa."""
         z  = 2 ** 0.5 * torch.erfinv(torch.linspace(
             -0.995, 0.995, 100, device=s.device))  # N(0,1) quantile nodes
         v  = (ds_t.am.out_p & fwd.unsqueeze(-1)).float()
@@ -127,27 +166,52 @@ class BaseDist:
         if not self.gen_base.tanh_theta:
             return l_scale + l_edep
 
-        th_b = (z.abs() / kap).tanh().mean(-1)
+        tb   = (z.abs() / kap.unsqueeze(-1)).tanh()          # (B, 1, nodes) or (B, K, nodes) per slot
+        if pw is not None:
+            tb = tb.pow(pw.unsqueeze(-1))
+        m1, m2 = tb.mean(-1), tb.square().mean(-1)
         u_i  = nn.functional.normalize(ds_t.f.in_cc[..., 0, 1:4], dim=-1).unsqueeze(1)
         p_i  = nn.functional.normalize(ds_t.f.in_cc[..., 0, 4:7], dim=-1).unsqueeze(1)
         a_m  = (ds_t.f.out_cc[..., 1:4] * u_i).sum(-1).clamp(-1, 1).acos()
         a_p  = (ds_t.f.out_cc[..., 4:7] * p_i).sum(-1).clamp(-1, 1).acos()
-        th_t = (((a_m + a_p) / 2) * v).sum(-1) / n / torch.pi
-        l_kappa = ((th_b - th_t) ** 2 * ev).sum() / ev.sum().clamp(min=1)
+        ang  = (a_m + a_p) / 2 / torch.pi
+        den  = ev.sum().clamp(min=1)
+        if kap.shape[-1] > 1:   # per-slot prior: match each slot's own moments (ang_species)
+            vs = v.sum().clamp(min=1)
+            l_kappa = (((m1 - ang) ** 2) * v).sum() / vs
+            if pw is not None:
+                l_kappa = l_kappa + (((m2 - ang.square()) ** 2) * v).sum() / vs
+        else:
+            l_kappa = ((m1.squeeze(-1) - (ang * v).sum(-1) / n) ** 2 * ev).sum() / den
+            if pw is not None:
+                l_kappa = l_kappa + (
+                    (m2.squeeze(-1) - (ang.square() * v).sum(-1) / n) ** 2 * ev).sum() / den
+        l_kappa = l_kappa * (self.rc.config.get("base_conf") or {}).get("ang_weight", 1.0)
         return l_scale + l_edep + l_kappa
 
     def _fit_base_head(self, ds_t, fwd) -> None:
+        """Run the head, hand its outputs to the sampler, and cache the moment loss
+        while the head is trainable."""
         learn = self.model.training and self.base_head[-1].weight.requires_grad
         with torch.set_grad_enabled(learn):
-            s, mu, sig, kap = self.base_head_params(ds_t)
+            s, mu, sig, kap, pw = self.base_head_params(ds_t)
+            if kap.shape[-1] > 1:   # ang_species: one column per species -> one value per slot
+                pid = ds_t.f.out_p[..., -1]
+                idx = (pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid))
+                idx = idx.long().clamp(0, kap.shape[-1] - 1)
+                kap = kap.gather(1, idx)
+                pw  = None if pw is None else pw.gather(1, idx)
             if learn:
-                self._base_dist_loss = self._base_moment_loss(ds_t, fwd, s, mu, sig, kap)
+                self._base_head_loss = self._base_moment_loss(ds_t, fwd, s, mu, sig, kap, pw)
         self.gen_base.sm_scale = s.detach().unsqueeze(-1)
         self.gen_base.edep_mu  = mu.detach()
         self.gen_base.edep_sig = sig.detach()
         self.gen_base.kappa    = kap.detach()
+        self.gen_base.ang_pow  = None if pw is None else pw.detach()
 
     def _ot_couple(self, base: Tensor, ds_t, data: Tensor) -> Tensor:
+        """Per-event Hungarian assignment of base slots to data slots, blocked across
+        pdgids and valid/pad pairs; base samples are pdgid-independent so permuting is free."""
         if slap is None:
             raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
         base = base.where(ds_t.am.full.unsqueeze(-1), data)
@@ -170,9 +234,11 @@ class BaseDist:
         return base
 
     def gen_base_wrapper(self, ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]") -> Tensor:
+        """Draw ``x_0``: data on conditioning cells, the (learned) prior on generated
+        ones, an isotropic sample for inverse-mask events. ``lego_eval`` calls this."""
         if not isinstance(ds_t, DataStruct):
             ds_t = DataStruct(*ds_t)
-        self._base_dist_loss = None
+        self._base_head_loss = None
         data  = ds_t.f.model_in
         m     = ds_t.m.full
         fwd   = m[:, self.rc.n_prefix] == 0  # incoming slot conditions => forward event
@@ -192,27 +258,33 @@ class BaseDist:
         return torch.where((m == 1).unsqueeze(-1), noise, data)
 
     def pretrain_base(self, batches, lr: float = 1e-2) -> float:
+        """Fit the base head alone on ``batches`` with Adam, then freeze it: the head
+        is never trained alongside the flow. Returns the final moment loss."""
         opt          = torch.optim.Adam(self.base_head.parameters(), lr=lr)
         was_training = self.model.training
         rc           = self.rc
         self.rc      = replace(rc, ot_coupling=False)
         self.model.train()
         ot = float("nan")
-        for ds_t in batches:
-            opt.zero_grad()
-            self.gen_base_wrapper(ds_t)
-            if self._base_dist_loss is None:
-                continue
-            self._base_dist_loss.backward()
-            opt.step()
-            ot = self._base_dist_loss.item()
-        self.model.train(was_training)
-        self.rc = rc
+        try:
+            for ds_t in batches:
+                opt.zero_grad()
+                self.gen_base_wrapper(ds_t)
+                if self._base_head_loss is None:
+                    continue
+                self._base_head_loss.backward()
+                opt.step()
+                ot = self._base_head_loss.item()
+        finally:
+            self.model.train(was_training)
+            self.rc = rc
         self.base_head.requires_grad_(False)
-        self._base_dist_loss = None
+        self._base_head_loss = None
         return ot
 
     def _pretrain_base_if_needed(self) -> None:
+        """Rank 0 pretrains on CPU-resident data moved to its device and broadcasts the
+        weights; every rank ends with the head frozen."""
         if (self.rc.base_pretrain_batches and getattr(self, "_trainer", None)
                 and hasattr(self, "base_head") and self.base_head[-1].weight.requires_grad):
             if self.trainer.is_global_zero:

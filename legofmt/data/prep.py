@@ -29,6 +29,7 @@ class DataPrep:
             cond = model_conf.get("cond_scalars", ("Density",))
             self.energy_kin = model_conf.get("energy_kin", True)
             self.edep_log_min = model_conf.get("edep_log_min")
+            cuboid_dim = model_conf.get("cuboid_dim")
         else:
             # manifold is only needed by cc_trafo (the dict path); norm_e-only
             # users (MultLoader) legitimately have no manifold to give.
@@ -40,15 +41,19 @@ class DataPrep:
             cond = config.get("cond_scalars", ("Density",))
             self.energy_kin = config.get("energy_kin", True)
             self.edep_log_min = config.get("edep_log_min")
+            cuboid_dim = config.get("cuboid_dim")
         set_layout(cond)
         self.pen = EnergyProjections(cutoff_mev=cutoff_mev, max_energy=max_energy)
-        self.ppa = CubeTrace()
+        self.ppa = CubeTrace(cuboid_dim)
 
     def __call__(self, batch: tuple) -> Tensor:
         return self.prep(batch)
 
     @torch.no_grad()
     def prep(self, batch: tuple) -> Tensor:
+        """Raw (cc_ext, mask, attn_mask, data_add) -> the padded model layout.
+        The two max_energy-dependent channels stay in MeV; norm_e converts them
+        at load time."""
         cc_ext, mask, attn_mask, data_add = batch
         e_kin = cc_ext[..., 0:1] if self.energy_kin else None
         model_in = self.cc_trafo(cc_ext[..., 1:7], e_kin=e_kin)
@@ -57,6 +62,10 @@ class DataPrep:
 
     @torch.no_grad()
     def cc_trafo(self, cc: Tensor, e_kin: Tensor | None = None) -> Tensor:
+        """MeV momenta/positions -> (energy scalar, unit mom dir, unit pos dir)
+        projected onto the manifold; col 0 keeps MeV for the incoming row and
+        stores 1 - log(e_out/cutoff)/log(e_in/cutoff) for outgoing rows. The pos
+        dir is that of x / cuboid_dim: the point on the unit cube the cuboid maps to."""
         cc = cc.nan_to_num(1)
         mom, pos = cc.split(3, -1)
         dir_ = F.normalize(mom, dim=-1)
@@ -73,7 +82,7 @@ class DataPrep:
             pos = pos.clone()
             pos[:, 0] = self.ppa(ray)[..., 3:]
         return self.manifold.projx(
-            torch.cat((e, dir_, F.normalize(pos, dim=-1)), dim=-1)
+            torch.cat((e, dir_, F.normalize(pos / self.ppa.cuboid_dim.to(pos), dim=-1)), dim=-1)
         )
 
     @torch.no_grad()
@@ -95,6 +104,8 @@ class DataPrep:
         return f, mask, attn_mask
 
     def norm_edep(self, edep: Tensor) -> Tensor:
+        """MeV -> model scale for E_dep: E_dep/max_energy, or the edep_log_min
+        log scale clamped to [0, 1]."""
         if not self.edep_log_min:
             return edep / self.pen.max_energy
         lo = self.edep_log_min
@@ -102,10 +113,10 @@ class DataPrep:
         return ((edep / lo).clamp_min(1.0).log() / rng).clamp(0.0, 1.0)
 
     def denorm_edep(self, edep: Tensor) -> Tensor:
-        """Model scale -> MeV, the inverse of ``norm_edep``. Zero maps to zero
-        either way, so a decoded sentinel stays a zero deposit."""
+        """Model scale -> MeV, the inverse of ``norm_edep`` on ``[0, 1]``. Every
+        non-positive input (the ``overflow_delta`` sentinel) decodes to zero."""
         if not self.edep_log_min:
-            return edep * self.pen.max_energy
+            return edep.clamp_min(0.0) * self.pen.max_energy
         lo = self.edep_log_min
         rng = torch.tensor(self.pen.max_energy / lo).log().item()
         return torch.where(edep > 0, lo * (edep.clamp(0.0, 1.0) * rng).exp(),
@@ -113,6 +124,9 @@ class DataPrep:
 
     @torch.no_grad()
     def format_add(self, batch: tuple) -> Tensor:
+        """Prepend the conditioning-scalar rows and the generated E_dep row,
+        extending mask/attn_mask to match (E_dep is the only prefix row with
+        mask=1)."""
         cc_ext, mask, attn_mask, data_add = batch
         e_dep = torch.ones_like(cc_ext[:, :1])
         e_dep[..., 0] = data_add["E_dep"].view_as(e_dep[..., 0])
