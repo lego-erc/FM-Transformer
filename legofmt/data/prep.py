@@ -89,18 +89,21 @@ class DataPrep:
     def norm_e(self, batch: tuple) -> tuple:
         """MeV -> model scale for the two channels that depend on ``max_energy``,
         so a dataset can be generated without knowing it. The outgoing column is
-        a log ratio: ``cutoff_mev`` only, already final. Returns a new tensor.
+        a log ratio: ``cutoff_mev`` only, already final. An optional 4th tensor
+        (per-layer E_dep) goes on the E_dep row's scale. Returns new tensors.
 
         Datasets written before the energy split are passed through; see
         ``compat.dataset_already_normalised``.
         """
-        f, mask, attn_mask = batch
+        f, mask, attn_mask, *edep_layers = batch
         if dataset_already_normalised(f, self.pen.max_energy):
             return batch
         f = f.clone()
         in_cc = _F(f).in_cc
         in_cc[..., 0:1] = self.pen.to_scalar_e(in_cc[..., 0:1])
         _F(f).edep.copy_(self.norm_edep(_F(f).edep))
+        if edep_layers:   # optional (B, n_layers) tensor; norm_edep is elementwise
+            return f, mask, attn_mask, self.norm_edep(edep_layers[0])
         return f, mask, attn_mask
 
     def norm_edep(self, edep: Tensor) -> Tensor:
@@ -126,7 +129,8 @@ class DataPrep:
     def format_add(self, batch: tuple) -> Tensor:
         """Prepend the conditioning-scalar rows and the generated E_dep row,
         extending mask/attn_mask to match (E_dep is the only prefix row with
-        mask=1)."""
+        mask=1). An optional ``E_dep_layers`` (B, n_layers) entry of data_add is
+        returned as a 4th tensor, in MeV like the E_dep row."""
         cc_ext, mask, attn_mask, data_add = batch
         e_dep = torch.ones_like(cc_ext[:, :1])
         e_dep[..., 0] = data_add["E_dep"].view_as(e_dep[..., 0])
@@ -142,4 +146,6 @@ class DataPrep:
         attn_mask = torch.cat(
             (torch.ones_like(attn_mask[:, :1]).repeat(1, len(cond_rows) + 1), attn_mask), dim=1,
         )
+        if "E_dep_layers" in data_add:
+            return target, mask, attn_mask, data_add["E_dep_layers"]
         return target, mask, attn_mask

@@ -80,29 +80,36 @@ class _M:
 
 class DataStruct:
 
-    def __init__(self, f: Tensor, m: Tensor, am: Tensor) -> None:
+    def __init__(self, f: Tensor, m: Tensor, am: Tensor, edep_layers: Tensor | None = None) -> None:
         self.f, self.m, self.am = _F(f), _M(m), _M(am)
+        self.edep_layers = edep_layers  # optional (B, n_layers) per-layer E_dep; no model reads it
 
     def __len__(self) -> int:
         return self.f.full.shape[0]
 
     def __getitem__(self, idx: int | Tensor) -> "DataStruct":
-        return type(self)(self.f.full[idx], self.m.full[idx], self.am.full[idx])
+        e = self.edep_layers
+        return type(self)(self.f.full[idx], self.m.full[idx], self.am.full[idx],
+                          None if e is None else e[idx])
 
     def to(self, *args, **kwargs) -> "DataStruct":
         kwargs.setdefault("non_blocking", True)
+        e = self.edep_layers
         return type(self)(
             self.f.full.to(*args, **kwargs),
             self.m.full.to(*args, **kwargs),
             self.am.full.to(*args, **kwargs),
+            None if e is None else e.to(*args, **kwargs),
         )
 
     @staticmethod
     def _collate(batch, *, collate_fn_map=None) -> "DataStruct":
+        e = [s.edep_layers for s in batch]
         return DataStruct(
             torch.stack([s.f.full  for s in batch]),
             torch.stack([s.m.full  for s in batch]),
             torch.stack([s.am.full for s in batch]),
+            None if e[0] is None else torch.stack(e),
         )
 
 

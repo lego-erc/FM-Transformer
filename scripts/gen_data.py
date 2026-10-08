@@ -51,6 +51,8 @@ data = pyg4lego.run_simulation(
     SourceParticles=pdgids_in,
 )
 data = {grp: {k: torch.as_tensor(v) for k, v in d.items()} for grp, d in data.items()}
+if "per_slab" in data:   # per-layer E_dep (slab geometry): stored as a 4th tensor next to (f, m, am)
+    data["per_event"]["E_dep_layers"] = data["per_slab"]["E_dep"]
 
 manifold = [{"name": "euclidean", "dim": 1 }, {"name": "sphere", "dim": 3 }, {"name": "sphere", "dim": 3 }]
 
@@ -87,7 +89,8 @@ out_dir = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("LEGO_DATA_DIR", 
 os.makedirs(out_dir, exist_ok=True)
 
 d = dataset.data
-torch.save((d.f.full, d.m.full, d.am.full), f"{out_dir}/data_prepped.pt")
+torch.save((d.f.full, d.m.full, d.am.full) + (() if d.edep_layers is None else (d.edep_layers,)),
+           f"{out_dir}/data_prepped.pt")
 
 ntokens = d.f.full.shape[1]
 pdgids = d.f.full[..., -1].flatten().nan_to_num().unique()
@@ -102,6 +105,7 @@ meta_dict = {
     "cond_scalars": cond_scalars,
     "energy_kin": True,
     "cuboid_dim": cuboid_dim,
+    "n_edep_layers": None if d.edep_layers is None else d.edep_layers.shape[1],
 }
 
 with open(f"{out_dir}/meta.json", "w") as f:
