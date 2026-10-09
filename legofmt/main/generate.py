@@ -80,7 +80,33 @@ class GenerateOut(torch.nn.Module):
             cond_model = torch.cat(
                 (cond_model[:, :nc], e, dir_, pos, cond_model[:, nc + 6:]), dim=-1
             )
-        sols, mask, attn_mask = self.model(self.gen_batch(cond_model, gt_mult=gt_mult))
+        cond_fm, mask, attn_mask = self.gen_batch(cond_model, gt_mult=gt_mult)
+        pt = (torch.zeros(cond_fm.shape[0], dtype=torch.bool, device=cond_fm.device)
+              if gt_mult is not None else
+              self.model.sample_passthrough(DataStruct(cond_fm, mask, attn_mask)))
+        sols = cond_fm.clone()
+        mask, attn_mask = mask.clone(), attn_mask.clone()
+        if bool(pt.any()):
+            o = _F(sols).out_p
+            o[pt, :, :7] = torch.nan
+            o[pt, :, 7] = 0.0
+            o[pt, 0, :] = _F(sols).in_p[pt][:, 0, :]
+            o[pt, 0, 0] = 0.0                       # the energy coordinate of e_out == e_in
+            _F(sols).edep[pt] = 0.0
+            attn_mask[pt, self.n_prefix + 1:] = False
+            attn_mask[pt, self.n_prefix + 1] = True
+            mask[pt] = 0                            # nothing was flowed for these rows
+        if not bool(pt.all()):
+            keep = ~pt
+            sub, m_k, a_k = self.model((cond_fm[keep], mask[keep], attn_mask[keep]))
+            if sub.dim() == 4:                      # return_timesteps: (T, B, L, C)
+                sols = sols.unsqueeze(0).expand(sub.shape[0], -1, -1, -1).clone()
+                sols[:, keep] = sub.to(sols.dtype)
+            else:
+                sols[keep] = sub.to(sols.dtype)
+            mask[keep], attn_mask[keep] = m_k, a_k
+        elif self.model.rc.odeint_conf.get("return_timesteps", False):
+            sols = sols.unsqueeze(0)
         sols[..., -1] = torch.cat([sols.new_zeros(1), self.pdgids.to(sols.dtype)])[sols[..., -1].long()]
         return sols, mask, attn_mask
 

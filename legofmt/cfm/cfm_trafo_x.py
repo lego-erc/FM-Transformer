@@ -36,6 +36,8 @@ class CFMTrafo_x(nn.Module):
         nlayers: int = 4,
         xavier_gain: float = 1.0,
         npdgids: int = 1,
+        n_cond: int = 1,
+        pt_dim: int = 64,
         dim_in_out: int | None = None,
         time_cond: bool = True,
         step_cond: bool = False,
@@ -90,6 +92,9 @@ class CFMTrafo_x(nn.Module):
         self.cond_bi_pdgids = nn.Parameter(torch.empty(npdgids, h_dim))
         self.cond_bo_pdgids = nn.Parameter(torch.empty(npdgids, in_dim))
         self.species_head   = nn.Linear(h_dim, npdgids)
+        self.pt_head = nn.Sequential(
+            nn.Linear(n_cond + in_dim + npdgids, pt_dim), nn.Mish(), nn.Linear(pt_dim, 1),
+        )
 
         w_std = xavier_gain * 3 ** 0.5 * (2.0 / (in_dim + h_dim)) ** 0.5
         for p in (self.cond_w_mask, self.cond_w_types, self.cond_w_pdgids):

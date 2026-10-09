@@ -22,13 +22,10 @@ from legofmt.data.prep import DataPrep
 from legofmt.data.struct import cond_scalars
 from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.geometry.symmetry_projections import CubeSymmetry
-from legofmt.mod_comps.config import resolve_mult_config
+from legofmt.mod_comps.config import _NEUTRAL_PDGIDS, resolve_mult_config
 from legofmt.mod_comps.optimizers import (
     build_optimizer, opt_eval, opt_is_schedulefree, opt_train, schedulefree_adamw,
 )
-
-
-_NEUTRAL_PDGIDS = (22, 2112, 130, 310, 12, -12, 14, -14, 3122)
 
 
 def _pt_pdgid_allowed(rc) -> torch.Tensor:

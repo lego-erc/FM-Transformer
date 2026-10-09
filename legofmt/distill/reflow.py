@@ -91,7 +91,8 @@ class LEGOLtngDirect(LEGOLtng):
 
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
         """Mirrors ``TrainStep._step``'s layout -- every outgoing slot a candidate,
-        pad slots targeting their own base draw -- but the class comes in at the uniform source rather than a ``t``-corruption:
+        pad slots targeting their own base draw, pass-through events weighted out --
+        but the class comes in at the uniform source rather than a ``t``-corruption:
         there is no trajectory, so the head predicts ``x_1``'s class in one shot."""
         n0 = self.rc.n_prefix + 1
         with torch.no_grad():
@@ -100,6 +101,10 @@ class LEGOLtngDirect(LEGOLtng):
             m      = m.clone()
             m[:, n0:] |= gen_sp
             ds_t   = DataStruct(ds_t.f.full, m, ds_t.am.full)
+            pt_tgt = ((ds_t.f.edep <= 0) & (ds_t.am.out_p.sum(-1) == 1)).float()
+            pt_idx = self._in_species(ds_t)
+            pt_ok  = self.pt_allowed(ds_t, pt_idx) & gen_sp.squeeze(-1)
+            w      = 1.0 - pt_tgt * pt_ok
             base   = self.gen_base_wrapper(ds_t)
             s1     = self.convert_pdgids(ds_t.f.pdgids).squeeze(-1)
             rows   = (torch.arange(m.shape[1], device=m.device) >= n0) & gen_sp
@@ -117,7 +122,11 @@ class LEGOLtngDirect(LEGOLtng):
             types=self.types_embd, pdgids=s_0, return_species=True,
         )
         sq = (pred - target) ** 2
-        loss, logs = self.reduce_loss(sq, ds_t)
+        loss, logs = self.reduce_loss(sq, ds_t, w)
+        if pt_ok.any():
+            loss = loss + self.rc.passthrough_fac * nn.functional.binary_cross_entropy_with_logits(
+                self.pt_logits(ds_t, pt_idx)[pt_ok], pt_tgt[pt_ok])
+        rows = rows & (w > 0).unsqueeze(-1)
         if rows.any():
             loss = loss + self.rc.species_fac * nn.functional.cross_entropy(
                 sp_logits[rows], s1[rows])

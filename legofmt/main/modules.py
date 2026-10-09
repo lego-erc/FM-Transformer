@@ -28,6 +28,8 @@ from legofmt.data.dataloaders import LEGODataset, make_loader
 from legofmt.data.prep import DataPrep
 from legofmt.data.struct import _F
 
+from legofmt.geometry.geom_trafos import GeomTrafos
+
 from legofmt.cfm.path_sampler import ProductPathSampler
 from legofmt.geometry.symmetry_projections import CubeSymmetry
 
@@ -71,9 +73,17 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
 
         self.model       = self._build_model(self.rc)
         self.gen_base    = GenerateBase(self.rc.config)
+        self.geom_trafos = GeomTrafos()
         self.sym         = CubeSymmetry() if self.rc.canon_sym else None
         self.val_metrics = ShowerValMetrics()
         self.ps          = ProductPathSampler(self.rc.manifold)
+
+        self.register_buffer(
+            "_pt_allowed",
+            torch.tensor([int(p) in set(self.rc.passthrough_pdgids)
+                          for p in [0, *self.rc.pdgids_template.tolist()]]),
+            persistent=False,
+        )
 
         self._base_head_loss = None
         params = list(self.model.parameters())
@@ -143,6 +153,43 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         else:  # refresh: teacher = last epoch's student
             t_m = self.reflow_teacher.model
             uncompiled(t_m).vf.load_state_dict(vf.state_dict())
+
+    @property
+    def pt_head(self) -> nn.Module:
+        """The pass-through gate. It lives on ``vf`` so that it rides the only
+        state_dict ``scripts/train.py`` saves for the flow."""
+        return uncompiled(self.model).vf.pt_head
+
+    def _in_species(self, ds_t) -> Tensor:
+        """Incoming species as a vocabulary index, pad/unknown clamped to 0."""
+        pid = ds_t.f.in_p[..., 0, -1]
+        idx = pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)
+        return idx.long().clamp(0, len(self.pdgids_template))
+
+    def pt_logits(self, ds_t, idx: Tensor | None = None) -> Tensor:
+        """Pass-through logit per event, from what MultModel's pass-through token saw:
+        the conditioning scalars and the incoming particle (position half mapped to
+        the cube), plus the incoming species."""
+        f    = ds_t.f
+        inc  = f.in_cc[..., 0, :].nan_to_num(1.0)
+        inc  = torch.cat((inc[..., 0:1], self.geom_trafos.to_cube(inc[..., 1:7])), dim=-1)
+        oh   = nn.functional.one_hot(
+            self._in_species(ds_t) if idx is None else idx, len(self.pdgids_template) + 1)
+        cond = torch.cat([f.cond(n).view(-1, 1) for n in self.rc.cond_scalars], dim=-1)
+        x    = torch.cat((cond, inc, oh.to(inc.dtype)), dim=-1)
+        return self.pt_head(x).squeeze(-1)
+
+    def pt_allowed(self, ds_t, idx: Tensor | None = None) -> Tensor:
+        """Events whose primary is a species that can pass through at all."""
+        return self._pt_allowed[self._in_species(ds_t) if idx is None else idx]
+
+    @torch.no_grad()
+    def sample_passthrough(self, ds_t) -> Tensor:
+        """Bernoulli draw of "this primary did not interact", masked to the species
+        that physically can. Answered before the solve, so a fired event skips it."""
+        idx = self._in_species(ds_t)
+        p   = self.pt_logits(ds_t, idx).sigmoid()
+        return (torch.rand_like(p) < p) & self.pt_allowed(ds_t, idx)
 
     @torch.no_grad()
     def convert_pdgids(self, pdgids: Tensor) -> Tensor:

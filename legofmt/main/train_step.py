@@ -37,9 +37,17 @@ class TrainStep:
         edep.masked_fill_(edep == 0, -delta)
         return DataStruct(f, ds_t.m.full, ds_t.am.full)
 
-    def reduce_loss(self, sq: Tensor, ds_t: DataStruct) -> tuple[Tensor, dict]:
-        """The weighted training loss, and the scalars the caller should log."""
+    def reduce_loss(self, sq: Tensor, ds_t: DataStruct,
+                    w: Tensor | None = None) -> tuple[Tensor, dict]:
+        """The weighted training loss, and the scalars the caller should log.
+
+        ``w`` is a per-event weight that scales both numerator and denominator.
+        Pass-through events come in at 0: the gate owns them, exactly as
+        ``MultModel.training_step`` masked them out of its counts loss.
+        """
         g        = ((ds_t.m.full == 1) & (ds_t.am.full == 1)).unsqueeze(-1)
+        if w is not None:
+            g    = g * w.view(-1, 1, 1)
         denom    = g.sum().clamp(min=1)
         out      = sq * g
         loss_e   = out[..., 0:1].sum() / denom
@@ -159,6 +167,10 @@ class TrainStep:
                 face = self.sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
                 g    = torch.randint(8, face.shape, device=face.device) if self.rc.sym_aug else None
                 ds_t = DataStruct(self._canon_dirs(ds_t.f.full, face, fwd, g=g), ds_t.m.full, ds_t.am.full)
+            pt_tgt  = ((ds_t.f.edep <= 0) & (ds_t.am.out_p.sum(-1) == 1)).float()
+            pt_idx  = self._in_species(ds_t)
+            pt_ok   = self.pt_allowed(ds_t, pt_idx) & gen_sp.squeeze(-1)
+            w       = 1.0 - pt_tgt * pt_ok
             base = self.gen_base_wrapper(ds_t)
             s1   = self.convert_pdgids(ds_t.f.pdgids).squeeze(-1)  # NaN pad -> class 0
             t    = self._sample_t(ds_t)
@@ -193,7 +205,14 @@ class TrainStep:
             types=self.types_embd, pdgids=s_t, return_species=True, **step_extras,
         )
         sq = (v_out - ps_.dx_t) ** 2
-        loss, logs = self.reduce_loss(sq, ds_t)
+        loss, logs = self.reduce_loss(sq, ds_t, w)
+        if pt_ok.any():
+            loss_pt = torch.nn.functional.binary_cross_entropy_with_logits(
+                self.pt_logits(ds_t, pt_idx)[pt_ok], pt_tgt[pt_ok])
+            loss = loss + self.rc.passthrough_fac * loss_pt
+            if self.training:
+                logs = {**logs, "loss/passthrough": loss_pt.detach()}
+        rows = rows & (w > 0).unsqueeze(-1)
         if rows.any():
             lg, tg  = sp_logits[rows], s1[rows]
             loss_sp = torch.nn.functional.cross_entropy(lg, tg)

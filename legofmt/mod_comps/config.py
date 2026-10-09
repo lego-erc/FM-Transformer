@@ -25,6 +25,8 @@ from legofmt.compat import (
 from legofmt.data.struct import set_layout
 from legofmt.geometry.product_manifold import ProductManifold
 
+_NEUTRAL_PDGIDS = (22, 2112, 130, 310, 12, -12, 14, -14, 3122)
+
 _MANIFOLDS: dict[str, type] = {
     "euclidean": Euclidean,
     "sphere": Sphere,
@@ -61,6 +63,8 @@ class ResolvedLEGOConfig:
     one_step_euler_fac: float
     one_step_euler_sections: int
     species_fac: float
+    passthrough_fac: float
+    passthrough_pdgids: tuple[int, ...]
     one_step_euler_every: int
     learned_loss_weights: bool
     edep_cell: bool
@@ -223,6 +227,8 @@ def _build_resolved(
     cond_scalars = tuple(model_conf.get("cond_scalars", ("Density",)))
     n_prefix = len(cond_scalars) + 1  # + edep slot (generated)
     set_layout(cond_scalars)
+    model_args.setdefault("n_cond", len(cond_scalars))
+    model_args.setdefault("pt_dim", model_conf.get("passthrough_dim", 64))
 
     sections = model_conf.get("one_step_euler_sections", 8)
     if model_conf.get("one_step_euler_fac", 0.0) > 0:
@@ -262,6 +268,8 @@ def _build_resolved(
         one_step_euler_fac=model_conf.get("one_step_euler_fac", 0.0),
         one_step_euler_sections=sections,
         species_fac=model_conf.get("species_fac", 1.0),
+        passthrough_fac=model_conf.get("passthrough_fac", 1.0),
+        passthrough_pdgids=tuple(model_conf.get("passthrough_pdgids", _NEUTRAL_PDGIDS)),
         one_step_euler_every=model_conf.get("one_step_euler_every", 1),
         learned_loss_weights=model_conf.get("learned_loss_weights", False),
         edep_cell=model_conf.get("edep_cell", False),
