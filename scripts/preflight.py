@@ -53,8 +53,7 @@ else:
 
 cfg = yaml.safe_load(cfg_path.read_text())
 run, config = cfg["run"], cfg["config"]
-train_model = run.get("train_model", "fm")
-print(f"\n[run] name={run.get('name')}  train_model={train_model}  epochs={run.get('epochs')}")
+print(f"\n[run] name={run.get('name')}  epochs={run.get('epochs')}")
 
 # ---- data -----------------------------------------------------------------
 prefix = os.environ.get("LEGO_DATA_DIR", "./data/")
@@ -83,7 +82,7 @@ else:
              f"~{need:.0f} GB across {nranks} rank(s) -- size --mem accordingly")
 
 mc = config.get("model_conf", {})
-if meta and train_model == "fm" and "max_energy" in mc:
+if meta and "max_energy" in mc:
     if float(mc["max_energy"]) != float(meta.get("max_energy", -1)):
         bad(f"max_energy {mc['max_energy']} != dataset's {meta.get('max_energy')}")
     else:
@@ -109,7 +108,7 @@ if isinstance(dev, list):
 
 # ---- checkpoint destination ----------------------------------------------
 ckpt_dir = run.get("ckpt_dir") or os.path.join(
-    os.environ.get("LEGO_CKPT_DIR", "./checkpoints/"), "flow" if train_model == "fm" else "mult")
+    os.environ.get("LEGO_CKPT_DIR", "./checkpoints/"), "flow")
 print(f"\n[ckpt] dir={ckpt_dir}")
 try:
     os.makedirs(ckpt_dir, exist_ok=True)
@@ -131,7 +130,7 @@ if sched is not None and "total_steps" not in sched and isinstance(dev, list):
 
 # ---- optional-dependency gates ------------------------------------------
 print("\n[deps]")
-if train_model == "fm" and mc.get("ot_coupling"):
+if mc.get("ot_coupling"):
     try:
         import torch_lap_cuda_lib  # noqa: F401
         ok("ot_coupling=True and torch_lap_cuda_lib importable")
@@ -144,10 +143,6 @@ if cfg.get("logging", {}).get("comet"):
         ok("comet: true and comet_ml importable")
     except ImportError:
         bad("comet: true but comet_ml missing -- use a *-comet environment")
-if train_model == "mult" and "max_count" not in config.get("mm_conf", {}):
-    warn("mm_conf.max_count unset: config resolution builds a MultLoader, i.e. an "
-         "extra full load of data_prepped.pt before training starts")
-
 # ---- resolve (+ optionally build) on CPU --------------------------------
 if not FAIL:
     print("\n[resolve]")
@@ -157,24 +152,14 @@ if not FAIL:
         if sched is not None and "total_steps" not in sched and isinstance(dev, list):
             sched["total_steps"] = run["epochs"] * int(
                 run["dataset_size"] / (config["dl_conf"]["bs"] * len(dev)))
-        if train_model == "fm":
-            from legofmt.mod_comps.config import resolve_legoltng_config
-            rc = resolve_legoltng_config(config)
-            ok(f"resolved: max_seq_l={rc.max_seq_l} npdgids={rc.model_args['npdgids']} "
-               f"n_prefix={rc.n_prefix} cond_scalars={rc.cond_scalars}")
-            if args.build:
-                from legofmt.main.modules import LEGOLtng
-                m = LEGOLtng(config)
-                ok(f"model built on CPU: {sum(p.numel() for p in m.parameters()):,} params")
-        else:
-            from legofmt.mod_comps.config import resolve_mult_config
-            rc = resolve_mult_config(cfg if "state_dict" in cfg else {"config": config})
-            ok(f"resolved: species={rc.max_seq_len} max_particles={rc.max_particles} "
-               f"in_dim={rc.in_dim} ptypes_in={rc.ptypes_in.tolist()}")
-            if args.build:
-                from legofmt.multiplicity.model import MultModel
-                m = MultModel({"config": config})
-                ok(f"model built on CPU: {sum(p.numel() for p in m.parameters()):,} params")
+        from legofmt.mod_comps.config import resolve_legoltng_config
+        rc = resolve_legoltng_config(config)
+        ok(f"resolved: max_seq_l={rc.max_seq_l} npdgids={rc.model_args['npdgids']} "
+           f"n_prefix={rc.n_prefix} cond_scalars={rc.cond_scalars}")
+        if args.build:
+            from legofmt.main.modules import LEGOLtng
+            m = LEGOLtng(config)
+            ok(f"model built on CPU: {sum(p.numel() for p in m.parameters()):,} params")
     except Exception as e:
         bad(f"{type(e).__name__}: {e}")
 

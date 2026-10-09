@@ -8,7 +8,7 @@ from x_transformers.attend import Attend
 
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt import compat
-from legofmt.mod_comps.config import resolve_legoltng_config, resolve_mult_config
+from legofmt.mod_comps.config import resolve_legoltng_config
 
 from test_modules_direct import _tiny_config
 
@@ -41,17 +41,6 @@ def test_no_qk_norm_untouched():
     c["config"]["model_conf"]["model_args"]["attn_qk_norm"] = False
     rc = resolve_legoltng_config(c)
     assert "attn_qk_norm_scale" not in rc.model_args
-
-
-@pytest.mark.skipif(compat.XT_VERSION < compat.XT_QK_NORM_FIX, reason="needs x-transformers >= 2.25.5")
-def test_mult_checkpoint_shared_model_args_cubed_once():
-    mm = {"attn_qk_norm": True}
-    mm_conf = {"model_args": mm, "h_dim": 8, "ptypes": torch.tensor([11, 22]), "ptypes_in": torch.tensor([11]),
-               "max_out_particles": 3, "cond_scalars": ("Density",)}
-    c = {"state_dict": {}, "config": {"mm_conf": mm_conf, "dl_conf": {}}}
-    rc = resolve_mult_config(c)
-    assert rc.model_args["attn_qk_norm_scale"] == 1000        # inv_model_args aliases model_args
-    assert rc.inv_model_args["attn_qk_norm_scale"] == 1000
 
 
 @pytest.mark.parametrize("qk_scale, expected", [(1000, torch.float32), (10, torch.bfloat16)])

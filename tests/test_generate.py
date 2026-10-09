@@ -1,4 +1,4 @@
-"""Smoke test: load checkpoints from HF and run GenerateOut end-to-end."""
+"""Smoke test: load the flow checkpoint from HF and run GenerateOut end-to-end."""
 from __future__ import annotations
 
 import os
@@ -8,13 +8,12 @@ import pytest
 import torch
 from huggingface_hub import hf_hub_download
 
-from legofmt.main.generate import GenerateIn, GenerateOut
+from legofmt.main.generate import GenerateOut
 
 
 HF_REPO = os.environ.get("HF_REPO", "lego-erc/legofmt")
 HF_REVISION = os.environ.get("HF_REVISION", "main")
 FLOW_CKPT = os.environ.get("HF_FLOW_CKPT", "checkpoints/fm/rp_fm_v7_110526.pt")
-MULT_CKPT = os.environ.get("HF_MULT_CKPT", "checkpoints/mult/rp_mult_v1_080426.pt")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 pytestmark = pytest.mark.skipif(
@@ -26,29 +25,24 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture(scope="module")
-def ckpt_paths(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
+def ckpt_paths(tmp_path_factory: pytest.TempPathFactory) -> Path:
     cache = tmp_path_factory.mktemp("hf")
     token = (os.environ.get("HF_TOKEN") or "").strip() or None  # strip stray newlines, empty -> anonymous
     flow = hf_hub_download(
         repo_id=HF_REPO, filename=FLOW_CKPT, revision=HF_REVISION,
         local_dir=cache, token=token,
     )
-    mult = hf_hub_download(
-        repo_id=HF_REPO, filename=MULT_CKPT, revision=HF_REVISION,
-        local_dir=cache, token=token,
-    )
-    return Path(flow), Path(mult)
+    return Path(flow)
 
 
 @pytest.fixture(scope="module")
-def generator(ckpt_paths: tuple[Path, Path]) -> GenerateOut:
-    flow, mult = ckpt_paths
-    return GenerateOut(str(flow), str(mult), device=DEVICE)
+def generator(ckpt_paths: Path) -> GenerateOut:
+    return GenerateOut(str(ckpt_paths), device=DEVICE)
 
 
 def _dummy_cond(gen: GenerateOut, batch: int = 2) -> torch.Tensor:
     """Build a valid [B, 8] cond: [density, mom(3), pos(3), pdgid]."""
-    pdgid = gen.pdgid_in[0].item()
+    pdgid = gen.pdgids[0].item()
     cond = torch.zeros(batch, 8, device=DEVICE)
     cond[:, 0] = 1.0                                            # density
     cond[:, 1:4] = torch.tensor([0.0, 0.0, 150.0], device=DEVICE)   # momentum
@@ -59,7 +53,6 @@ def _dummy_cond(gen: GenerateOut, batch: int = 2) -> torch.Tensor:
 
 def test_instantiation(generator: GenerateOut) -> None:
     assert isinstance(generator.model, torch.nn.Module)
-    assert isinstance(generator.gen_mult, torch.nn.Module)
     assert generator.pdgids.numel() > 0
     assert generator.max_seq_l > 3
 
@@ -84,27 +77,10 @@ def test_g4_style_api(generator: GenerateOut) -> None:
     energy = torch.tensor([1000.0], device=DEVICE)
     density = torch.tensor([1.0], device=DEVICE)
     size = torch.tensor([1.0], device=DEVICE)
-    pdgids = generator.pdgid_in[:1]
+    pdgids = generator.pdgids[:1]
 
     out = generator.gen_model_w_g4_args(n, pos, mom, energy, density, size, pdgids)
 
     assert set(out) == {"per_event", "per_particle", "per_voxel"}
     assert out["per_particle"]["Incoming"].shape[-1] == 8   # E, mom(3), pdgid, pos(3)
     assert out["per_particle"]["Outgoing"].shape[-1] == 8
-
-
-@pytest.fixture(scope="module")
-def in_generator(ckpt_paths: tuple[Path, Path]) -> GenerateIn:
-    flow, mult = ckpt_paths
-    return GenerateIn(str(flow), str(mult), device=DEVICE)
-
-
-@torch.no_grad()
-def test_generate_in_shapes(generator: GenerateOut, in_generator: GenerateIn) -> None:
-    """Forward-generate a shower, then infer the incoming particle from it."""
-    sols, mask, attn_mask = generator(_dummy_cond(generator, batch=2))
-    in_p = in_generator((sols.nan_to_num(), mask, attn_mask))
-    assert in_p.shape == (2, 1, 8)
-    assert torch.isfinite(in_p).all(), "non-finite incoming features"
-    raw_ids = in_p[..., -1].flatten()
-    assert all(i in generator.pdgids for i in raw_ids.long()), raw_ids

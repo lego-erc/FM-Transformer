@@ -49,36 +49,6 @@ def apply_legacy_projection_in_out(model_args: dict, state_dict: dict) -> None:
         model_args["dim_in_out"] = model_args["h_dim"]
 
 
-def migrate_legacy_mult_heads(
-    state_dict: dict, max_seq_len: int, max_particles: int
-) -> dict:
-    """Pre-fusion checkpoints stored per-position ModuleLists (``embd_in_.{i}``,
-    ``proj_out_.{i}``); remap them onto the fused single-table layout."""
-    has_legacy_proj = "proj_out_.0.weight" in state_dict
-    has_legacy_embd = "embd_in_.0.weight" in state_dict
-    if not (has_legacy_proj or has_legacy_embd):
-        return state_dict
-
-    out = {
-        k: v for k, v in state_dict.items()
-        if not (k.startswith("proj_out_.") or k.startswith("embd_in_."))
-    }
-
-    if has_legacy_proj:
-        weights = [state_dict[f"proj_out_.{i}.weight"] for i in range(max_seq_len)]
-        biases = [state_dict[f"proj_out_.{i}.bias"] for i in range(max_seq_len)]
-        out["proj_out_w"] = torch.stack([w.t().contiguous() for w in weights], dim=0)
-        out["proj_out_b"] = torch.stack(biases, dim=0)
-
-    if has_legacy_embd:
-        embd_weights = [
-            state_dict[f"embd_in_.{i}.weight"] for i in range(max_seq_len - 1)
-        ]
-        out["embd_in_.weight"] = torch.cat(embd_weights, dim=0)
-
-    return out
-
-
 # Pre-refactor CFMTrafo_x parameter names -> current names.
 LEGACY_PARAM_RENAME: dict[str, str] = {
     "l_mask_":    "cond_w_mask",

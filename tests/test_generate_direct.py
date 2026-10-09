@@ -14,7 +14,6 @@ import torch
 
 from legofmt.data.struct import _F
 from legofmt.distill.reflow import GenerateOutDirect as GenerateOut, LEGOLtngDirect as LEGOLtng
-from legofmt.main.generate import GenerateIn
 from legofmt.main.modules import LEGOLtng as LEGOLtngVelocity
 
 
@@ -68,45 +67,10 @@ def _save_flow_ckpt(tmp_path: Path, cls=LEGOLtng, name: str = "flow.pt") -> Path
     return path
 
 
-def _mult_config() -> dict:
-    """Checkpoint-style mult config: ptypes/max_count present so
-    ``resolve_mult_config`` takes the restore path (no meta.json needed)."""
-    return {
-        "dl_conf": {"lds_args": {"cutoff_mev": 10.0}, "bs": 2, "num_workers": 0},
-        "mm_conf": {
-            "ptypes": torch.tensor([22, 211], dtype=torch.int64),
-            "ptypes_in": torch.tensor([22, 211, 2212], dtype=torch.int64),
-            "max_out_particles": 4,
-            "max_count": 4,
-            "h_dim": 16,
-            "in_dim": 8,
-            "n_layers": 1,
-            "n_heads": 2,
-            "dropout": 0.0,
-            "use_abs_pos_emb": False,
-            "post_emb_norm": False,
-            "train_inverse": True,
-            "model_args": {"use_adaptive_rmsnorm": True},
-            "inv_model_args": {"use_adaptive_rmsnorm": True},
-        },
-        "opt_conf": {"opt": "schedulefree", "lr": 1e-3},
-    }
-
-
-def _save_mult_ckpt(tmp_path: Path) -> Path:
-    from legofmt.multiplicity.model import MultModel
-
-    cfg = _mult_config()
-    m = MultModel({"state_dict": {}, "config": cfg})
-    path = tmp_path / "mult.pt"
-    torch.save({"state_dict": m.state_dict(), "config": cfg}, path)
-    return path
-
-
 @pytest.fixture(scope="module")
 def generator(tmp_path_factory: pytest.TempPathFactory) -> GenerateOut:
     tmp = tmp_path_factory.mktemp("direct_ckpts")
-    return GenerateOut(str(_save_flow_ckpt(tmp)), str(_save_mult_ckpt(tmp)), device="cpu")
+    return GenerateOut(str(_save_flow_ckpt(tmp)), device="cpu")
 
 
 def _dummy_cond(gen: GenerateOut, batch: int = 2) -> torch.Tensor:
@@ -150,17 +114,3 @@ def _fake_shower(B: int = 2, L: int = 7) -> tuple:
     m[:, 3:] = 1
     am = torch.ones(B, L, dtype=torch.bool)
     return f, m, am
-
-
-@torch.no_grad()
-def test_generate_in_smoke(tmp_path_factory: pytest.TempPathFactory) -> None:
-    """Inverse generation from a raw-PDG-id shower batch (offline)."""
-    tmp = tmp_path_factory.mktemp("in_ckpts")
-    gen_in = GenerateIn(
-        str(_save_flow_ckpt(tmp, LEGOLtngVelocity)), str(_save_mult_ckpt(tmp)), device="cpu",
-    )
-    in_p = gen_in(_fake_shower())
-    assert in_p.shape == (2, 1, 8)
-    assert torch.isfinite(in_p).all(), "non-finite incoming features"
-    raw_ids = in_p[..., -1].flatten().long()
-    assert all(i in gen_in.pdgids for i in raw_ids), raw_ids

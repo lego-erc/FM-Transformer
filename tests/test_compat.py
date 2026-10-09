@@ -19,7 +19,7 @@ from torch import nn
 
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt.mod_comps.config import (
-    build_manifold, resolve_legoltng_config, resolve_mult_config,
+    build_manifold, resolve_legoltng_config,
 )
 
 from test_modules_direct import _tiny_config
@@ -98,53 +98,3 @@ def test_current_param_names_load_without_warning() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("error", DeprecationWarning)
         fresh.load_state_dict(ref.state_dict())
-
-
-# --- multiplicity heads ----------------------------------------------------
-
-def _mult_ckpt(state_dict: dict) -> dict:
-    return {
-        "state_dict": state_dict,
-        "config": {
-            "mm_conf": {
-                "model_args": {"h_dim": 8},
-                "h_dim": 8,
-                "ptypes": torch.tensor([11, 22]),
-                "ptypes_in": torch.tensor([11]),
-                "max_out_particles": 3,
-                "max_count": 3,
-                "cond_scalars": ("Density",),
-            },
-            "dl_conf": {},
-        },
-    }
-
-
-def test_per_position_mult_heads_are_fused() -> None:
-    """Pre-fusion checkpoints stored proj_out_.{i} / embd_in_.{i} ModuleLists."""
-    n_pos, h, n_cls = 2, 8, 3
-    ws = [torch.randn(n_cls, h) for _ in range(n_pos)]
-    bs = [torch.randn(n_cls) for _ in range(n_pos)]
-    embd = [torch.randn(4, h) for _ in range(n_pos - 1)]
-    sd = {"keep.me": torch.zeros(1)}
-    for i, (w, b) in enumerate(zip(ws, bs)):
-        sd[f"proj_out_.{i}.weight"], sd[f"proj_out_.{i}.bias"] = w, b
-    for i, e in enumerate(embd):
-        sd[f"embd_in_.{i}.weight"] = e
-
-    rc = resolve_mult_config(_mult_ckpt(sd))
-    out = rc.state_dict
-
-    assert not any(k.startswith(("proj_out_.", "embd_in_.")) for k in out
-                   if k not in ("embd_in_.weight",))
-    assert out["keep.me"].shape == (1,)
-    assert torch.equal(out["proj_out_w"], torch.stack([w.t().contiguous() for w in ws]))
-    assert torch.equal(out["proj_out_b"], torch.stack(bs))
-    assert torch.equal(out["embd_in_.weight"], torch.cat(embd, dim=0))
-
-
-def test_fused_mult_heads_pass_through_untouched() -> None:
-    sd = {"proj_out_w": torch.randn(2, 8, 3), "proj_out_b": torch.randn(2, 3)}
-    out = resolve_mult_config(_mult_ckpt(dict(sd))).state_dict
-    for k, v in sd.items():
-        assert torch.equal(out[k], v), k

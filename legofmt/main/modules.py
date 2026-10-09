@@ -167,9 +167,9 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         return idx.long().clamp(0, len(self.pdgids_template))
 
     def pt_logits(self, ds_t, idx: Tensor | None = None) -> Tensor:
-        """Pass-through logit per event, from what MultModel's pass-through token saw:
-        the conditioning scalars and the incoming particle (position half mapped to
-        the cube), plus the incoming species."""
+        """Pass-through logit per event, from the conditioning alone: the
+        conditioning scalars and the incoming particle (position half mapped to the
+        cube), plus the incoming species."""
         f    = ds_t.f
         inc  = f.in_cc[..., 0, :].nan_to_num(1.0)
         inc  = torch.cat((inc[..., 0:1], self.geom_trafos.to_cube(inc[..., 1:7])), dim=-1)

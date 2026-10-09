@@ -32,7 +32,6 @@ import torch
 from legofmt.cfm.project_model import uncompiled
 from legofmt.main.modules import LEGOLtng
 from legofmt.mod_comps.config import migrate_loss_weight_keys
-from legofmt.multiplicity.model import MultModel
 
 d_dtype = getattr(torch, run["dtype"])
 torch.set_default_dtype(d_dtype)
@@ -50,7 +49,7 @@ name = run["name"]
 
 # Coerce the YAML-native values into what the models expect.
 config["dl_conf"]["dtype"] = d_dtype
-if "base_conf" in config:  # FM only; the mult config carries no base distribution
+if "base_conf" in config:
     config["base_conf"]["kappa"] = torch.tensor(config["base_conf"]["kappa"])
 if "adamw_betas" in config["opt_conf"]:
     config["opt_conf"]["adamw_betas"] = tuple(config["opt_conf"]["adamw_betas"])
@@ -111,27 +110,22 @@ trainer = ltng.Trainer(
     gradient_clip_val=run["gradient_clip_val"],
 )
 
-train_model = run["train_model"]
 if run.get("init_seed") is not None:
     ltng.seed_everything(int(run["init_seed"]), workers=True)
 compile_mode = run["compile"]  # false | model
-if train_model == "fm":
-    model = LEGOLtng(config)
-else:
-    model = MultModel(config)
+model = LEGOLtng(config)
 
 resume_from = run.get("resume_from")
 if resume_from:
     prev = torch.load(resume_from, map_location="cpu", weights_only=False)
-    target = model.model.vf if train_model == "fm" else model
-    incompat = target.load_state_dict(prev["state_dict"], strict=False)
+    incompat = model.model.vf.load_state_dict(prev["state_dict"], strict=False)
     assert not incompat.unexpected_keys, f"resume_from arch mismatch: {incompat}"
     prev_mc = migrate_loss_weight_keys(prev["config"]["model_conf"])
     for k, v in prev_mc.get("loss_weights", {}).items():
         if hasattr(model, k):
             getattr(model, k).data.copy_(v)
 
-if compile_mode == "model":  # fm: the ProjectModel; mult: the count Decoder wrapper
+if compile_mode == "model":
     model.model = torch.compile(model.model, dynamic=False)
 
 if run.get("data_seed") is not None:
@@ -149,28 +143,20 @@ if hasattr(model, "base_head"):
     }
 # the learned loss weights live on the LightningModule, not in vf's state_dict:
 # keep them so resume_from does not restart every Kendall cell at weight 1.
-# Guarded: the mult model has neither the cells nor a model_conf to put them in.
 if any(hasattr(model, k) for k in ("lv", "lv_flow")):
     model.rc.config["model_conf"]["loss_weights"] = {
         k: getattr(model, k).detach().cpu() for k in ("lv", "lv_flow") if hasattr(model, k)
     }
 
 if run.get("ckpt_dir"):
-    ckpt_dir = run["ckpt_dir"]  # explicit dir -> save directly here, no flow/mult subdir
+    ckpt_dir = run["ckpt_dir"]  # explicit dir -> save directly here, no flow subdir
 else:
-    ckpt_base = os.environ.get("LEGO_CKPT_DIR", "./checkpoints/")
-    ckpt_dir = os.path.join(ckpt_base, "flow" if train_model == "fm" else "mult")
+    ckpt_dir = os.path.join(os.environ.get("LEGO_CKPT_DIR", "./checkpoints/"), "flow")
 ckpt_path = os.path.join(ckpt_dir, f"{name}.pt")
 os.makedirs(ckpt_dir, exist_ok=True)
 
 model._opt_eval()
-if train_model == "fm":
-    vf = uncompiled(model.model).vf
-    state_dict = vf.state_dict()
-else:
-    if compile_mode == "model":
-        model.model = uncompiled(model.model)  # keep state_dict keys free of the compile wrapper
-    state_dict = model.state_dict()
+state_dict = uncompiled(model.model).vf.state_dict()
 
 torch.save(
     {

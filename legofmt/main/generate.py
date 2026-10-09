@@ -1,12 +1,10 @@
-"""``GenerateOut``: the multiplicity and flow checkpoints composed into a generator.
+"""``GenerateOut``: the flow checkpoint driven as a generator.
 
 ``gen_batch`` builds the padded ``(cond_fm, mask, attn_mask)`` tuple with every
 outgoing slot a candidate, then ``LEGOLtng.forward`` flows the base distribution
 to particles -- the species channel, and with it the multiplicity, is generated
-by the flow, so no multiplicity checkpoint is needed. The conditioning momentum
-must be energy-scaled rather than unit-norm, or the event conditions on a ~1 MeV
-particle. ``GenerateIn`` is the reverse direction and still needs a
-``train_inverse`` multiplicity checkpoint for the incoming-PID head.
+by the flow. The conditioning momentum must be energy-scaled rather than
+unit-norm, or the event conditions on a ~1 MeV particle.
 """
 
 from dataclasses import replace
@@ -14,22 +12,17 @@ from dataclasses import replace
 import torch
 import torch.nn.functional as F
 
-from legofmt.cfm.project_model import is_compiled
 from legofmt.data.struct import _F, DataStruct, set_layout
 from legofmt.geometry.energy_proj import EnergyProjections
 from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.main.modules import LEGOLtng
-from legofmt.multiplicity.model import MultModel
 
 
 class GenerateOut(torch.nn.Module):
 
     flow_cls = LEGOLtng
 
-    def __init__(
-        self, flow_conf_path: str, mult_conf_path: str | None = None,
-        device="cpu", couple_in_out_pdgids=False,
-    ):
+    def __init__(self, flow_conf_path: str, device="cpu", couple_in_out_pdgids=False):
         super().__init__()
         flow_conf = torch.load(flow_conf_path, map_location=device, weights_only=False)
         self.model = self.flow_cls(flow_conf).to(device)
@@ -48,22 +41,8 @@ class GenerateOut(torch.nn.Module):
             cutoff_mev=self.model.rc.cutoff_mev, max_energy=self.model.rc.max_energy,
         )
 
-        self.gen_mult = None
-        self.pdgid_in = self.ptypes = self.pdgids
-        if mult_conf_path is not None:
-            mult_conf = torch.load(mult_conf_path, map_location=device, weights_only=False)
-            self.gen_mult = MultModel(mult_conf).to(device)
-            if mult_conf["config"]["mm_conf"].get("fwd_compile", False) and not is_compiled(
-                self.gen_mult.model
-            ):
-                self.gen_mult.model = torch.compile(self.gen_mult.model, dynamic=False)
-            self.pdgid_in = mult_conf["config"]["mm_conf"]["ptypes_in"].to(device)
-            self.ptypes = mult_conf["config"]["mm_conf"]["ptypes"].to(device)
-        self.ptype_idx = torch.searchsorted(self.ptypes, self.pdgids).clamp(max=len(self.ptypes) - 1)
-        self.ptype_in_mask = self.ptypes[self.ptype_idx] == self.pdgids
-
         if couple_in_out_pdgids:
-            self.model.rc.odeint_conf["filter_pdgid"] = self.pdgid_in
+            self.model.rc.odeint_conf["filter_pdgid"] = self.pdgids
 
     def __call__(self, cond: torch.Tensor, prepped: bool = False, gt_mult = None):
         """``cond`` is ``[B, n_cond + 7] = [*cond_scalars, mom * E_MeV (3), pos (3), pdgid]``;
@@ -154,7 +133,7 @@ class GenerateOut(torch.nn.Module):
             # (make_simulate_for_model's own _check_simulate_shapes forbids
             # B>1 and n>1 together), so there is no per-condition-block
             # ordering ambiguity to guard against here.
-            assert gt_mult.shape == (B * n, self.ptypes.shape[0])
+            assert gt_mult.shape == (B * n, self.pdgids.shape[0])
 
         mom = F.normalize(mom, dim=-1)
 
@@ -201,8 +180,8 @@ class GenerateOut(torch.nn.Module):
             occupied = torch.ones(B, max_particles, dtype=torch.bool, device=cond.device)
             out_tok[..., -1] = 0
         else:
-            assert gt_mult.shape == (B, self.ptypes.shape[0])
-            mult = gt_mult.long()[:, self.ptype_idx] * self.ptype_in_mask
+            assert gt_mult.shape == (B, self.pdgids.shape[0])
+            mult = gt_mult.long()
             idx = torch.arange(max_particles, device=cond.device)
             occupied = idx < mult.sum(-1, keepdim=True)
             bounds = mult.new_zeros(B, max_particles + 1)
@@ -225,37 +204,4 @@ class GenerateOut(torch.nn.Module):
             cond_fm[:, j + 1, 0] = conds[:, j]
         _F(cond_fm).non_p[..., 1:-1] = 1
         return cond_fm, mask, attn_mask
-
-
-class GenerateIn(GenerateOut):
-
-    @torch.no_grad()
-    def __call__(self, batch):
-        ds = batch if isinstance(batch, DataStruct) else DataStruct(*batch)
-        f = ds.f.full.clone()
-        m = torch.zeros_like(ds.m.full)
-        m[:, self.n_prefix] = 1  # only the incoming slot is inferred
-        ds = DataStruct(f, m, ds.am.full)
-        conds = torch.cat(
-            [ds.f.cond(n).view(-1, 1, 1) for n in self.cond_names], dim=-1
-        ).expand(-1, ds.f.out_cc.shape[1], -1)
-        out_tok = torch.cat((conds, ds.f.out_cc), dim=-1)
-        out_pid = torch.searchsorted(
-            self.ptypes, ds.f.out_p[..., -1].long()
-        ).clamp(max=len(self.ptypes) - 1)
-        if self.gen_mult is None:
-            raise RuntimeError(
-                "GenerateIn needs a train_inverse multiplicity checkpoint: "
-                "construct it with mult_conf_path set."
-            )
-        pid_in_idx = self.gen_mult((out_tok, out_pid, ds.am.out_p.bool(), ds.f.edep))
-        # The flow runs with pdgid_is_idx=True: swap the raw ids the mult
-        # model consumed above for flow-vocabulary indices.
-        f[..., -1] = self.model.convert_pdgids(f[..., -1]).to(f.dtype)
-        f[:, self.n_prefix, -1] = self.model.convert_pdgids(self.pdgid_in[pid_in_idx].to(f.dtype))
-        sols, _, _ = self.model(ds)
-        sols[..., -1] = torch.cat(
-            [sols.new_zeros(1), self.pdgids.to(sols.dtype)]
-        )[sols[..., -1].long()]
-        return _F(sols).in_p
 

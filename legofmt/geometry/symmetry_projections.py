@@ -1,7 +1,7 @@
 """``CubeSymmetry``: canonicalise directions onto a reference cube face.
 
 Six rotations indexed by the face the position points at. Applied before the
-flow and undone after it, and again in ``MultModel.proj_in``. ``g`` (0..7)
+flow and undone after it. ``g`` (0..7)
 additionally applies an element of the canonical face's stabiliser (the
 dihedral group on the in-face axes y, z): drawn per event it is a training
 augmentation, and at inference a random canonical frame, so the model's output

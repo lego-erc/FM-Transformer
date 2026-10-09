@@ -5,33 +5,35 @@ given an incoming particle, material atomic number, mass number and density. Tar
 shower data (LEGO/Geant4) where each event has one incoming particle and a
 variable number of outgoing particles labelled by PDG-id.
 
-Generation is **two-stage**:
+Generation is **single-stage**. `LEGOLtng` (wrapping `CFMTrafo_x`, an
+`x-transformers` encoder) integrates an ODE on `Euclidean(1) × Sphere(3) ×
+Sphere(3)` (energy scalar, momentum direction, surface-position direction) for
+the per-particle kinematics, plus the event's `E_dep` — and alongside it
+generates each slot's PDG-id as a discrete flow-matching channel. Index 0 of
+that vocabulary means "empty slot", so **the multiplicity is the number of slots
+that did not resolve to 0**; no separate counting model is involved.
 
-1. **Multiplicity model** (`MultModel`, autoregressive `x-transformers` decoder)
-   predicts how many outgoing particles of each PDG-id the event contains.
-2. **Flow-matching model** (`LEGOLtng` wrapping `CFMTrafo_x`, an `x-transformers`
-   encoder) integrates an ODE on `Euclidean(1) × Sphere(3) × Sphere(3)` (energy
-   scalar, momentum direction, surface-position direction) to produce the
-   per-particle kinematics for that many outgoing slots, plus the event's `E_dep`.
+A small gate (`pt_head`) decides from the conditioning alone that the incoming
+particle traversed without interacting; those events skip the ODE entirely and
+emit the primary unchanged.
 
-Both models are `lightning.LightningModule`s configured by a single nested
+The model is a `lightning.LightningModule` configured by a single nested
 `config` dict.
 
 ---
 
 ## Quickstart — generate an event
 
-Point the two paths at your local checkpoints and run:
+Point the path at your local checkpoint and run:
 
 ```python
 import torch
 from legofmt.main.generate import GenerateOut
 
 FLOW_CKPT = "PATH_TO_CHECKPOINTS/flow_ckpt.pt"   # flow-matching checkpoint: {"state_dict", "config"}
-MULT_CKPT = "PATH_TO_CHECKPOINTS/mult_ckpt.pt"   # multiplicity checkpoint:  {"state_dict", "config"}
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-gen = GenerateOut(FLOW_CKPT, MULT_CKPT, device=device)
+gen = GenerateOut(FLOW_CKPT, device=device)
 
 # One incoming particle; n samples are drawn from it.
 n       = 1                                  # number of samples              total events will be n * B
@@ -75,15 +77,16 @@ Path B — pre-prepped on disk (used by every training entry point):
 
 Both paths yield a DataStruct stream:
 
-    DataStruct ──► LEGOLtng  /  MultModel ──► trainer.fit
+    DataStruct ──────────► LEGOLtng ──────────► trainer.fit
                                                    │
                                                    ▼
                                   torch.save({"state_dict", "config"})
                                                    │
                                                    ▼
-                                  GenerateOut(flow_ckpt, mult_ckpt)
-                                    · multiplicity sampling
+                                       GenerateOut(flow_ckpt)
+                                    · pass-through gate (skips the ODE)
                                     · ODE solve on product manifold
+                                    · species channel -> multiplicity
                                     · returns (sols, mask, attn_mask)
 ```
 
@@ -112,7 +115,7 @@ torch.save({"state_dict": vf_sd, "config": config}, "flow.pt")
 
 The same checkpoint dict (`{"state_dict": ..., "config": ...}`) is what
 `LEGOLtng(config)` expects when re-loading: pass the loaded dict in as `config`
-and the constructor pulls both keys out. `MultModel` follows the same pattern.
+and the constructor pulls both keys out.
 A reference training entry point is in `scripts/train.py` (4-GPU DDP, Comet
 logger, Muon optimizer with warmup-cosine).
 
@@ -125,7 +128,7 @@ API (and the `couple_in_out_pdgids` constructor flag):
 ```python
 from legofmt.main.generate import GenerateOut
 
-gen = GenerateOut("flow.pt", "mult.pt", device="cuda",
+gen = GenerateOut("flow.pt", device="cuda",
                   couple_in_out_pdgids=False)  # if True, restrict outgoing
                                                # pdg-ids to the incoming set
 
@@ -147,7 +150,7 @@ Each prepared dataset is a folder containing:
   The two `max_energy`-dependent channels (incoming energy scalar, `E_dep`) are
   stored in MeV and normalised at load time by `DataPrep.norm_e`.
 - `meta.json` — `ntokens`, `particles` (sorted outgoing PDG-ids), `particles_in`
-  (incoming PDG-ids the multiplicity model knows), `max_energy`, `cutoff_mev`,
+  (incoming PDG-ids), `max_energy`, `cutoff_mev`,
   `cond_scalars`, `energy_kin`.
 
 `ntokens = n_prefix + 1 + max_outgoing`, where `n_prefix = len(cond_scalars) + 1`
@@ -207,7 +210,7 @@ outside `attn_mask`), so the same `_F` views apply to generated samples.
 ## Config reference
 
 The config dict has eight top-level sections (`dl_conf`, `val_conf`,
-`base_conf`, `model_conf`, `mm_conf`, `opt_conf`, `odeint_conf`, `additional`).
+`base_conf`, `model_conf`, `opt_conf`, `odeint_conf`, `additional`).
 Any key not listed defaults to the value shown in the source.
 
 ### `dl_conf` — dataloader
@@ -300,30 +303,6 @@ versions once. Every config records `additional.x_transformers_version`; a
 checkpoint without it (or with an older one) gets its scale cubed at load so it
 reproduces exactly, while fresh configs use the library default of 10.
 
-### `mm_conf` — multiplicity model
-
-| Key | Default | Effect |
-|---|---|---|
-| `cond_scalars` | from `meta.json`, else `("Density",)` | Per-event conditioning scalars prepended to the incoming token; the input width is derived as `len(cond_scalars) + 7`. |
-| `max_energy` | from `meta.json` | Normalisation ceiling for the incoming energy scalar (`GenerateOut` rebases the input when the flow's ceiling differs). |
-| `canon_sym` | `False` | Canonicalise the incoming direction onto a reference cube face (`proj_in`). |
-| `train_inverse` | `False` | Also train `InvModel` (incoming PID from the outgoing set), needed by `GenerateIn`; `inv_h_dim`, `inv_n_layers`, `inv_n_heads`, `inv_model_args` default to the count model's. |
-| `h_dim` | `512` | Hidden dim of the Decoder. |
-| `n_layers`, `n_heads` | `6`, `8` | Decoder depth and heads. |
-| `dropout` | `0.1` | Shared attn / ff / layer / emb dropout. |
-| `pos_scale` | `50.0` | Multiplier on the position (last-3) part of the input before projection. |
-| `max_out_particles` | `meta.ntokens - (n_prefix + 1)` | Cap on per-pdg-type counts during data loading. |
-| `max_count` | derived from data | Categorical vocab size of each per-slot count head; computed once from the train set. |
-| `ptypes` | `meta.particles` (sorted) | Outgoing pdg-id vocabulary (`torch.tensor`). One Decoder slot per entry. |
-| `ptypes_in` | `meta.particles_in` (sorted) | Incoming pdg-id vocabulary; used for the input embedding. |
-| `bs` | `2**12` | Batch size. |
-| `lr`, `weight_decay`, `warmup_steps` | `1e-3`, `0.0`, `0` | Used only by the *default* `AdamWScheduleFree` (when `opt_conf` is absent). |
-| `post_emb_norm` | `True` | Forwarded to `ContinuousTransformerWrapper`. |
-| `use_abs_pos_emb` | `True` | Forwarded to `ContinuousTransformerWrapper`. Note the `use_` prefix. |
-| `model_args` | `{}` | Forwarded to `x-transformers` `Decoder` (same flag set as the FM encoder). |
-| `opt_conf` | `None` | Same schema as the FM-level `opt_conf` below (resolved by `build_optimizer`). If set, the flat `lr` / `weight_decay` / `warmup_steps` keys above are ignored and a `warnings.warn` is emitted for each. |
-| `fwd_compile` | `False` | Re-apply `torch.compile` to the count Decoder when a saved checkpoint is loaded by `GenerateOut`. `train.py` compiles it during training but unwraps it before saving, so generation otherwise runs eager. Plain compile, not `mode="reduce-overhead"` — the AR loop reuses its KV cache across steps and CUDA-graph capture rejects that. Measured 1.28x on the multiplicity phase at bs 8192; counts bit-identical under a fixed seed. |
-
 ### `opt_conf` — optimizer (FM model)
 
 Resolved by `build_optimizer`. Two shapes are accepted:
@@ -382,11 +361,10 @@ Free-form bag for logging only (`epochs`, `precision`, `notes`,
 | `legofmt/cfm/project_model.py`, `legofmt/cfm/solvers.py`, `legofmt/cfm/path_sampler.py` | `ProjectModel` keeps state/velocity on the manifold; `Solvers` mixin (`solve`, hand-unrolled midpoint/Euler steps, `log_likelihood`, `forward`); `ProductPathSampler` (one `GeodesicProbPath` per factor). |
 | `legofmt/main/modules.py` | `LEGOLtng`: construction, Lightning hooks, data split, optimizer wiring. Behaviour lives in the mixins `TrainStep` / `BaseDist` / `Solvers`. |
 | `legofmt/main/train_step.py` | `TrainStep`: training step, per-cell uncertainty weighting, `t` and mask sampling, flow-map loss gating. |
-| `legofmt/main/generate.py` | `GenerateOut` / `GenerateIn`: chain `MultModel` + `LEGOLtng` for end-to-end sampling; build the padded conditioning batch. |
+| `legofmt/main/generate.py` | `GenerateOut`: drives `LEGOLtng` for end-to-end sampling; builds the padded conditioning batch and applies the pass-through gate before the solve. |
 | `legofmt/base_dist/gen_base.py`, `legofmt/base_dist/base_nn.py` | `GenerateBase` samplers (`poles` / `iso` / `iso_pos`, `scale_dist`) and the learned per-event `base_head` (`BaseDist` mixin, pretraining, OT coupling). |
 | `legofmt/distill/distill.py`, `legofmt/distill/reflow.py` | Flow-map self-distillation loss; reflow teacher and the one-step `LEGOLtngDirect` variant. |
 | `legofmt/mod_comps/config.py`, `legofmt/mod_comps/optimizers.py` | Config resolution (`Resolved*Config`, manifold building, version stamps) and the optimizer registry (`BatchedMuon`, `"schedulefree"`, `"warmup_cosine"`). |
-| `legofmt/multiplicity/model.py` | Autoregressive Decoder over PDG-id slots producing per-type particle counts; optional `InvModel`. |
 | `legofmt/data/dataloaders.py` | `LEGODataset` (energy cutoff, sorting, NaN handling; collates to `DataStruct`) and `make_loader`. |
 | `legofmt/data/prep.py` | `DataPrep`: energy normalisation, `CubeTrace` ray projection, `manifold.projx`, the per-event scalar rows, `norm_e`/`norm_edep`. |
 | `legofmt/data/struct.py` | `DataStruct(f, m, am)`, the `_F` views, and the process-global `set_layout`. |

@@ -22,7 +22,7 @@ from legofmt.main.generate import GenerateOut
 from legofmt.main.modules import LEGOLtng
 from legofmt.mod_comps.config import resolve_legoltng_config
 from test_base_head_nout import _batch, _config
-from test_generate_direct import _flow_config, _save_mult_ckpt
+from test_generate_direct import _flow_config
 
 SLAB = [10.0, 100.0, 100.0]
 MANIFOLD = [{"name": "euclidean", "dim": 1},
@@ -81,7 +81,7 @@ def test_generate_preps_the_incoming_like_prep(tmp_path) -> None:
     torch.manual_seed(0)
     m = LEGOLtng({"state_dict": {}, "config": cfg})
     torch.save({"state_dict": m.model.vf.state_dict(), "config": cfg}, tmp_path / "flow.pt")
-    gen = GenerateOut(str(tmp_path / "flow.pt"), str(_save_mult_ckpt(tmp_path)), device="cpu")
+    gen = GenerateOut(str(tmp_path / "flow.pt"), device="cpu")
     cond = torch.tensor([[1.0, 150.0, 0.0, 0.0, -5.0, 30.0, 0.0, 22.0]])
     with torch.no_grad():
         sols, _, _ = gen(cond)

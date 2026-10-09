@@ -1,6 +1,6 @@
 """The pass-through gate: a primary that traverses without interacting.
 
-Replaces the ``MultModel.pt_head`` path that used to own this decision. The
+The
 species channel only resolves at ``t = 1``, so a short-circuit cannot be read
 off it -- the gate is its own small MLP over the conditioning, answered before
 the solve. A fired event must skip the ODE entirely and emit the primary

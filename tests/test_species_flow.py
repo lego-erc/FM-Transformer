@@ -159,7 +159,6 @@ def test_generate_out_needs_no_multiplicity_checkpoint(generator: GenerateOut) -
 
     torch.manual_seed(0)
     sols, _, attn = generator(cond)
-    assert generator.gen_mult is None
     out = _F(sols).out_p
     occupied = attn[:, generator.n_prefix + 1:]
     # the species column carries raw pdgids, and only on occupied slots

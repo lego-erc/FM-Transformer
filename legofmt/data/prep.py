@@ -2,7 +2,7 @@
 
 Applies the energy normalisation, the cube ray-trace, and the outgoing-relative
 energy transform (``cc_trafo``). Accepts either a full config or the flat dict
-``MultLoader`` passes, which carries no manifold.
+callers that carry no manifold.
 """
 
 
@@ -32,7 +32,7 @@ class DataPrep:
             cuboid_dim = model_conf.get("cuboid_dim")
         else:
             # manifold is only needed by cc_trafo (the dict path); norm_e-only
-            # users (MultLoader) legitimately have no manifold to give.
+            # some callers legitimately have no manifold to give.
             m = config.get("manifold")
             self.manifold = build_manifold(m) if m else None
             self.proj_ray = config.get("proj_ray")

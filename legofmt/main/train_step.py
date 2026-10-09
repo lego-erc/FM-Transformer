@@ -42,8 +42,8 @@ class TrainStep:
         """The weighted training loss, and the scalars the caller should log.
 
         ``w`` is a per-event weight that scales both numerator and denominator.
-        Pass-through events come in at 0: the gate owns them, exactly as
-        ``MultModel.training_step`` masked them out of its counts loss.
+        Pass-through events come in at 0: the gate owns them, so the flow is not
+        asked to model a mode it never generates.
         """
         g        = ((ds_t.m.full == 1) & (ds_t.am.full == 1)).unsqueeze(-1)
         if w is not None:

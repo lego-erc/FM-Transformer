@@ -2,7 +2,6 @@
 # Usage: python scripts/train.py configs/fm_default.yaml
 
 run:
-  train_model: fm            # fm | mult
   name: rp_fm_v3_ddtv_220726
   devices: [1, 2, 4, 6, 7]
   nodes: 1                   # number of nodes (SLURM --nodes / Trainer num_nodes); devices are per node
