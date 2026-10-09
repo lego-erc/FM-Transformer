@@ -145,8 +145,13 @@ class TrainStep:
         return loss + w * sc
 
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
+        n0 = self.rc.n_prefix + 1
         with torch.no_grad():
-            ds_t = DataStruct(ds_t.f.full, self._sample_mask(ds_t), ds_t.am.full)
+            m      = self._sample_mask(ds_t)
+            gen_sp = (m[:, self.rc.n_prefix] == 0).unsqueeze(-1)
+            m      = m.clone()
+            m[:, n0:] |= gen_sp
+            ds_t = DataStruct(ds_t.f.full, m, ds_t.am.full)
             if self.rc.overflow_delta > 0:
                 ds_t = self._shift_overflow_targets(ds_t)
             if self.sym is not None:
@@ -154,9 +159,19 @@ class TrainStep:
                 face = self.sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
                 g    = torch.randint(8, face.shape, device=face.device) if self.rc.sym_aug else None
                 ds_t = DataStruct(self._canon_dirs(ds_t.f.full, face, fwd, g=g), ds_t.m.full, ds_t.am.full)
-            base      = self.gen_base_wrapper(ds_t)
-            pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
-            t = self._sample_t(ds_t)
+            base = self.gen_base_wrapper(ds_t)
+            s1   = self.convert_pdgids(ds_t.f.pdgids).squeeze(-1)  # NaN pad -> class 0
+            t    = self._sample_t(ds_t)
+            rows = (torch.arange(m.shape[1], device=m.device) >= n0) & gen_sp
+            s_t  = torch.where(
+                rows & (torch.rand_like(s1, dtype=t.dtype) >= t.unsqueeze(-1)),
+                torch.randint_like(s1, self.rc.model_args["npdgids"]), s1,
+            )
+            pad  = (~ds_t.am.full & rows).unsqueeze(-1)
+            ds_t = DataStruct(
+                torch.cat((torch.where(pad, base, ds_t.f.model_in), ds_t.f.pdgids), dim=-1),
+                m, ds_t.am.full | rows,
+            )
             if (
                 self.reflow_teacher is not None and self.training
                 and self.global_step % self.rc.reflow_every == 0
@@ -172,17 +187,24 @@ class TrainStep:
             ps_ = self.ps.sample(base, ds_t.f.model_in, t)
         step_extras = ({"d": torch.zeros_like(ps_.t)}
                        if getattr(self.model.vf, "step_cond", False) else {})
-        v_out = self.model(
+        v_out, sp_logits = self.model(
             ps_.x_t, ps_.t,
             mask=ds_t.m.full, attn_mask=ds_t.am.full,
-            types=self.types_embd, pdgids=pdgid_idx, **step_extras,
+            types=self.types_embd, pdgids=s_t, return_species=True, **step_extras,
         )
         sq = (v_out - ps_.dx_t) ** 2
         loss, logs = self.reduce_loss(sq, ds_t)
+        if rows.any():
+            lg, tg  = sp_logits[rows], s1[rows]
+            loss_sp = torch.nn.functional.cross_entropy(lg, tg)
+            loss    = loss + self.rc.species_fac * loss_sp
+            if self.training:
+                logs = {**logs, "loss/species": loss_sp.detach(),
+                        "loss/species_acc": (lg.argmax(-1) == tg).float().mean()}
         if logs:
             self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
 
-        loss = self._flow_map_loss(loss, base, ds_t, pdgid_idx)
+        loss = self._flow_map_loss(loss, base, ds_t, s_t)
 
         return loss
 

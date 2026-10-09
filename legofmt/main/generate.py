@@ -1,10 +1,12 @@
 """``GenerateOut``: the multiplicity and flow checkpoints composed into a generator.
 
-``gen_batch`` runs the multiplicity model to size the output slots and build the
-padded ``(cond_fm, mask, attn_mask)`` tuple, then ``LEGOLtng.forward`` flows the
-base distribution to particles. The conditioning momentum must be energy-scaled
-rather than unit-norm, or the event conditions on a ~1 MeV particle. ``GenerateIn``
-is the reverse direction and needs a ``train_inverse`` multiplicity checkpoint.
+``gen_batch`` builds the padded ``(cond_fm, mask, attn_mask)`` tuple with every
+outgoing slot a candidate, then ``LEGOLtng.forward`` flows the base distribution
+to particles -- the species channel, and with it the multiplicity, is generated
+by the flow, so no multiplicity checkpoint is needed. The conditioning momentum
+must be energy-scaled rather than unit-norm, or the event conditions on a ~1 MeV
+particle. ``GenerateIn`` is the reverse direction and still needs a
+``train_inverse`` multiplicity checkpoint for the incoming-PID head.
 """
 
 from dataclasses import replace
@@ -25,7 +27,7 @@ class GenerateOut(torch.nn.Module):
     flow_cls = LEGOLtng
 
     def __init__(
-        self, flow_conf_path: str, mult_conf_path: str,
+        self, flow_conf_path: str, mult_conf_path: str | None = None,
         device="cpu", couple_in_out_pdgids=False,
     ):
         super().__init__()
@@ -36,48 +38,32 @@ class GenerateOut(torch.nn.Module):
         self.n_prefix = self.model.rc.n_prefix
         self.n_cond = len(self.cond_names)  # = n_prefix - 1 (edep excluded)
 
-        mult_conf = torch.load(mult_conf_path, map_location=device, weights_only=False)
-        self.gen_mult = MultModel(mult_conf).to(device)
-
-        if mult_conf["config"]["mm_conf"].get("fwd_compile", False) and not is_compiled(
-            self.gen_mult.model
-        ):
-            self.gen_mult.model = torch.compile(self.gen_mult.model, dynamic=False)
-
-        self.pdgid_in = mult_conf["config"]["mm_conf"]["ptypes_in"].to(device)
-        self.ptypes = mult_conf["config"]["mm_conf"]["ptypes"].to(device)
-
-        mm_cond = mult_conf["config"]["mm_conf"].get("cond_scalars")
-        self.n_mult_cond = len(mm_cond) if mm_cond else self.gen_mult.proj_in_.in_features - 7
-        if mm_cond and tuple(mm_cond) != self.cond_names[:self.n_mult_cond]:
-            raise ValueError(
-                f"mult cond_scalars {tuple(mm_cond)} is not a prefix of the flow's "
-                f"{self.cond_names}; cond carries only the flow's scalars."
-            )
-
-        mm_max = mult_conf["config"]["mm_conf"].get("max_energy")
-        self.mult_e_scale = 1.0
-        if mm_max and mm_max != self.model.rc.max_energy:
-            cut = self.model.rc.cutoff_mev
-            self.mult_e_scale = float(
-                torch.tensor(self.model.rc.max_energy / cut).log()
-                / torch.tensor(mm_max / cut).log()
-            )
-
         set_layout(self.cond_names)
-
-        if couple_in_out_pdgids:
-            self.model.rc.odeint_conf["filter_pdgid"] = self.pdgid_in
 
         self.max_seq_l = flow_conf["config"]["model_conf"]["model_args"]["max_seq_l"]
         self.pdgids = flow_conf["config"]["model_conf"]["pdgids"].to(device)
-        self.ptype_idx = torch.searchsorted(self.ptypes, self.pdgids).clamp(max=len(self.ptypes) - 1)
-        self.ptype_in_mask = self.ptypes[self.ptype_idx] == self.pdgids
         self.proj_ray = CubeTrace(flow_conf["config"]["model_conf"].get("cuboid_dim"))
         self.cuboid_dim = self.proj_ray.cuboid_dim  # kept apart: no_raytrace models stub proj_ray
         self.pen = EnergyProjections(
             cutoff_mev=self.model.rc.cutoff_mev, max_energy=self.model.rc.max_energy,
         )
+
+        self.gen_mult = None
+        self.pdgid_in = self.ptypes = self.pdgids
+        if mult_conf_path is not None:
+            mult_conf = torch.load(mult_conf_path, map_location=device, weights_only=False)
+            self.gen_mult = MultModel(mult_conf).to(device)
+            if mult_conf["config"]["mm_conf"].get("fwd_compile", False) and not is_compiled(
+                self.gen_mult.model
+            ):
+                self.gen_mult.model = torch.compile(self.gen_mult.model, dynamic=False)
+            self.pdgid_in = mult_conf["config"]["mm_conf"]["ptypes_in"].to(device)
+            self.ptypes = mult_conf["config"]["mm_conf"]["ptypes"].to(device)
+        self.ptype_idx = torch.searchsorted(self.ptypes, self.pdgids).clamp(max=len(self.ptypes) - 1)
+        self.ptype_in_mask = self.ptypes[self.ptype_idx] == self.pdgids
+
+        if couple_in_out_pdgids:
+            self.model.rc.odeint_conf["filter_pdgid"] = self.pdgid_in
 
     def __call__(self, cond: torch.Tensor, prepped: bool = False, gt_mult = None):
         """``cond`` is ``[B, n_cond + 7] = [*cond_scalars, mom * E_MeV (3), pos (3), pdgid]``;
@@ -94,18 +80,7 @@ class GenerateOut(torch.nn.Module):
             cond_model = torch.cat(
                 (cond_model[:, :nc], e, dir_, pos, cond_model[:, nc + 6:]), dim=-1
             )
-        cond_fm, mask, attn_mask = self.gen_batch(cond_model, gt_mult=gt_mult)
-        pt_mask = mask.sum(-1) == 0
-        if pt_mask.all():
-            sols = cond_fm.clone()
-        elif pt_mask.any():
-            keep_events = ~pt_mask
-            sub, _, _ = self.model(
-                (cond_fm[keep_events], mask[keep_events], attn_mask[keep_events]))
-            sols = cond_fm.clone()
-            sols[keep_events] = sub.to(sols.dtype)
-        else:
-            sols, mask, attn_mask = self.model((cond_fm, mask, attn_mask))
+        sols, mask, attn_mask = self.model(self.gen_batch(cond_model, gt_mult=gt_mult))
         sols[..., -1] = torch.cat([sols.new_zeros(1), self.pdgids.to(sols.dtype)])[sols[..., -1].long()]
         return sols, mask, attn_mask
 
@@ -180,59 +155,42 @@ class GenerateOut(torch.nn.Module):
         }
 
     def gen_batch(self, cond: torch.Tensor, gt_mult: torch.Tensor | None = None):
-        """Sample per-pdgid counts, truncate to ``max_seq_l``, and build the padded
-        ``(cond_fm, mask, attn_mask)`` triple the flow consumes."""
-        pdgid_in = cond[:, -1].long()
-        pdgid_in_idx = torch.searchsorted(self.pdgid_in, pdgid_in).clamp(max=len(self.pdgid_in) - 1)
-        if (self.pdgid_in[pdgid_in_idx] != pdgid_in).any():
-            raise ValueError(f"incoming pdgid(s) not in the mult model's ptypes_in={self.pdgid_in.tolist()}")
-        mult_in = torch.cat(
-            (cond[:, :self.n_mult_cond], cond[:, self.n_cond:self.n_cond + 7]), dim=-1
-        )
-        if gt_mult is not None:
-            assert gt_mult.shape == (cond.shape[0], self.ptypes.shape[0])
-            mult = gt_mult.long()
-        else:
-            if self.mult_e_scale != 1.0:
-                mult_in[:, self.n_mult_cond] = (
-                    mult_in[:, self.n_mult_cond] * self.mult_e_scale
-                ).clamp(0.0, 1.0)
-            pt_mask = self.gen_mult.sample_passthrough(mult_in, pdgid_in_idx)
-            mult = self.gen_mult((mult_in, None, pdgid_in_idx), pt_mask=pt_mask)
-        mult = mult[:, self.ptype_idx] * self.ptype_in_mask
+        """Build the padded ``(cond_fm, mask, attn_mask)`` triple the flow consumes.
 
+        Every outgoing slot is a candidate carrying the pad species 0, which is
+        what makes the flow generate it; the multiplicity is then read off the
+        slots that did not resolve back to 0. Passing ``gt_mult`` instead pins
+        each slot's species to a given per-pdgid count, which the solver leaves
+        untouched -- the kinematics are still generated.
+        """
+        B = cond.shape[0]
         max_particles = self.max_seq_l - (self.n_prefix + 1)
-        total = mult.sum(-1, keepdim=True)
-        scale = (max_particles / total).clamp(max=1.0)
-        mult = (mult * scale).long()
-        scaled = total > max_particles
-        remaining = (scaled * (max_particles - mult.sum(-1, keepdim=True))).clamp(min=0)
-        dist = torch.multinomial(mult.float().clamp(min=1), max_particles, replacement=True)
-        valid = (torch.arange(max_particles, device=mult.device) < remaining).long()
-        mult.scatter_add_(-1, dist, valid)
-
-        idx = torch.arange(max_particles, device=mult.device)
-        occupied = idx < mult.sum(-1, keepdim=True)
-        # species boundaries at the cumulative counts; the extra column absorbs
-        # boundaries landing on max_particles so a saturated event's last slot is
-        # not relabelled with a species the model predicted zero of
-        bounds = mult.new_zeros(mult.shape[0], max_particles + 1)
-        bounds.scatter_add_(-1, mult.cumsum(-1)[..., :-1], torch.ones_like(bounds))
-        pdgid_pad = bounds.cumsum_(-1)[:, :max_particles]
-
         conds = cond[:, :self.n_cond]           # per-event conditioning scalars
         in_tok = cond[:, self.n_cond:].clone()  # [e, dir(3), pos(3), pdgid] (8 cols)
         in_tok[..., -1] = self.model.convert_pdgids(in_tok[..., -1])
         in_tok = in_tok[:, None, :]
         out_tok = in_tok.repeat(1, max_particles, 1)
-        out_tok[..., -1] = occupied * (pdgid_pad + 1)
+
+        if gt_mult is None:
+            occupied = torch.ones(B, max_particles, dtype=torch.bool, device=cond.device)
+            out_tok[..., -1] = 0
+        else:
+            assert gt_mult.shape == (B, self.ptypes.shape[0])
+            mult = gt_mult.long()[:, self.ptype_idx] * self.ptype_in_mask
+            idx = torch.arange(max_particles, device=cond.device)
+            occupied = idx < mult.sum(-1, keepdim=True)
+            bounds = mult.new_zeros(B, max_particles + 1)
+            bounds.scatter_add_(
+                -1, mult.cumsum(-1)[..., :-1].clamp(max=max_particles),
+                torch.ones_like(bounds),
+            )
+            out_tok[..., -1] = occupied * (bounds.cumsum_(-1)[:, :max_particles] + 1)
+
         cond_fm = torch.cat(
             (torch.zeros_like(in_tok).expand(-1, self.n_prefix, -1), in_tok, out_tok), dim=1
         )
-
         attn_mask = torch.cat(
-            (torch.ones_like(occupied[:, :1]).repeat(1, self.n_prefix + 1), occupied), dim=1
-        )
+            (torch.ones_like(occupied[:, :1]).repeat(1, self.n_prefix + 1), occupied), dim=1)
         mask = attn_mask.clone().long()
         cond_idx = [0, *range(2, self.n_prefix), self.n_prefix]  # cond scalars + incoming; edep stays 1
         mask[:, cond_idx] = 0
@@ -240,13 +198,6 @@ class GenerateOut(torch.nn.Module):
         for j in range(1, self.n_cond):
             cond_fm[:, j + 1, 0] = conds[:, j]
         _F(cond_fm).non_p[..., 1:-1] = 1
-        if pt_mask.any():
-            edep = _F(cond_fm).edep
-            edep[pt_mask] = 0.0
-            out = _F(cond_fm).out_p
-            out[pt_mask, :, 0] = 0.0
-            mask = mask.clone()
-            mask[pt_mask] = 0
         return cond_fm, mask, attn_mask
 
 
@@ -266,6 +217,11 @@ class GenerateIn(GenerateOut):
         out_pid = torch.searchsorted(
             self.ptypes, ds.f.out_p[..., -1].long()
         ).clamp(max=len(self.ptypes) - 1)
+        if self.gen_mult is None:
+            raise RuntimeError(
+                "GenerateIn needs a train_inverse multiplicity checkpoint: "
+                "construct it with mult_conf_path set."
+            )
         pid_in_idx = self.gen_mult((out_tok, out_pid, ds.am.out_p.bool(), ds.f.edep))
         # The flow runs with pdgid_is_idx=True: swap the raw ids the mult
         # model consumed above for flow-vocabulary indices.

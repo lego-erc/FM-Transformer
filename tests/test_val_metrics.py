@@ -87,12 +87,21 @@ class _StubLego:
 
     class rc:
         odeint_conf = {"step_size": 0.5}
+        n_prefix = 2
+
+    pdgids_template = torch.tensor([-11, 11, 22])
 
     def gen_base_wrapper(self, ds_t):
         return ds_t.f.model_in.clone()
 
-    def solve(self, ds_t, x_init, **_kw):
-        return x_init
+    def solve(self, ds_t, x_init, return_species=False, **_kw):
+        if not return_species:
+            return x_init
+        # identity on the kinematics, and the classes the fixtures below build
+        # their pdgid column from ([0, 0, 0, 11, -11, 22, 11, 0] as 1-based
+        # indices into pdgids_template), so one slot comes out empty
+        sp = torch.tensor([0, 0, 0, 2, 1, 3, 2, 0]).expand(x_init.shape[0], -1)
+        return x_init, sp
 
 
 def test_shower_val_metrics_returns_loggable_dict():
@@ -171,6 +180,7 @@ def test_static_val_metric_keys_are_still_synced():
     synced = {k for k in out if not k.startswith(UNSYNCED_PREFIXES)}
     assert synced == (
         {"val/mmd_particle", "val/mmd_summary"}
+        | {"val/w1_mult", "val/mult_ratio", "val/passthrough_err"}
         | {f"val/w1_particle/{n}" for n in KIN_NAMES}
         | {f"val/w1_summary/{n}" for n in SUMMARY_FEATURE_NAMES}
     )

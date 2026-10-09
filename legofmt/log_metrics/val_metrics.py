@@ -32,7 +32,7 @@ PRIMARY_TAGS = {11: "em", -11: "ep", 22: "g", 2212: "p", 2112: "n",
 # Which keys edep_by_primary can emit. Their presence depends on the species and the
 # multiplicities a rank's own shard happens to hold, so they must never be logged with
 # sync_dist: ranks would issue different numbers of collectives and NCCL would deadlock.
-UNSYNCED_PREFIXES = ("val/w1_edep/", "val/edep_ratio_multi/")
+UNSYNCED_PREFIXES = ("val/w1_edep/", "val/edep_ratio_multi/", "val/w1_mult/")
 
 
 def _spherical(mom, e, pos):
@@ -128,32 +128,58 @@ def edep_by_primary(edep_real, edep_fake, pdgid_in, n_out) -> dict:
     return out
 
 
+def multiplicity_metrics(active, pdg, g_active, g_pdg) -> dict:
+    """How well the generated per-event counts match the real ones.
+
+    The flow generates the species channel, so the multiplicity is an output and
+    needs metrics of its own: every other number here is computed on whichever
+    slots came out active, and so would not move if the counts were wrong.
+    """
+    n_r, n_f = active.sum(-1).float(), g_active.sum(-1).float()
+    out = {
+        "val/w1_mult": w1_per_feature(n_r, n_f),
+        "val/mult_ratio": n_f.mean() / n_r.mean().clamp(min=1e-8),
+        "val/passthrough_err": (n_f == 0).float().mean() - (n_r == 0).float().mean(),
+    }
+    for pid, tag in zip(_TYPES, _TYPE_TAGS):
+        c_r = ((pdg == pid) & active).sum(-1).float()
+        if not bool((c_r > 0).any()):
+            continue
+        c_f = ((g_pdg == pid) & g_active).sum(-1).float()
+        out[f"val/w1_mult/{tag}"] = w1_per_feature(c_r, c_f)
+    return out
+
+
 class ShowerValMetrics:
 
     def __call__(self, lego, ds_t) -> dict:
-        gen = self._generate(lego, ds_t)
+        gen, g_active, g_pdg = self._generate(lego, ds_t)
         gout = _F(gen).out_p
         active, pdg, rcc = ds_t.am.out_p, ds_t.f.out_p[..., -1], ds_t.f.out_cc
         reps = {
             "particle": (
                 KIN_NAMES,
                 particle_kinematics(rcc[..., 1:4], rcc[..., 0:1], rcc[..., 4:7], active),
-                particle_kinematics(gout[..., 1:4], gout[..., 0:1], gout[..., 4:7], active),
+                particle_kinematics(gout[..., 1:4], gout[..., 0:1], gout[..., 4:7], g_active),
             ),
             "summary": (
                 SUMMARY_FEATURE_NAMES,
                 event_summary(rcc[..., 1:4], rcc[..., 0:1], rcc[..., 4:7], pdg, active, ds_t.f.edep),
-                event_summary(gout[..., 1:4], gout[..., 0:1], gout[..., 4:7], pdg, active, _F(gen).edep),
+                event_summary(gout[..., 1:4], gout[..., 0:1], gout[..., 4:7],
+                              g_pdg, g_active, _F(gen).edep),
             ),
         }
         out = {}
         for tag, (names, real, fake) in reps.items():
+            n = min(real.shape[0], fake.shape[0])
+            real, fake = real[:n], fake[:n]
             real_s, fake_s = standardize(real, fake)
             out[f"val/mmd_{tag}"] = compute_mmd(fake_s, real_s)
             out.update({
-                f"val/w1_{tag}/{n}": w1
-                for n, w1 in zip(names, w1_per_feature(fake_s, real_s))
+                f"val/w1_{tag}/{n_}": w1
+                for n_, w1 in zip(names, w1_per_feature(fake_s, real_s))
             })
+        out.update(multiplicity_metrics(active, pdg, g_active, g_pdg))
         out.update(edep_by_primary(
             ds_t.f.edep, _F(gen).edep, ds_t.f.in_p[..., 0, -1].long(),
             ds_t.am.out_p.sum(-1),
@@ -163,15 +189,32 @@ class ShowerValMetrics:
     @staticmethod
     def _generate(lego, ds_t):
         """Generate with the ``odeint_conf`` solver settings, canonicalising the
-        directions first when ``canon_sym`` is on, exactly as ``Solvers.forward``."""
+        directions first when ``canon_sym`` is on, exactly as ``Solvers.forward``.
+
+        Returns ``(features, active, pdgid)``: the occupancy and the species come
+        out of the flow, so neither may be taken from the batch.
+        """
         cfg = lego.rc.odeint_conf
         sym = getattr(lego, "sym", None)
         if sym is not None:
             fwd  = ds_t.m.full[:, lego.rc.n_prefix] == 0
             face = sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
             ds_t = DataStruct(lego._canon_dirs(ds_t.f.full, face, fwd), ds_t.m.full, ds_t.am.full)
-        out = lego.solve(
-            ds_t, x_init=lego.gen_base_wrapper(ds_t),
+
+        n0  = lego.rc.n_prefix + 1
+        gen = (ds_t.m.full[:, lego.rc.n_prefix] == 0).unsqueeze(-1)
+        m   = ds_t.m.full.clone()
+        m[:, n0:] |= gen.long()            # every outgoing slot is a candidate
+        base = lego.gen_base_wrapper(DataStruct(ds_t.f.full, m, ds_t.am.full))
+        f = ds_t.f.full.clone()
+        f[:, n0:, -1] = torch.where(gen, torch.zeros_like(f[:, n0:, -1]), f[:, n0:, -1])
+        out, sp = lego.solve(
+            DataStruct(f, m, ds_t.am.full | (m == 1)), x_init=base,
             step_size=cfg.get("step_size", 0.04), method=cfg.get("method", "midpoint"),
+            return_species=True,
         )
-        return out if sym is None else lego._canon_dirs(out, face, fwd, inverse=True)
+        if sym is not None:
+            out = lego._canon_dirs(out, face, fwd, inverse=True)
+        tmpl = lego.pdgids_template
+        raw  = torch.cat((tmpl.new_zeros(1), tmpl))[sp]
+        return out, (sp[:, n0:] > 0), raw[:, n0:]

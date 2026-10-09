@@ -209,12 +209,16 @@ class BaseDist:
         self.gen_base.kappa    = kap.detach()
         self.gen_base.ang_pow  = None if pw is None else pw.detach()
 
-    def _ot_couple(self, base: Tensor, ds_t, data: Tensor) -> Tensor:
+    def _ot_couple(self, base: Tensor, ds_t) -> Tensor:
         """Per-event Hungarian assignment of base slots to data slots, blocked across
-        pdgids and valid/pad pairs; base samples are pdgid-independent so permuting is free."""
+        pdgids and valid/pad pairs; base samples are pdgid-independent so permuting is free.
+
+        The species block stays even though the species is now generated: it
+        constrains only which *kinematic* draw lands on which particle, and
+        dropping it collapses the per-species energy spectra (tests/test_ot_same_pdgid.py).
+        The species path is sampled independently of this assignment."""
         if slap is None:
             raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
-        base = base.where(ds_t.am.full.unsqueeze(-1), data)
         pid  = ds_t.f.out_p[..., -1]
         blocked = (
             ds_t.am.out_p.unsqueeze(-1).logical_xor(ds_t.am.out_p.unsqueeze(-2))
@@ -222,7 +226,7 @@ class BaseDist:
         )
         out = _F(base).out_p
         man = self.rc.manifold
-        tgt = ds_t.f.out_cc.unsqueeze(-2).split(man.ambient_dims, dim=-1)
+        tgt = ds_t.f.out_cc.nan_to_num(1.0).unsqueeze(-2).split(man.ambient_dims, dim=-1)
         ref = out.unsqueeze(-3).split(man.ambient_dims, dim=-1)
         cost = sum(
             (((a * b).sum(-1).float().clamp(-1 + 1e-6, 1 - 1e-6).acos()
@@ -252,7 +256,7 @@ class BaseDist:
             (ds_t.f.non_cc, self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc)), dim=1,
         )
         if self.rc.ot_coupling and self.model.training:
-            base = self._ot_couple(base, ds_t, data)
+            base = self._ot_couple(base, ds_t)
         base = self.gen_base.insert_add(base)
         noise = base if noise is None else torch.where(fwd.view(-1, 1, 1), base, noise)
         return torch.where((m == 1).unsqueeze(-1), noise, data)

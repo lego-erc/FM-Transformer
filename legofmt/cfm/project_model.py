@@ -41,16 +41,20 @@ class ProjectModel(nn.Module):
         types: Tensor,
         pdgids: Tensor | None = None,
         d: Tensor | None = None,
-    ) -> Tensor:
+        return_species: bool = False,
+    ) -> Tensor | tuple[Tensor, Tensor]:
         x_proj, x_att = self._prep_x(x, attn_mask)
         t = torch.atleast_2d(t).expand_as(attn_mask)
         t = torch.where(mask == 1, t, 1.0)  # conditions get t=1
         if getattr(self.vf, "step_cond", False):
             d = torch.zeros_like(t) if d is None else torch.atleast_2d(d).expand_as(attn_mask)
             d = torch.where(mask == 1, d, 0.0)  # conditions are not transported
-        v = self.vf(x_att, mask, attn_mask, types, pdgids, t=t, d=d)
+        out = self.vf(x_att, mask, attn_mask, types, pdgids, t=t, d=d,
+                      return_species=return_species)
+        v, species = out if return_species else (out, None)
         v_proj = self.manifold.proju(x_proj, v)
-        return torch.where(attn_mask.unsqueeze(-1), v_proj, v)
+        v = torch.where(attn_mask.unsqueeze(-1), v_proj, v)
+        return (v, species) if return_species else v
 
 
 def uncompiled(module: nn.Module) -> nn.Module:

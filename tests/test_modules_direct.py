@@ -308,8 +308,9 @@ def test_flow_map_ladder_is_anchored_at_zero() -> None:
     supervised, teacher = set(), set()
     orig = model.model.vf.forward
 
-    def spy(x, mask, attn_mask, types, pdgids_, t=None, d=None):
-        out = orig(x, mask, attn_mask, types, pdgids_, t=t, d=d)
+    def spy(x, mask, attn_mask, types, pdgids_, t=None, d=None, return_species=False):
+        out = orig(x, mask, attn_mask, types, pdgids_, t=t, d=d,
+                   return_species=return_species)
         if d is not None:
             vals = {round(float(v), 8) for v in d[mask == 1]}
             (supervised if torch.is_grad_enabled() else teacher).update(vals)

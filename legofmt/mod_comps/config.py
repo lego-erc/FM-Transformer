@@ -60,6 +60,7 @@ class ResolvedLEGOConfig:
     pdgid_is_idx: bool
     one_step_euler_fac: float
     one_step_euler_sections: int
+    species_fac: float
     one_step_euler_every: int
     learned_loss_weights: bool
     edep_cell: bool
@@ -260,6 +261,7 @@ def _build_resolved(
         pdgid_is_idx=model_conf.get("pdgid_is_idx", False),
         one_step_euler_fac=model_conf.get("one_step_euler_fac", 0.0),
         one_step_euler_sections=sections,
+        species_fac=model_conf.get("species_fac", 1.0),
         one_step_euler_every=model_conf.get("one_step_euler_every", 1),
         learned_loss_weights=model_conf.get("learned_loss_weights", False),
         edep_cell=model_conf.get("edep_cell", False),

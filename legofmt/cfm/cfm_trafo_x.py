@@ -89,6 +89,7 @@ class CFMTrafo_x(nn.Module):
         self.cond_w_pdgids  = nn.Parameter(torch.empty(npdgids, 2, h_dim, in_dim))
         self.cond_bi_pdgids = nn.Parameter(torch.empty(npdgids, h_dim))
         self.cond_bo_pdgids = nn.Parameter(torch.empty(npdgids, in_dim))
+        self.species_head   = nn.Linear(h_dim, npdgids)
 
         w_std = xavier_gain * 3 ** 0.5 * (2.0 / (in_dim + h_dim)) ** 0.5
         for p in (self.cond_w_mask, self.cond_w_types, self.cond_w_pdgids):
@@ -148,7 +149,8 @@ class CFMTrafo_x(nn.Module):
         pdgids: Tensor | None,
         t: Tensor | None = None,
         d: Tensor | None = None,
-    ) -> Tensor:
+        return_species: bool = False,
+    ) -> Tensor | tuple[Tensor, Tensor]:
         if self.time_cond:
             tf = t.unsqueeze(-1) * self.freqs
             cond = torch.where(self.mask_freqs.bool(), tf.sin(), tf.cos())
@@ -167,4 +169,5 @@ class CFMTrafo_x(nn.Module):
         if self.training:
             embd = self.vf.emb_dropout(embd)
         h = self.vf.project_out(self.vf.attn_layers(embd, mask=attn_mask, condition=cond))
-        return self._project_out(h, mask, oh)
+        v = self._project_out(h, mask, oh)
+        return (v, self.species_head(h)) if return_species else v

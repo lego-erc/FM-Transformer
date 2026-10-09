@@ -54,14 +54,18 @@ class ProjectModelDirect(ProjectModel):
         attn_mask: Tensor,
         types: Tensor,
         pdgids: Tensor | None = None,
-    ) -> Tensor:
+        return_species: bool = False,
+    ) -> Tensor | tuple[Tensor, Tensor]:
         _, x_att = self._prep_x(x, attn_mask)
-        out_raw  = x_att + self.vf(x_att, mask, attn_mask, types, pdgids)
+        res = self.vf(x_att, mask, attn_mask, types, pdgids, return_species=return_species)
+        delta, species = res if return_species else (res, None)
+        out_raw  = x_att + delta
         gen = (mask == 1).unsqueeze(-1)
         ref = torch.zeros_like(out_raw)
         ref[..., [1, 4]] = 1.0
         safe = torch.where(gen, out_raw, ref)  # projx-safe filler at conditioning slots
-        return torch.where(gen, self.manifold.projx(safe), out_raw)
+        out = torch.where(gen, self.manifold.projx(safe), out_raw)
+        return (out, species) if return_species else out
 
 
 class LEGOLtngDirect(LEGOLtng):
@@ -86,18 +90,37 @@ class LEGOLtngDirect(LEGOLtng):
         return self.reflow_teacher.solve(ds_t, x_init=base, **solve_kwargs)
 
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
+        """Mirrors ``TrainStep._step``'s layout -- every outgoing slot a candidate,
+        pad slots targeting their own base draw -- but the class comes in at the uniform source rather than a ``t``-corruption:
+        there is no trajectory, so the head predicts ``x_1``'s class in one shot."""
+        n0 = self.rc.n_prefix + 1
         with torch.no_grad():
-            ds_t = DataStruct(ds_t.f.full, self._sample_mask(ds_t), ds_t.am.full)
-            base = self.gen_base_wrapper(ds_t)
-            pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
+            m      = self._sample_mask(ds_t)
+            gen_sp = (m[:, self.rc.n_prefix] == 0).unsqueeze(-1)
+            m      = m.clone()
+            m[:, n0:] |= gen_sp
+            ds_t   = DataStruct(ds_t.f.full, m, ds_t.am.full)
+            base   = self.gen_base_wrapper(ds_t)
+            s1     = self.convert_pdgids(ds_t.f.pdgids).squeeze(-1)
+            rows   = (torch.arange(m.shape[1], device=m.device) >= n0) & gen_sp
+            s_0    = torch.where(
+                rows, torch.randint_like(s1, self.rc.model_args["npdgids"]), s1)
+            pad    = (~ds_t.am.full & rows).unsqueeze(-1)
+            ds_t   = DataStruct(
+                torch.cat((torch.where(pad, base, ds_t.f.model_in), ds_t.f.pdgids), dim=-1),
+                m, ds_t.am.full | rows,
+            )
             target = self._reflow_target(ds_t, base)
-        pred = self.model(
+        pred, sp_logits = self.model(
             base,
             mask=ds_t.m.full, attn_mask=ds_t.am.full,
-            types=self.types_embd, pdgids=pdgid_idx,
+            types=self.types_embd, pdgids=s_0, return_species=True,
         )
         sq = (pred - target) ** 2
         loss, logs = self.reduce_loss(sq, ds_t)
+        if rows.any():
+            loss = loss + self.rc.species_fac * nn.functional.cross_entropy(
+                sp_logits[rows], s1[rows])
         if logs:
             self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
         return loss
@@ -108,21 +131,31 @@ class LEGOLtngDirect(LEGOLtng):
         ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]",
         x_init: Tensor | None = None,
         split_size: int | None = None,
+        return_species: bool = False,
         **_kw,
-    ) -> Tensor:
+    ) -> Tensor | tuple[Tensor, Tensor]:
         ds_t, pdgids_idx = self._prep_solve(ds_t)
         if x_init is None:
             x_init = self.gen_base_wrapper(ds_t)
 
-        def _fwd(x, m, a, pi):
-            return self.model(
-                x, mask=m, attn_mask=a, types=self.types_embd, pdgids=pi,
-            )
+        sp  = pdgids_idx.reshape(*ds_t.m.full.shape).long()
+        gen = self._species_gen(ds_t.m.full, sp)
+        sp  = torch.where(gen, torch.randint_like(sp, self.rc.model_args["npdgids"]), sp)
 
-        return self.chunked(
-            _fwd, x_init, ds_t.m.full, ds_t.am.full, pdgids_idx,
+        def _fwd(x, m, a, pi, g):
+            v, lg = self.model(
+                x, mask=m, attn_mask=a, types=self.types_embd, pdgids=pi,
+                return_species=True,
+            )
+            return torch.cat(
+                (v, torch.where(g, lg.argmax(-1), pi).unsqueeze(-1).to(v.dtype)), dim=-1)
+
+        res = self.chunked(
+            _fwd, x_init, ds_t.m.full, ds_t.am.full, sp, gen,
             split_size=split_size,
         )
+        out, sp_out = res[..., :-1], res[..., -1].long()
+        return (out, sp_out) if return_species else out
 
 
 class GenerateOutDirect(GenerateOut):
