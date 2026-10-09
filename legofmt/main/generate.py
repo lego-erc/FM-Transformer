@@ -79,7 +79,7 @@ class GenerateOut(torch.nn.Module):
             cutoff_mev=self.model.rc.cutoff_mev, max_energy=self.model.rc.max_energy,
         )
 
-    def __call__(self, cond: torch.Tensor, prepped: bool = False):
+    def __call__(self, cond: torch.Tensor, prepped: bool = False, gt_mult = None):
         """``cond`` is ``[B, n_cond + 7] = [*cond_scalars, mom * E_MeV (3), pos (3), pdgid]``;
         the momentum must be energy-scaled. ``prepped=True`` skips the ray-trace and
         the energy split. Returns ``(sols, mask, attn_mask)`` in the ``(B, L, 8)`` layout."""
@@ -94,7 +94,7 @@ class GenerateOut(torch.nn.Module):
             cond_model = torch.cat(
                 (cond_model[:, :nc], e, dir_, pos, cond_model[:, nc + 6:]), dim=-1
             )
-        cond_fm, mask, attn_mask = self.gen_batch(cond_model)
+        cond_fm, mask, attn_mask = self.gen_batch(cond_model, gt_mult=gt_mult)
         pt_mask = mask.sum(-1) == 0
         if pt_mask.all():
             sols = cond_fm.clone()
@@ -109,7 +109,7 @@ class GenerateOut(torch.nn.Module):
         sols[..., -1] = torch.cat([sols.new_zeros(1), self.pdgids.to(sols.dtype)])[sols[..., -1].long()]
         return sols, mask, attn_mask
 
-    def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None):
+    def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None, gt_mult=None):
         """Geant4-shaped entry point: broadcast the per-gun arguments to ``B * n`` events
         and return ``{per_event, per_particle, per_voxel}`` in *model* normalisation
         (``per_event["E_dep"]`` is the normalised scalar, not MeV)."""
@@ -117,6 +117,9 @@ class GenerateOut(torch.nn.Module):
         pos, mom, energy, density, size, pdgids = (
             t.to(device) for t in (pos, mom, energy, density, size, pdgids)
         )
+
+        gt_mult = gt_mult.to(device) if gt_mult is not None else None
+
         Z = Z.to(device) if Z is not None else None
         A = A.to(device) if A is not None else None
 
@@ -135,11 +138,22 @@ class GenerateOut(torch.nn.Module):
             **{k: scalar_src[k].reshape(-1).shape[0] for k in self.cond_names},
         }
         B = max(shapes.values())
+
         err_size = {k: v for k, v in shapes.items() if v not in (1, B)}
         if err_size:
             raise ValueError(
                 f"Each argument must have either size 1 or batch size {B}; got {err_size}"
             )
+
+        if gt_mult is not None:
+            # gt_mult has one row per generated event, in the same flattened
+            # order gen_batch will build `cond` in: B*n rows, blocked B
+            # conditions of n consecutive events each (see _scalar_col below).
+            # Only B==1 or n==1 is reachable from lego-eval's callers today
+            # (make_simulate_for_model's own _check_simulate_shapes forbids
+            # B>1 and n>1 together), so there is no per-condition-block
+            # ordering ambiguity to guard against here.
+            assert gt_mult.shape == (B * n, self.ptypes.shape[0])
 
         mom = F.normalize(mom, dim=-1)
 
@@ -155,7 +169,7 @@ class GenerateOut(torch.nn.Module):
         pdgids_b = _scalar_col(pdgids).to(cc.dtype)
         cond = torch.cat((conds_b, cc, pdgids_b), dim=-1)
 
-        sols, _, _ = self(cond)
+        sols, _, _ = self(cond, gt_mult=gt_mult)
         s = _F(sols)
         per_event = {"E_dep": s.edep}
         per_event.update({k: s.cond(k) for k in self.cond_names})
@@ -165,7 +179,7 @@ class GenerateOut(torch.nn.Module):
             "per_voxel": {"E_dep": sols.new_empty(sols.shape[0], 0, 4)},
         }
 
-    def gen_batch(self, cond: torch.Tensor):
+    def gen_batch(self, cond: torch.Tensor, gt_mult: torch.Tensor | None = None):
         """Sample per-pdgid counts, truncate to ``max_seq_l``, and build the padded
         ``(cond_fm, mask, attn_mask)`` triple the flow consumes."""
         pdgid_in = cond[:, -1].long()
@@ -175,12 +189,16 @@ class GenerateOut(torch.nn.Module):
         mult_in = torch.cat(
             (cond[:, :self.n_mult_cond], cond[:, self.n_cond:self.n_cond + 7]), dim=-1
         )
-        if self.mult_e_scale != 1.0:
-            mult_in[:, self.n_mult_cond] = (
-                mult_in[:, self.n_mult_cond] * self.mult_e_scale
-            ).clamp(0.0, 1.0)
-        pt_mask = self.gen_mult.sample_passthrough(mult_in, pdgid_in_idx)
-        mult = self.gen_mult((mult_in, None, pdgid_in_idx), pt_mask=pt_mask)
+        if gt_mult is not None:
+            assert gt_mult.shape == (cond.shape[0], self.ptypes.shape[0])
+            mult = gt_mult.long()
+        else:
+            if self.mult_e_scale != 1.0:
+                mult_in[:, self.n_mult_cond] = (
+                    mult_in[:, self.n_mult_cond] * self.mult_e_scale
+                ).clamp(0.0, 1.0)
+            pt_mask = self.gen_mult.sample_passthrough(mult_in, pdgid_in_idx)
+            mult = self.gen_mult((mult_in, None, pdgid_in_idx), pt_mask=pt_mask)
         mult = mult[:, self.ptype_idx] * self.ptype_in_mask
 
         max_particles = self.max_seq_l - (self.n_prefix + 1)
