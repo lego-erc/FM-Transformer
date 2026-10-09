@@ -165,3 +165,29 @@ def test_generate_out_needs_no_multiplicity_checkpoint(generator: GenerateOut) -
     assert torch.equal(occupied, out[..., -1] != 0)
     assert torch.isin(out[..., -1][occupied], generator.pdgids.to(out.dtype)).all()
     assert out[..., :7][~occupied].isnan().all()
+
+
+def test_reflow_supervises_the_teacher_s_classes(tmp_path) -> None:
+    """The teacher's transport describes the event *it* sampled classes for, so the
+    species target has to come from the teacher too -- otherwise the kinematic and
+    species targets describe different events."""
+    cfg = _tiny_config()["config"]
+    teacher = LEGOLtng({"state_dict": {}, "config": cfg})
+    path = tmp_path / "teacher.pt"
+    torch.save({"state_dict": teacher.model.vf.state_dict(), "config": cfg}, path)
+
+    cfg = _tiny_config()
+    cfg["config"]["model_conf"].update(reflow_path=str(path), reflow_every=1)
+    model = LEGOLtng(cfg)
+    model.on_fit_start(); model.train()
+
+    seen = {}
+    orig = torch.nn.functional.cross_entropy
+    torch.nn.functional.cross_entropy = lambda lg, tg, *a, **k: (
+        seen.setdefault("tg", tg.clone()), orig(lg, tg, *a, **k))[1]
+    try:
+        loss = model._step(_padded_batch(), 0)
+    finally:
+        torch.nn.functional.cross_entropy = orig
+    assert torch.isfinite(loss)
+    assert seen["tg"].unique().numel() > 1, "species target did not follow the teacher"

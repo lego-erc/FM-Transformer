@@ -175,27 +175,27 @@ class TrainStep:
             s1   = self.convert_pdgids(ds_t.f.pdgids).squeeze(-1)  # NaN pad -> class 0
             t    = self._sample_t(ds_t)
             rows = (torch.arange(m.shape[1], device=m.device) >= n0) & gen_sp
-            s_t  = torch.where(
-                rows & (torch.rand_like(s1, dtype=t.dtype) >= t.unsqueeze(-1)),
-                torch.randint_like(s1, self.rc.model_args["npdgids"]), s1,
-            )
-            pad  = (~ds_t.am.full & rows).unsqueeze(-1)
-            ds_t = DataStruct(
-                torch.cat((torch.where(pad, base, ds_t.f.model_in), ds_t.f.pdgids), dim=-1),
-                m, ds_t.am.full | rows,
-            )
+            data = ds_t.f.model_in
             if (
                 self.reflow_teacher is not None and self.training
                 and self.global_step % self.rc.reflow_every == 0
             ):  # reflow: couple base to the teacher's transport of it
-                tgt = self.reflow_teacher.solve(ds_t, x_init=base, **self.rc.reflow_kwargs)
-                tgt = torch.where((ds_t.m.full == 1).unsqueeze(-1), tgt, ds_t.f.model_in)
+                data, sp = self.reflow_teacher.solve(
+                    ds_t, x_init=base, return_species=True, **self.rc.reflow_kwargs)
+                data = torch.where((ds_t.m.full == 1).unsqueeze(-1), data, ds_t.f.model_in)
                 # the E_dep row is generated but its direction columns are the (1,1,1)
                 # filler; transporting them gave that row an off-manifold target
-                tgt[:, :self.rc.n_prefix, 1:] = ds_t.f.non_cc[..., 1:]
-                ds_t = DataStruct(
-                    torch.cat((tgt, ds_t.f.pdgids), dim=-1), ds_t.m.full, ds_t.am.full,
-                )
+                data[:, :self.rc.n_prefix, 1:] = ds_t.f.non_cc[..., 1:]
+                s1 = torch.where(rows, sp, s1)
+            s_t  = torch.where(
+                rows & (torch.rand_like(s1, dtype=t.dtype) >= t.unsqueeze(-1)),
+                torch.randint_like(s1, self.rc.model_args["npdgids"]), s1,
+            )
+            pad  = (rows & (s1 == 0)).unsqueeze(-1)
+            ds_t = DataStruct(
+                torch.cat((torch.where(pad, base, data), ds_t.f.pdgids), dim=-1),
+                m, ds_t.am.full | rows,
+            )
             ps_ = self.ps.sample(base, ds_t.f.model_in, t)
         step_extras = ({"d": torch.zeros_like(ps_.t)}
                        if getattr(self.model.vf, "step_cond", False) else {})

@@ -80,14 +80,16 @@ class LEGOLtngDirect(LEGOLtng):
             rc.manifold,
         )
 
-    def _reflow_target(self, ds_t: DataStruct, base: Tensor) -> Tensor:
-        """The teacher's transport of ``base``, or the data target without one."""
+    def _reflow_target(self, ds_t: DataStruct, base: Tensor, s1: Tensor) -> tuple[Tensor, Tensor]:
+        """The teacher's transport of ``base`` and the classes that go with it, or
+        the data target and classes without a teacher."""
         if self.reflow_teacher is None:
-            return ds_t.f.model_in
+            return ds_t.f.model_in, s1
         solve_kwargs = dict(self.rc.reflow_kwargs)
         if solve_kwargs.get("method", "midpoint") == "midpoint":
             solve_kwargs.setdefault("time_grid", base.new_tensor([0.0, 1.0]))
-        return self.reflow_teacher.solve(ds_t, x_init=base, **solve_kwargs)
+        return self.reflow_teacher.solve(
+            ds_t, x_init=base, return_species=True, **solve_kwargs)
 
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
         """Mirrors ``TrainStep._step``'s layout -- every outgoing slot a candidate,
@@ -108,14 +110,15 @@ class LEGOLtngDirect(LEGOLtng):
             base   = self.gen_base_wrapper(ds_t)
             s1     = self.convert_pdgids(ds_t.f.pdgids).squeeze(-1)
             rows   = (torch.arange(m.shape[1], device=m.device) >= n0) & gen_sp
+            target, sp = self._reflow_target(ds_t, base, s1)
+            s1     = torch.where(rows, sp, s1)
             s_0    = torch.where(
                 rows, torch.randint_like(s1, self.rc.model_args["npdgids"]), s1)
-            pad    = (~ds_t.am.full & rows).unsqueeze(-1)
+            pad    = (rows & (s1 == 0)).unsqueeze(-1)
+            target = torch.where(pad, base, target)
             ds_t   = DataStruct(
-                torch.cat((torch.where(pad, base, ds_t.f.model_in), ds_t.f.pdgids), dim=-1),
-                m, ds_t.am.full | rows,
+                torch.cat((target, ds_t.f.pdgids), dim=-1), m, ds_t.am.full | rows,
             )
-            target = self._reflow_target(ds_t, base)
         pred, sp_logits = self.model(
             base,
             mask=ds_t.m.full, attn_mask=ds_t.am.full,
