@@ -1,17 +1,24 @@
+"""``CornerHist``: corner plots and per-step animations of model output.
+
+Calls the LightningModule directly, so ``odeint_conf.return_timesteps`` decides
+whether the animation has intermediate frames to draw.
+"""
+
+import shutil
+
 import corner
 import matplotlib.pyplot as plt
-import shutil
 import numpy as np
 import torch
 from flow_matching.utils.manifolds import Euclidean, Sphere
 from matplotlib.animation import FuncAnimation
 from matplotlib.lines import Line2D
 
-from ..main.modules import LEGOLtng
-from ..geometry.path_sample_mult import ProductManifold
-from ..geometry.geom_trafos import GeomTrafos
-from ..data.struct import _F
-from .plot_geom import PlotGeom
+from legofmt.data.struct import _F
+from legofmt.geometry.geom_trafos import GeomTrafos
+from legofmt.geometry.product_manifold import ProductManifold
+from legofmt.main.modules import LEGOLtng
+from legofmt.viz.plot_geom import PlotGeom
 
 plt.rcParams.update(
     {
@@ -52,9 +59,6 @@ class CornerHist:
                 }
             )
             self.model = LEGOLtng(config).to(device)
-            self.cutoff_en = config["config"]["dl_conf"]["lds_args"].get("cutoff_mev", cutoff_en)
-        else:
-            self.cutoff_en = cutoff_en
         self.anim_intermediates = anim_intermediates
         self.geom_trafos = GeomTrafos()
         self.disp_man = ProductManifold([Euclidean(), Sphere(), Sphere()], (1, 3, 3))
@@ -77,17 +81,13 @@ class CornerHist:
         )
         axes_fig = self.fig[1] if self.cube else self.fig
 
-        def is_t(x):
-            return isinstance(x, torch.Tensor)
-
         def is_t_tup(x):
-            return isinstance(x, tuple) and all(is_t(t) for t in x)
+            return isinstance(x, tuple) and all(isinstance(t, torch.Tensor) for t in x)
 
         if is_t_tup(batch) and truth is not None and is_t_tup(truth):
 
             def anim_wrapper_(i):
-                for axis in axes_fig.get_axes():
-                    axis.clear()
+                self._clear_axes(axes_fig)
                 return self.plot_tensors(batch[i], truth[i])
 
             return self._make_anim(anim_wrapper_, len(batch))
@@ -96,11 +96,12 @@ class CornerHist:
             if batch[0].ndim > 3:  # sequence of batches
 
                 def anim_wrapper_(i):
-                    for axis in axes_fig.get_axes():
-                        axis.clear()
+                    self._clear_axes(axes_fig)
                     prepped = self.prep(batch[i])
                     self.fig_sup.suptitle(
-                        rf"$\mathrm{{Density:\;}}{self.sols_density.item():.2f}\mathrm{{,\;Deposited\;Energy\;Mean:\;}}{self.sols_e_dep.item():.3f}$",
+                        rf"$\mathrm{{Density:\;}}{self.sols_density.item():.2f}"
+                        rf"\mathrm{{,\;Deposited\;Energy\;Mean:\;}}"
+                        rf"{self.sols_e_dep.item():.3f}$",
                         fontsize=20,
                     )
                     return prepped
@@ -108,18 +109,23 @@ class CornerHist:
                 return self._make_anim(anim_wrapper_, len(batch))
             return self.prep(batch)
 
-        if is_t(batch) and not self.anim_intermediates:
+        if isinstance(batch, torch.Tensor) and not self.anim_intermediates:
             return self.plot_tensors(batch, truth)
 
         if self.anim_intermediates:
             sols, _, _ = self.model(batch)
 
             def anim_wrapper_(i):
-                for axis in axes_fig.get_axes():
-                    axis.clear()
+                self._clear_axes(axes_fig)
                 return self.prep(batch, sols=sols[i])
 
             return self._make_anim(anim_wrapper_, len(sols))
+
+    @staticmethod
+    def _clear_axes(axes_fig) -> None:
+        """Blank the previous frame; the plot helpers draw a fresh axes grid."""
+        for axis in axes_fig.get_axes():
+            axis.clear()
 
     def _make_anim(self, func, frames):
         anim = FuncAnimation(
@@ -160,7 +166,7 @@ class CornerHist:
 
     def prep(self, batch, sols=None):
         if sols is None:
-            sols, mask, attn_mask = self.model(batch)
+            sols, _, _ = self.model(batch)
 
         is_8d = sols.shape[-1] == 8
         e_dep = _F(sols).edep if is_8d else sols[:, 1, 0]
@@ -275,7 +281,7 @@ class CornerHist:
         self, fig_sup, fig, sols, sols_true=None, incoming=None, data_add=None,
     ):
         if self.cube:
-            _, fig_inner, pc_s, pc_t = fig
+            _, _, pc_s, pc_t = fig
             self.make_cube(
                 sols[: 2**10], pc_s, incoming[: 2**10] if incoming is not None else None
             )

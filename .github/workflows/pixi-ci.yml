@@ -38,6 +38,9 @@ jobs:
       - name: Verify import
         run: pixi run -e ci python -c "import legofmt; print('ok')"
 
+      - name: Run unit tests  # in-memory models only; test_generate.py needs HF checkpoints (below)
+        run: pixi run -e ci pytest tests/ --ignore=tests/test_generate.py -q
+
       - name: Cache HF hub
         uses: actions/cache@v4
         with:

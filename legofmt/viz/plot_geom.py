@@ -1,3 +1,5 @@
+"""``PlotGeom``: the 3-D cube plot underneath the corner-plot animations."""
+
 import matplotlib.pyplot as plt
 import torch
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
@@ -38,8 +40,10 @@ class PlotGeom:
         arr_lr: float = 0.04,
         arr_c: str = "y",
         lims: float = 1.4,
-    ) -> None:
-        try:
+    ) -> plt.Axes:
+        """Quiver + scatter of (mom, pos) 6-vectors, or scatter only for bare
+        3-vectors; incoming is drawn at -pos."""
+        if coord.shape[-1] == 6:
             vec, pts = coord.movedim(-1, 0).split(3, 0)
             ax.quiver(
                 *pts.cpu().numpy(),
@@ -52,7 +56,7 @@ class PlotGeom:
                 zorder=3,
                 alpha=0.2,
             )
-        except ValueError:
+        else:
             pts = coord.movedim(-1, 0)
 
         ax.scatter(*pts.cpu().numpy(), color=arr_c, depthshade=True, zorder=3)
@@ -94,7 +98,7 @@ class PlotGeom:
         arr_l: float = 1.0 / 4,
         arr_lr: float = 0.1,
         arr_c: str = "y",
-    ) -> None:
+    ) -> plt.Axes:
         v = torch.tensor([-1, 1])
         vertices = torch.cartesian_prod(v, v, v)
         cc_edges = vertices[torch.combinations(torch.arange(8), r=2)]
