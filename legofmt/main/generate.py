@@ -60,9 +60,21 @@ class GenerateOut(torch.nn.Module):
                 (cond_model[:, :nc], e, dir_, pos, cond_model[:, nc + 6:]), dim=-1
             )
         cond_fm, mask, attn_mask = self.gen_batch(cond_model, gt_mult=gt_mult)
+        ds = DataStruct(cond_fm, mask, attn_mask)
+        if self.model.sym is not None:   # the heads are trained in the canonical frame (_step canonicalises first)
+            fwd  = mask[:, self.n_prefix] == 0
+            face = self.model.sym.face_of(_F(cond_fm).in_cc[..., 0, 4:7])
+            ds   = DataStruct(self.model._canon_dirs(cond_fm, face, fwd), mask, attn_mask)
         pt = (torch.zeros(cond_fm.shape[0], dtype=torch.bool, device=cond_fm.device)
-              if gt_mult is not None else
-              self.model.sample_passthrough(DataStruct(cond_fm, mask, attn_mask)))
+              if gt_mult is not None else self.model.sample_passthrough(ds))
+        sv = torch.zeros_like(pt)
+        if self.model.rc.survive_head and gt_mult is None:  # pin the surviving primary into one candidate slot
+            sv = self.model.sample_survival(ds) & ~pt
+            cond_fm = cond_fm.clone()
+            cond_fm[sv, self.n_prefix + 1, -1] = self.model._in_species(ds)[sv].to(cond_fm.dtype)
+        if self.model.rc.count_head and gt_mult is None:   # open exactly the sampled number of slots
+            n = self.model.sample_count(ds, sv)
+            mask, attn_mask = self.model.open_count_slots(mask, attn_mask, n, ~pt)
         sols = cond_fm.clone()
         mask, attn_mask = mask.clone(), attn_mask.clone()
         if bool(pt.any()):
@@ -77,7 +89,21 @@ class GenerateOut(torch.nn.Module):
             mask[pt] = 0                            # nothing was flowed for these rows
         if not bool(pt.all()):
             keep = ~pt
-            sub, m_k, a_k = self.model((cond_fm[keep], mask[keep], attn_mask[keep]))
+            cf_k, m_k, a_k = cond_fm[keep], mask[keep], attn_mask[keep]
+            if (self.model.rc.count_head and gt_mult is None
+                    and not self.model.rc.odeint_conf.get("return_timesteps", False)):
+                # solve each event at the length of its opened slots, bucketed by n: the cost is ~linear in the
+                # length and 90% of events open <= 5 slots (closed rows are not attended, so they change nothing)
+                n0, n_k, lo = self.n_prefix + 1, n[keep], -1
+                sub = torch.full_like(cf_k, torch.nan)
+                sub[..., -1] = 0.0
+                for hi in (2, 4, 8, 16, cf_k.shape[1] - n0):
+                    b, L, lo = (n_k > lo) & (n_k <= hi), n0 + hi, hi
+                    if bool(b.any()):
+                        s_b, m_b, a_b = self.model((cf_k[b, :L], m_k[b, :L], a_k[b, :L]))
+                        sub[b, :L], m_k[b, :L], a_k[b, :L] = s_b.to(sub.dtype), m_b, a_b
+            else:
+                sub, m_k, a_k = self.model((cf_k, m_k, a_k))
             if sub.dim() == 4:                      # return_timesteps: (T, B, L, C)
                 sols = sols.unsqueeze(0).expand(sub.shape[0], -1, -1, -1).clone()
                 sols[:, keep] = sub.to(sols.dtype)
@@ -87,6 +113,13 @@ class GenerateOut(torch.nn.Module):
         elif self.model.rc.odeint_conf.get("return_timesteps", False):
             sols = sols.unsqueeze(0)
         sols[..., -1] = torch.cat([sols.new_zeros(1), self.pdgids.to(sols.dtype)])[sols[..., -1].long()]
+        # the species channel can leave any candidate slot empty; pack the occupied ones first, in
+        # order, as the data do -- consumers slice by slot (CornerHist cuts to the truth's length)
+        n0 = self.n_prefix + 1
+        order = torch.sort((~attn_mask[:, n0:]).to(torch.uint8), dim=1, stable=True).indices + n0
+        idx = torch.cat((torch.arange(n0, device=order.device).expand(order.shape[0], n0), order), dim=1)
+        mask, attn_mask = mask.gather(1, idx), attn_mask.gather(1, idx)
+        sols = sols.gather(-2, idx.unsqueeze(-1).expand(*idx.shape, sols.shape[-1]).expand_as(sols))
         return sols, mask, attn_mask
 
     def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None, gt_mult=None):

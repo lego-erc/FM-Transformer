@@ -66,7 +66,8 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         super().__init__()
         self.rc = resolve_legoltng_config(full_config)
 
-        types_embd = torch.arange(self.rc.max_seq_l, dtype=torch.int64).clamp_max(self.rc.n_prefix + 1).view(1, -1)
+        types_embd = torch.arange(self.rc.max_seq_l, dtype=torch.int64).clamp_max(
+            self.rc.n_prefix + (2 if self.rc.lead_slot else 1)).view(1, -1)   # lead_slot: slot n0 is the leader
 
         self.register_buffer("pdgids_template", self.rc.pdgids_template)
         self.register_buffer("types_embd", types_embd)
@@ -170,14 +171,58 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         """Pass-through logit per event, from the conditioning alone: the
         conditioning scalars and the incoming particle (position half mapped to the
         cube), plus the incoming species."""
+        return self.pt_head(self._gate_x(ds_t, idx)).squeeze(-1)
+
+    def sv_logits(self, ds_t, idx: Tensor | None = None) -> Tensor:
+        """Survival logit per event, on the gate's inputs: is the most energetic outgoing
+        particle the primary's species? Answered before the solve, then pinned."""
+        vf = uncompiled(self.model).vf
+        x  = self._gate_x(ds_t, idx)
+        if vf.sv_chord:   # path length through the target: survival is steep in it
+            x = torch.cat((x, self._chord(ds_t).to(x.dtype)), dim=-1)
+        return vf.sv_head(x).squeeze(-1)
+
+    def ct_logits(self, ds_t, sv: Tensor, idx: Tensor | None = None) -> Tensor:
+        """Per-event multiplicity logits over 0..ct_nmax (``count_head``), gate inputs + chord + E / max_energy
+        + the survival outcome ``sv``: n given survival differs by 3x (a surviving pi+ comes out alone). The
+        gate sees the energy only as its log scalar; n rises steeply in E at the top of the training range,
+        and with E linear as well the head stops flattening it there (1 GeV straight-in gun: -3% -> -0.8%)."""
+        dt = ds_t.f.full.dtype
+        e  = ds_t.f.in_cc[..., 0, 0].nan_to_num(0.0).clamp(0, 1)
+        e  = (self.rc.cutoff_mev / self.rc.max_energy) ** (1.0 - e)        # = E / max_energy
+        x  = torch.cat((self._gate_x(ds_t, idx), self._chord(ds_t).to(dt), e.to(dt).unsqueeze(-1),
+                        sv.to(dt).unsqueeze(-1)), dim=-1)
+        return uncompiled(self.model).vf.ct_head(x)
+
+    @torch.no_grad()
+    def sample_count(self, ds_t, sv: Tensor) -> Tensor:
+        """Draw the number of outgoing particles given the survival outcome; a survivor forbids 0."""
+        lg = self.ct_logits(ds_t, sv).float()
+        lg[:, 0] = torch.where(sv, torch.full_like(lg[:, 0], float("-inf")), lg[:, 0])
+        return torch.multinomial(lg.softmax(-1), 1).squeeze(-1)
+
+    def open_count_slots(self, mask: Tensor, attn_mask: Tensor, n: Tensor, gen: Tensor) -> tuple[Tensor, Tensor]:
+        """``count_head``: exactly the first ``n`` outgoing slots are particles on generated events; the rest
+        are masked out (not attended, not generated), as the training rows are the real particles only."""
+        n0  = self.rc.n_prefix + 1
+        occ = torch.arange(mask.shape[1] - n0, device=mask.device) < n[:, None]
+        mask, attn_mask = mask.clone(), attn_mask.clone()
+        mask[:, n0:] = torch.where(gen[:, None], occ.long(), mask[:, n0:])
+        attn_mask[:, n0:] = torch.where(gen[:, None], occ, attn_mask[:, n0:])
+        return mask, attn_mask
+
+    @torch.no_grad()
+    def sample_survival(self, ds_t) -> Tensor:
+        return torch.rand(ds_t.f.full.shape[0], device=ds_t.f.full.device) < self.sv_logits(ds_t).sigmoid()
+
+    def _gate_x(self, ds_t, idx: Tensor | None = None) -> Tensor:
         f    = ds_t.f
         inc  = f.in_cc[..., 0, :].nan_to_num(1.0)
         inc  = torch.cat((inc[..., 0:1], self.geom_trafos.to_cube(inc[..., 1:7])), dim=-1)
         oh   = nn.functional.one_hot(
             self._in_species(ds_t) if idx is None else idx, len(self.pdgids_template) + 1)
         cond = torch.cat([f.cond(n).view(-1, 1) for n in self.rc.cond_scalars], dim=-1)
-        x    = torch.cat((cond, inc, oh.to(inc.dtype)), dim=-1)
-        return self.pt_head(x).squeeze(-1)
+        return torch.cat((cond, inc, oh.to(inc.dtype)), dim=-1)
 
     def pt_allowed(self, ds_t, idx: Tensor | None = None) -> Tensor:
         """Events whose primary is a species that can pass through at all."""

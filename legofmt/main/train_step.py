@@ -158,8 +158,25 @@ class TrainStep:
             m      = self._sample_mask(ds_t)
             gen_sp = (m[:, self.rc.n_prefix] == 0).unsqueeze(-1)
             m      = m.clone()
-            m[:, n0:] |= gen_sp
-            ds_t = DataStruct(ds_t.f.full, m, ds_t.am.full)
+            am     = ds_t.am.full
+            f      = ds_t.f.full
+            if self.rc.count_head:   # the generated rows are the real particles; the count head owns how many
+                # a species outside the vocabulary (class 0, e.g. an ion) cannot be generated -- the empty-class
+                # mode drops it as empty -- so it is no particle here either (its target would be the masked class)
+                am = am.clone()
+                am[:, n0:] &= self.convert_pdgids(ds_t.f.pdgids).reshape(am.shape)[:, n0:] != 0
+                if self.rc.lead_slot:   # the most energetic particle moves to slot n0 (energy scalar: 0 = e_in)
+                    b    = torch.arange(f.shape[0], device=f.device)
+                    lead = f[:, n0:, 0].masked_fill(~am[:, n0:], float("inf")).argmin(-1) + n0
+                    idx  = torch.arange(f.shape[1], device=f.device).repeat(f.shape[0], 1)
+                    idx[b, lead] = n0
+                    idx[b, n0]   = lead
+                    f    = f.gather(1, idx.unsqueeze(-1).expand_as(f))
+                    am   = am.gather(1, idx)
+                m[:, n0:] = torch.where(gen_sp, am[:, n0:].long(), m[:, n0:])
+            else:
+                m[:, n0:] |= gen_sp
+            ds_t = DataStruct(f, m, am)
             if self.rc.overflow_delta > 0:
                 ds_t = self._shift_overflow_targets(ds_t)
             if self.sym is not None:
@@ -171,10 +188,21 @@ class TrainStep:
             pt_idx  = self._in_species(ds_t)
             pt_ok   = self.pt_allowed(ds_t, pt_idx) & gen_sp.squeeze(-1)
             w       = 1.0 - pt_tgt * pt_ok
+            sv_tgt = sv_ok = sv_pin = None
+            if self.rc.survive_head:  # does the primary survive as the leading particle? (pinned, see below)
+                act    = ds_t.am.out_p
+                lead   = ds_t.f.out_cc[..., 0].masked_fill(~act, float("inf")).argmin(-1)
+                lead_s = self.convert_pdgids(ds_t.f.out_p[..., -1]).gather(-1, lead[:, None]).squeeze(-1)
+                sv_tgt = (act.any(-1) & (lead_s == pt_idx)).float()
+                sv_ok  = gen_sp.squeeze(-1) & (w > 0)
+                sv_pin = torch.zeros_like(m, dtype=torch.bool)
+                sv_pin[torch.arange(m.shape[0], device=m.device), n0 + lead] = (sv_tgt > 0) & sv_ok
             base = self.gen_base_wrapper(ds_t)
             s1   = self.convert_pdgids(ds_t.f.pdgids).squeeze(-1)  # NaN pad -> class 0
             t    = self._sample_t(ds_t)
             rows = (torch.arange(m.shape[1], device=m.device) >= n0) & gen_sp
+            if self.rc.count_head:
+                rows = rows & ds_t.am.full
             data = ds_t.f.model_in
             if (
                 self.reflow_teacher is not None and self.training
@@ -187,10 +215,13 @@ class TrainStep:
                 # filler; transporting them gave that row an off-manifold target
                 data[:, :self.rc.n_prefix, 1:] = ds_t.f.non_cc[..., 1:]
                 s1 = torch.where(rows, sp, s1)
+            t_sp = (t / self.rc.species_tau).clamp(max=1.0)   # species time-warp: labels are final from t = tau on
             s_t  = torch.where(
-                rows & (torch.rand_like(s1, dtype=t.dtype) >= t.unsqueeze(-1)),
-                torch.randint_like(s1, self.rc.model_args["npdgids"]), s1,
+                rows & (torch.rand_like(s1, dtype=t.dtype) >= t_sp.unsqueeze(-1)),
+                self._species_noise(s1, pt_idx), s1,
             )
+            if sv_pin is not None:  # the surviving primary's class is given, as at generation
+                s_t = torch.where(sv_pin, s1, s_t)
             pad  = (rows & (s1 == 0)).unsqueeze(-1)
             ds_t = DataStruct(
                 torch.cat((torch.where(pad, base, data), ds_t.f.pdgids), dim=-1),
@@ -212,9 +243,24 @@ class TrainStep:
             loss = loss + self.rc.passthrough_fac * loss_pt
             if self.training:
                 logs = {**logs, "loss/passthrough": loss_pt.detach()}
+        if self.rc.count_head:
+            ct_ok = gen_sp.squeeze(-1) & (w > 0)
+            if ct_ok.any():
+                loss_ct = torch.nn.functional.cross_entropy(
+                    self.ct_logits(ds_t, sv_tgt if sv_tgt is not None else torch.zeros_like(w), pt_idx)[ct_ok],
+                    ds_t.am.out_p.sum(-1)[ct_ok])
+                loss = loss + self.rc.count_fac * loss_ct
+                if self.training:
+                    logs = {**logs, "loss/count": loss_ct.detach()}
+        if sv_ok is not None and sv_ok.any():
+            loss_sv = torch.nn.functional.binary_cross_entropy_with_logits(
+                self.sv_logits(ds_t, pt_idx)[sv_ok], sv_tgt[sv_ok])
+            loss = loss + self.rc.survive_fac * loss_sv
+            if self.training:
+                logs = {**logs, "loss/survive": loss_sv.detach()}
         rows = rows & (w > 0).unsqueeze(-1)
         if rows.any():
-            lg, tg  = sp_logits[rows], s1[rows]
+            lg, tg  = self._sp_logits(sp_logits[rows]), s1[rows]
             loss_sp = torch.nn.functional.cross_entropy(lg, tg)
             loss    = loss + self.rc.species_fac * loss_sp
             if self.training:
