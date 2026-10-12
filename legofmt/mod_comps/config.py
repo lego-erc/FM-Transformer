@@ -63,6 +63,13 @@ class ResolvedLEGOConfig:
     one_step_euler_fac: float
     one_step_euler_sections: int
     species_fac: float
+    survive_head: bool
+    count_head: bool
+    lead_slot: bool
+    species_tau: float
+    species_mask: bool
+    count_fac: float
+    survive_fac: float
     passthrough_fac: float
     passthrough_pdgids: tuple[int, ...]
     one_step_euler_every: int
@@ -229,6 +236,23 @@ def _build_resolved(
     set_layout(cond_scalars)
     model_args.setdefault("n_cond", len(cond_scalars))
     model_args.setdefault("pt_dim", model_conf.get("passthrough_dim", 64))
+    if model_conf.get("survive_head", False):
+        model_args["sv_head"] = True
+    if model_conf.get("count_head", False):
+        model_args["ct_head"] = True
+        model_args["ct_nmax"] = max_seq_l - (n_prefix + 1)
+    if model_conf.get("species_mask", False) and not model_conf.get("count_head", False):
+        raise ValueError("model_conf.species_mask needs model_conf.count_head (class 0 is the mask)")
+    if model_conf.get("survive_head", False) and not model_conf.get("lead_slot", False):
+        raise ValueError("model_conf.survive_head needs model_conf.lead_slot: the survivor is pinned into slot n0, "
+                         "which only lead_slot gives the leading base draw (without it EM leaders lose ~10% energy)")
+    if model_conf.get("exclude_passthrough", False) and model_conf.get("passthrough_fac", 1.0) > 0:
+        raise ValueError("model_conf.exclude_passthrough leaves the pass-through gate without a single positive; "
+                         "keep the pass-throughs or set passthrough_fac 0")
+    if model_conf.get("lead_slot", False):  # slot n0 = most energetic particle, with a type of its own
+        if not model_conf.get("count_head", False):  # without it an empty lead slot cascades (exp/lead-slot)
+            raise ValueError("model_conf.lead_slot needs model_conf.count_head")
+        model_args["ntypes"] = n_prefix + 3
 
     sections = model_conf.get("one_step_euler_sections", 8)
     if model_conf.get("one_step_euler_fac", 0.0) > 0:
@@ -268,6 +292,13 @@ def _build_resolved(
         one_step_euler_fac=model_conf.get("one_step_euler_fac", 0.0),
         one_step_euler_sections=sections,
         species_fac=model_conf.get("species_fac", 1.0),
+        survive_head=bool(model_conf.get("survive_head", False)),
+        count_head=bool(model_conf.get("count_head", False)),
+        lead_slot=bool(model_conf.get("lead_slot", False)),
+        species_tau=float(model_conf.get("species_tau", 1.0)),
+        species_mask=bool(model_conf.get("species_mask", False)),
+        count_fac=float(model_conf.get("count_fac", 1.0)),
+        survive_fac=float(model_conf.get("survive_fac", 1.0)),
         passthrough_fac=model_conf.get("passthrough_fac", 1.0),
         passthrough_pdgids=tuple(model_conf.get("passthrough_pdgids", _NEUTRAL_PDGIDS)),
         one_step_euler_every=model_conf.get("one_step_euler_every", 1),

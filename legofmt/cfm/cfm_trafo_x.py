@@ -38,6 +38,14 @@ class CFMTrafo_x(nn.Module):
         npdgids: int = 1,
         n_cond: int = 1,
         pt_dim: int = 64,
+        sv_head: bool = False,
+        sv_layers: int = 1,
+        sv_dim: int | None = None,
+        sv_chord: bool = False,
+        ct_head: bool = False,
+        ct_nmax: int = 0,
+        sp_layers: int = 0,
+        sp_dim: int | None = None,
         dim_in_out: int | None = None,
         time_cond: bool = True,
         step_cond: bool = False,
@@ -91,10 +99,28 @@ class CFMTrafo_x(nn.Module):
         self.cond_w_pdgids  = nn.Parameter(torch.empty(npdgids, 2, h_dim, in_dim))
         self.cond_bi_pdgids = nn.Parameter(torch.empty(npdgids, h_dim))
         self.cond_bo_pdgids = nn.Parameter(torch.empty(npdgids, in_dim))
-        self.species_head   = nn.Linear(h_dim, npdgids)
+        if sp_layers > 0:   # MLP species head; the default linear one is a checkpoint-compatible special case
+            w, layers = sp_dim or h_dim, []
+            for i in range(sp_layers):
+                layers += [nn.Linear(h_dim if i == 0 else w, w), nn.Mish()]
+            self.species_head = nn.Sequential(*layers, nn.Linear(w, npdgids))
+        else:
+            self.species_head = nn.Linear(h_dim, npdgids)
         self.pt_head = nn.Sequential(
             nn.Linear(n_cond + in_dim + npdgids, pt_dim), nn.Mish(), nn.Linear(pt_dim, 1),
         )
+        self.sv_chord = sv_chord
+        if ct_head:  # per-event multiplicity over 0..ct_nmax: gate inputs + chord + linear energy + survival bit, deep
+            n = n_cond + in_dim + npdgids + 3
+            self.ct_head = nn.Sequential(nn.Linear(n, 256), nn.Mish(), nn.Linear(256, 256), nn.Mish(),
+                                         nn.Linear(256, 256), nn.Mish(), nn.Linear(256, 256), nn.Mish(),
+                                         nn.Linear(256, ct_nmax + 1))
+        if sv_head:  # "the leading particle is the primary's species", the gate's inputs (+ the chord)
+            w, n = sv_dim or pt_dim, n_cond + in_dim + npdgids + int(sv_chord)
+            layers = []
+            for i in range(sv_layers):
+                layers += [nn.Linear(n if i == 0 else w, w), nn.Mish()]
+            self.sv_head = nn.Sequential(*layers, nn.Linear(w, 1))
 
         w_std = xavier_gain * 3 ** 0.5 * (2.0 / (in_dim + h_dim)) ** 0.5
         for p in (self.cond_w_mask, self.cond_w_types, self.cond_w_pdgids):
