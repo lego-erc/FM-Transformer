@@ -9,6 +9,8 @@ from legofmt.log_metrics.val_metrics import (
     compute_mmd,
     edep_by_primary,
     event_summary,
+    multiplicity_metrics,
+    survival_by_primary,
     particle_kinematics,
     standardize,
     w1_per_feature,
@@ -93,6 +95,9 @@ class _StubLego:
 
     def gen_base_wrapper(self, ds_t):
         return ds_t.f.model_in.clone()
+
+    def sample_passthrough(self, ds_t):
+        return torch.zeros(len(ds_t), dtype=torch.bool)  # the gate never fires
 
     def solve(self, ds_t, x_init, return_species=False, **_kw):
         if not return_species:
@@ -180,7 +185,73 @@ def test_static_val_metric_keys_are_still_synced():
     synced = {k for k in out if not k.startswith(UNSYNCED_PREFIXES)}
     assert synced == (
         {"val/mmd_particle", "val/mmd_summary"}
-        | {"val/w1_mult", "val/mult_ratio", "val/passthrough_err"}
+        | {"val/w1_mult", "val/mult_ratio", "val/zero_out_err", "val/pt_rate_err"}
         | {f"val/w1_particle/{n}" for n in KIN_NAMES}
         | {f"val/w1_summary/{n}" for n in SUMMARY_FEATURE_NAMES}
     )
+
+
+def test_val_generation_applies_the_passthrough_gate():
+    """Validation must score what GenerateOut emits: a fired gate means the primary leaves
+    unchanged with no deposit. Sending those events through the flow instead (which is
+    trained with weight 0 on them) inflated the neutron E_dep W1 9x on the stack run."""
+    from legofmt.data.struct import _F
+    from legofmt.main.modules import LEGOLtng
+    from test_modules_direct import _tiny_config
+    from test_passthrough_gate import _pt_batch
+
+    torch.manual_seed(0)
+    model = LEGOLtng(_tiny_config()).eval()
+    with torch.no_grad():
+        model.pt_head[-1].bias.fill_(50.0)
+        model.pt_head[-1].weight.zero_()
+    ds = _pt_batch(passthrough=True)                       # photon primaries: the gate may fire
+    gen, active, pdg = ShowerValMetrics._generate(model, ds)
+    assert active.sum(-1).eq(1).all() and active[:, 0].all()
+    assert pdg[:, 0].eq(22).all()
+    assert _F(gen).edep.abs().max().item() == 0.0
+    first = _F(gen).out_p[:, 0]
+    assert first[:, 0].abs().max().item() == 0.0            # e_out == e_in
+    assert torch.allclose(first[:, 1:7], ds.f.in_cc[:, 0, 1:7])
+
+
+def test_edep_ratio_multi_selects_each_side_on_its_own_multiplicity():
+    """A unified model generates the composition, so the fake event at an index is not the
+    real one's: selecting the fake side on the REAL n_out mixes absorbed fake events into the
+    multi cell. Here the multi events agree exactly and only the absorbed ones differ."""
+    edep_real = torch.full((64,), 0.4)
+    edep_fake = torch.cat([torch.full((32,), 0.4), torch.full((32,), 0.8)])
+    pdgid_in = torch.full((64,), 211)
+    n_real = torch.full((64,), 4)
+    n_fake = torch.cat([torch.full((32,), 4), torch.zeros(32, dtype=torch.long)])
+    out = edep_by_primary(edep_real, edep_fake, pdgid_in, n_real, n_fake)
+    assert abs(out["val/edep_ratio_multi/pip"].item() - 1.0) < 1e-6
+
+
+def test_zero_out_and_passthrough_rate_are_separate_metrics():
+    """`passthrough_err` used to measure P(n_out == 0), which is not a pass-through."""
+    active = torch.zeros(4, 3, dtype=torch.bool)
+    active[0, 0] = active[1, 0] = active[2, :2] = True     # real: two singles, one pair, one empty
+    g_active = active.clone()
+    g_active[3, 0] = True                                  # fake: the empty one gets a particle
+    pdg = torch.full((4, 3), 22.0)
+    edep = torch.tensor([0.0, 0.3, 0.3, 0.3])               # real: event 0 is a pass-through
+    g_edep = torch.tensor([0.0, 0.0, 0.3, 0.0])             # fake: events 0, 1, 3 look like one
+    out = multiplicity_metrics(active, pdg, g_active, pdg, edep, g_edep)
+    assert abs(out["val/zero_out_err"].item() - (0.0 - 0.25)) < 1e-6
+    assert abs(out["val/pt_rate_err"].item() - (0.75 - 0.25)) < 1e-6
+
+
+def test_survival_by_primary_catches_a_dropped_leading_particle():
+    """The stack run lost the leading pi+ in ~1 of 5 events while every pooled metric moved
+    by a few percent: the primary's own species, counted per gun, is where it shows."""
+    pdgid_in = torch.tensor([211] * 4 + [11] * 4)
+    pdg = torch.tensor([[211.0, 22.0]] * 4 + [[11.0, 22.0]] * 4)
+    active = torch.ones(8, 2, dtype=torch.bool)
+    g_active = active.clone()
+    g_active[:2] = False                                   # two pi+ events lose everything
+    out = survival_by_primary(pdgid_in, active, pdg, g_active, pdg)
+    assert abs(out["val/primary_count_ratio/pip"].item() - 0.5) < 1e-6
+    assert abs(out["val/zero_out_err/pip"].item() - 0.5) < 1e-6
+    assert out["val/primary_count_ratio/em"].item() == 1.0
+    assert all(k.startswith(UNSYNCED_PREFIXES) for k in out)

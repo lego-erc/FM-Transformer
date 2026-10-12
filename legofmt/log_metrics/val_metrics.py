@@ -32,7 +32,8 @@ PRIMARY_TAGS = {11: "em", -11: "ep", 22: "g", 2212: "p", 2112: "n",
 # Which keys edep_by_primary can emit. Their presence depends on the species and the
 # multiplicities a rank's own shard happens to hold, so they must never be logged with
 # sync_dist: ranks would issue different numbers of collectives and NCCL would deadlock.
-UNSYNCED_PREFIXES = ("val/w1_edep/", "val/edep_ratio_multi/", "val/w1_mult/")
+UNSYNCED_PREFIXES = ("val/w1_edep/", "val/edep_ratio_multi/", "val/w1_mult/",
+                     "val/primary_count_ratio/", "val/zero_out_err/")
 
 
 def _spherical(mom, e, pos):
@@ -98,7 +99,7 @@ def w1_per_feature(X, Y):
     return (X.sort(0).values - Y.sort(0).values).abs().mean(0)
 
 
-def edep_by_primary(edep_real, edep_fake, pdgid_in, n_out) -> dict:
+def edep_by_primary(edep_real, edep_fake, pdgid_in, n_out, n_out_fake=None) -> dict:
     """E_dep accuracy split by incoming species, and again on the events with a
     secondary.
 
@@ -112,8 +113,11 @@ def edep_by_primary(edep_real, edep_fake, pdgid_in, n_out) -> dict:
     see that it did.
 
     Ratios, not W1, for the multi cell: the error is a scale error and a ratio
-    reads directly as a percentage.
+    reads directly as a percentage. Each side is selected on its own ``n_out``:
+    a unified model generates the composition, so the fake event at an index is
+    not the real one's (``n_out_fake`` defaults to ``n_out`` for a shared one).
     """
+    n_out_fake = n_out if n_out_fake is None else n_out_fake
     out = {}
     for pid, tag in PRIMARY_TAGS.items():
         sel = pdgid_in == pid
@@ -121,14 +125,14 @@ def edep_by_primary(edep_real, edep_fake, pdgid_in, n_out) -> dict:
             continue
         r, f = edep_real[sel], edep_fake[sel]
         out[f"val/w1_edep/{tag}"] = (r.sort().values - f.sort().values).abs().mean()
-        multi = sel & (n_out >= 2)
-        if int(multi.sum()) >= 32:
-            rm, fm = edep_real[multi], edep_fake[multi]
+        multi_r, multi_f = sel & (n_out >= 2), sel & (n_out_fake >= 2)
+        if int(multi_r.sum()) >= 32 and int(multi_f.sum()) >= 32:
+            rm, fm = edep_real[multi_r], edep_fake[multi_f]
             out[f"val/edep_ratio_multi/{tag}"] = fm.mean() / rm.mean().clamp(min=1e-8)
     return out
 
 
-def multiplicity_metrics(active, pdg, g_active, g_pdg) -> dict:
+def multiplicity_metrics(active, pdg, g_active, g_pdg, edep, g_edep) -> dict:
     """How well the generated per-event counts match the real ones.
 
     The flow generates the species channel, so the multiplicity is an output and
@@ -139,7 +143,10 @@ def multiplicity_metrics(active, pdg, g_active, g_pdg) -> dict:
     out = {
         "val/w1_mult": w1_per_feature(n_r, n_f),
         "val/mult_ratio": n_f.mean() / n_r.mean().clamp(min=1e-8),
-        "val/passthrough_err": (n_f == 0).float().mean() - (n_r == 0).float().mean(),
+        "val/zero_out_err": (n_f == 0).float().mean() - (n_r == 0).float().mean(),
+        # pass-through-like: nothing deposited and a single outgoing particle
+        "val/pt_rate_err": ((g_edep <= 0) & (n_f == 1)).float().mean()
+                           - ((edep <= 0) & (n_r == 1)).float().mean(),
     }
     for pid, tag in zip(_TYPES, _TYPE_TAGS):
         c_r = ((pdg == pid) & active).sum(-1).float()
@@ -147,6 +154,26 @@ def multiplicity_metrics(active, pdg, g_active, g_pdg) -> dict:
             continue
         c_f = ((g_pdg == pid) & g_active).sum(-1).float()
         out[f"val/w1_mult/{tag}"] = w1_per_feature(c_r, c_f)
+    return out
+
+
+def survival_by_primary(pdgid_in, active, pdg, g_active, g_pdg) -> dict:
+    """Whether the primary survives, per incoming species: the mean count of outgoing
+    particles of the primary's own species (mostly the leading particle) as a ratio,
+    and the excess of events with no outgoing particle. A unified model decides both
+    in its species channel; pooled over guns they move by a few percent while the
+    leading pi+ of the stack run went missing in ~1 event in 5."""
+    out = {}
+    n_r, n_f = active.sum(-1), g_active.sum(-1)
+    for pid, tag in PRIMARY_TAGS.items():
+        sel = pdgid_in == pid
+        if not bool(sel.any()):
+            continue
+        c_r = ((pdg[sel] == pid) & active[sel]).sum(-1).float().mean()
+        c_f = ((g_pdg[sel] == pid) & g_active[sel]).sum(-1).float().mean()
+        if c_r > 0:
+            out[f"val/primary_count_ratio/{tag}"] = c_f / c_r
+        out[f"val/zero_out_err/{tag}"] = (n_f[sel] == 0).float().mean() - (n_r[sel] == 0).float().mean()
     return out
 
 
@@ -179,11 +206,12 @@ class ShowerValMetrics:
                 f"val/w1_{tag}/{n_}": w1
                 for n_, w1 in zip(names, w1_per_feature(fake_s, real_s))
             })
-        out.update(multiplicity_metrics(active, pdg, g_active, g_pdg))
+        pdgid_in = ds_t.f.in_p[..., 0, -1].long()
+        out.update(multiplicity_metrics(active, pdg, g_active, g_pdg, ds_t.f.edep, _F(gen).edep))
         out.update(edep_by_primary(
-            ds_t.f.edep, _F(gen).edep, ds_t.f.in_p[..., 0, -1].long(),
-            ds_t.am.out_p.sum(-1),
+            ds_t.f.edep, _F(gen).edep, pdgid_in, active.sum(-1), g_active.sum(-1),
         ))
+        out.update(survival_by_primary(pdgid_in, active, pdg, g_active, g_pdg))
         return out
 
     @staticmethod
@@ -192,8 +220,12 @@ class ShowerValMetrics:
         directions first when ``canon_sym`` is on, exactly as ``Solvers.forward``.
 
         Returns ``(features, active, pdgid)``: the occupancy and the species come
-        out of the flow, so neither may be taken from the batch.
+        out of the flow, so neither may be taken from the batch. The pass-through
+        gate is applied as ``GenerateOut`` applies it: a fired event emits the
+        primary unchanged with no deposit (the flow is trained with weight 0 on
+        those events, so solving them instead scores a mode it never generates).
         """
+        ds_in = ds_t
         cfg = lego.rc.odeint_conf
         sym = getattr(lego, "sym", None)
         if sym is not None:
@@ -204,17 +236,35 @@ class ShowerValMetrics:
         n0  = lego.rc.n_prefix + 1
         gen = (ds_t.m.full[:, lego.rc.n_prefix] == 0).unsqueeze(-1)
         m   = ds_t.m.full.clone()
-        m[:, n0:] |= gen.long()            # every outgoing slot is a candidate
+        am  = ds_t.am.full
+        sv  = torch.zeros_like(gen.squeeze(-1))
+        if getattr(lego.rc, "survive_head", False):  # pin the surviving primary, as GenerateOut does
+            sv = lego.sample_survival(ds_t) & gen.squeeze(-1)   # gated events are overwritten below anyway
+        if getattr(lego.rc, "count_head", False):    # exactly the sampled number of slots, as GenerateOut does
+            n = lego.sample_count(ds_t, sv)
+            m, am = lego.open_count_slots(m, am, n, gen.squeeze(-1))
+        else:
+            m[:, n0:] |= gen.long()            # every outgoing slot is a candidate
+            am = am | (m == 1)
         base = lego.gen_base_wrapper(DataStruct(ds_t.f.full, m, ds_t.am.full))
         f = ds_t.f.full.clone()
         f[:, n0:, -1] = torch.where(gen, torch.zeros_like(f[:, n0:, -1]), f[:, n0:, -1])
+        f[sv, n0, -1] = ds_in.f.in_p[sv, 0, -1].to(f.dtype)
         out, sp = lego.solve(
-            DataStruct(f, m, ds_t.am.full | (m == 1)), x_init=base,
+            DataStruct(f, m, am), x_init=base,
             step_size=cfg.get("step_size", 0.04), method=cfg.get("method", "midpoint"),
             return_species=True,
         )
         if sym is not None:
             out = lego._canon_dirs(out, face, fwd, inverse=True)
+        pt = lego.sample_passthrough(ds_t) & gen.squeeze(-1)   # canonical frame, like the other heads
+        if bool(pt.any()):
+            out, sp = out.clone(), sp.clone()
+            out[pt, n0, 0] = 0.0                                # e_out == e_in
+            out[pt, n0, 1:7] = ds_in.f.in_cc[pt, 0, 1:7]
+            _F(out).edep[pt] = 0.0
+            sp[pt, n0:] = 0
+            sp[pt, n0] = lego._in_species(ds_in)[pt]
         tmpl = lego.pdgids_template
         raw  = torch.cat((tmpl.new_zeros(1), tmpl))[sp]
         return out, (sp[:, n0:] > 0), raw[:, n0:]
