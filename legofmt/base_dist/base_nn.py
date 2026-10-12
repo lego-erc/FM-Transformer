@@ -89,6 +89,19 @@ def build_base_head(rc, gen_base) -> nn.Sequential | None:
 class BaseDist:
     """Base-distribution mixin for :class:`~legofmt.main.modules.LEGOLtng`."""
 
+    def _chord(self, ds_t: DataStruct) -> Tensor:
+        """Full chord through the cuboid along the incoming ray (longest-edge lengths); fwd+bwd ->
+        entry/exit-storage invariant. ``(B, 1)``."""
+        inc     = ds_t.f.in_cc[..., 0, 1:7].nan_to_num(1.0)
+        u, pos  = inc[..., :3], inc[..., 3:]
+        d       = u.new_tensor(self.rc.config["model_conf"].get("cuboid_dim") or [1.0, 1.0, 1.0])
+        d       = d / d.max()
+        p       = pos / pos.abs().amax(-1, keepdim=True).clamp_min(1e-8) * d  # pos is dir(x / d)
+        ok_u    = u.abs() > 1e-6
+        tf      = torch.where(ok_u, (u.sign() * d - p) / u, torch.full_like(u, 4.0))
+        tb      = torch.where(ok_u, (p + u.sign() * d) / u, torch.full_like(u, 4.0))
+        return ((tf.amin(-1) + tb.amin(-1)).clamp(0.0, 3.5) / 2).unsqueeze(-1)
+
     def base_head_params(self, ds_t: DataStruct):
         """Per-event ``(sm_scale, edep_mu, edep_sig, kappa, ang_pow)`` from the head's
         inputs: incoming kinematics, species one-hot, cuboid chord,
@@ -101,17 +114,7 @@ class BaseDist:
         Z, A    = ds_t.f.cond("Z"), ds_t.f.cond("A")
         x0      = 716.4 * A / (Z * (Z + 1) * (287.0 / Z.sqrt()).log())
         t       = ds_t.f.cond("Size") * ds_t.f.cond("Density") / x0
-        # chord length: full chord through the cuboid along the incoming ray
-        # (longest-edge lengths); fwd+bwd -> entry/exit-storage invariant
-        inc     = ds_t.f.in_cc[..., 0, 1:7].nan_to_num(1.0)
-        u, pos  = inc[..., :3], inc[..., 3:]
-        d       = u.new_tensor(self.rc.config["model_conf"].get("cuboid_dim") or [1.0, 1.0, 1.0])
-        d       = d / d.max()
-        p       = pos / pos.abs().amax(-1, keepdim=True).clamp_min(1e-8) * d  # pos is dir(x / d)
-        ok_u    = u.abs() > 1e-6
-        tf      = torch.where(ok_u, (u.sign() * d - p) / u, torch.full_like(u, 4.0))
-        tb      = torch.where(ok_u, (p + u.sign() * d) / u, torch.full_like(u, 4.0))
-        chord   = ((tf.amin(-1) + tb.amin(-1)).clamp(0.0, 3.5) / 2).unsqueeze(-1)
+        chord   = self._chord(ds_t)
         x       = torch.cat((ds_t.f.in_cc[..., 0], species, chord, t.log().unsqueeze(-1)), dim=-1)
         if (self.rc.config.get("base_conf") or {}).get("base_head_nout", False):
             # Only E_dep's (mu, sig) see the outgoing set. sm_scale and kappa are
@@ -257,9 +260,26 @@ class BaseDist:
         )
         if self.rc.ot_coupling and self.model.training:
             base = self._ot_couple(base, ds_t)
+        if self.rc.lead_slot:   # training and inference alike, so the leader slot's base is one distribution
+            base = self._lead_base(base, m)
         base = self.gen_base.insert_add(base)
         noise = base if noise is None else torch.where(fwd.view(-1, 1, 1), base, noise)
         return torch.where((m == 1).unsqueeze(-1), noise, data)
+
+    def _lead_base(self, base: Tensor, m: Tensor) -> Tensor:
+        """``lead_slot``: the hardest base draw (smallest energy scalar) among the open outgoing slots
+        goes to slot n0, in training (after the OT coupling) and at inference alike. With OT alone the
+        leader slot's base draw was harder in training than the random draw it got at inference, and the
+        flow under-transported it (EM leader energy -10%); with the hardest draw at inference only it
+        over-shot (+15%). Base draws are iid, so the permutation is free."""
+        n0  = self.rc.n_prefix + 1
+        e   = base[:, n0:, 0].masked_fill(m[:, n0:] != 1, float("inf"))
+        j   = e.argmin(-1) + n0
+        b   = torch.arange(base.shape[0], device=base.device)
+        idx = torch.arange(base.shape[1], device=base.device).repeat(base.shape[0], 1)
+        idx[b, j] = n0
+        idx[b, n0] = j
+        return base.gather(1, idx.unsqueeze(-1).expand_as(base))
 
     def pretrain_base(self, batches, lr: float = 1e-2) -> float:
         """Fit the base head alone on ``batches`` with Adam, then freeze it: the head
