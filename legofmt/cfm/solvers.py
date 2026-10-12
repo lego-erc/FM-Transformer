@@ -120,7 +120,7 @@ class Solvers:
             x_init = x_init.where(am, _F(x_init).in_p)
 
         if time_grid is None:
-            if method in ("euler", "midpoint"):
+            if method in ("euler", "midpoint", "rk4"):
                 n = max(round(1.0 / step_size), 1)
                 time_grid = torch.linspace(0.0, 1.0, n + 1, device=x_init.device, dtype=x_init.dtype)
             else:
@@ -130,8 +130,12 @@ class Solvers:
 
         sp     = pdgids_idx.reshape(*ds_t.m.full.shape).long()
         sp_gen = self._species_gen(ds_t.m.full, sp)
+        if method not in ("euler", "midpoint", "rk4") and bool(sp_gen.any()):
+            raise ValueError(
+                f"method={method!r} has no species jumps: only euler, midpoint and rk4 generate the species "
+                "channel (an ODESolver method would emit only the pinned slots); pin every class or switch method.")
         sp     = torch.where(
-            sp_gen, torch.randint_like(sp, self.rc.model_args["npdgids"]), sp)
+            sp_gen, self._species_noise(sp, self._in_species(ds_t)), sp)
 
         def _sample(x_init, mask, attn_mask, sp, sp_gen):
             extras = dict(mask=mask, attn_mask=attn_mask, types=self.types_embd, pdgids=sp)
@@ -145,9 +149,13 @@ class Solvers:
                     x_init, time_grid, sp_gen=sp_gen,
                     return_intermediates=return_intermediates, **extras,
                 )
+            elif method == "rk4":
+                out, sp_out = self._rk4_steps(
+                    x_init, time_grid, sp_gen=sp_gen,
+                    return_intermediates=return_intermediates, **extras,
+                )
             else:
-                vm = (lambda *a, **k: self.model(*a, **k).clone()) if method == "rk4" else self.model
-                out = ODESolver(velocity_model=vm).sample(
+                out = ODESolver(velocity_model=self.model).sample(
                     x_init=x_init, time_grid=time_grid,
                     step_size=step_size, method=method,
                     return_intermediates=return_intermediates, **extras,
@@ -166,6 +174,39 @@ class Solvers:
             sp_out = sp_out[-1]
         return (x, sp_out) if return_species else x
 
+    def _species_noise(self, like: Tensor, prim: Tensor) -> Tensor:
+        """Uniform class noise for the species channel. With ``survive_head`` the primary's own
+        class is left out, so a visible primary-class label early in the path is the pinned leading
+        particle and not a noise draw (otherwise ~1.3 random primary labels per event hide the pin)."""
+        if self.rc.species_mask:                     # masked source: a corrupted label is "unknown", never wrong
+            return torch.zeros_like(like)
+        K = self.rc.model_args["npdgids"]
+        lo = int(self.rc.count_head)                 # count_head: "empty" is never a class of a generated row
+        if not self.rc.survive_head:
+            return torch.randint_like(like, K - lo) + lo
+        noise = torch.randint_like(like, K - 1 - lo) + lo
+        return noise + (noise >= prim.view(-1, *([1] * (like.dim() - 1)))).long()
+
+    def _sp_logits(self, lg: Tensor) -> Tensor:
+        """Species logits as the sampler/loss sees them: with ``count_head`` the empty class is excluded."""
+        if not self.rc.count_head:
+            return lg
+        lg = lg.clone()
+        lg[..., 0] = float("-inf")
+        return lg
+
+    def _settle(self, logits: Tensor, sp: Tensor) -> Tensor:
+        """Final class per slot from the last posterior: its argmax, or with ``odeint_conf.settle_temp``
+        = T > 0 a Gumbel draw from ``logits / T`` (T = 1 is a posterior sample; argmax rounds every
+        uncertain slot to its majority class, a sample keeps the rare classes). With ``species_mask``
+        an unmasked slot keeps its class; only the still-masked ones settle."""
+        lg = self._sp_logits(logits.float())
+        T  = self.rc.odeint_conf.get("settle_temp")
+        if T:
+            lg = lg / T - torch.rand_like(lg).log().neg().log()
+        out = lg.argmax(-1)
+        return torch.where(sp == 0, out, sp) if self.rc.species_mask else out
+
     def _species_gen(self, mask: Tensor, sp: Tensor) -> Tensor:
         """Which slots generate their own species: transported outgoing slots that
         arrive unassigned. A pre-filled class pins the slot, which is how a caller
@@ -179,8 +220,13 @@ class Solvers:
         posterior over ``x_1`` at rate ``dt / (1 - t)``. Gumbel-argmax draws that
         categorical without materialising a softmax. A reverse grid gives a negative
         rate, which clamps to zero -- reverse solves do not regenerate."""
-        lg     = logits.float()
-        jump   = torch.rand_like(lg[..., 0]) < (dt / (1 - t_a)).clamp(0.0, 1.0)
+        lg     = self._sp_logits(logits.float())
+        tau    = self.rc.species_tau                    # species time-warp: the class path runs on t / tau
+        sa, sb = (t_a / tau).clamp(max=1.0), ((t_a + dt) / tau).clamp(max=1.0)
+        rate   = torch.where(sa < 1, (sb - sa) / (1 - sa).clamp(min=1e-6), torch.zeros_like(sa))
+        jump   = torch.rand_like(lg[..., 0]) < rate.clamp(0.0, 1.0)
+        if self.rc.species_mask:                     # absorbing path: only still-masked slots jump, once
+            jump   = jump & (sp == 0)
         gumbel = -torch.rand_like(lg).log().neg().log()
         return torch.where(jump & sp_gen, (lg + gumbel).argmax(-1), sp)
 
@@ -206,7 +252,7 @@ class Solvers:
             if return_intermediates:
                 xs.append(x)
         if lg is not None:  # settle on the final posterior, not a late resample
-            extras["pdgids"] = torch.where(sp_gen, lg.argmax(-1), extras["pdgids"])
+            extras["pdgids"] = torch.where(sp_gen, self._settle(lg, extras["pdgids"]), extras["pdgids"])
         return (torch.stack(xs) if return_intermediates else x), extras["pdgids"]
 
     def _euler_steps(
@@ -226,7 +272,36 @@ class Solvers:
             if return_intermediates:
                 xs.append(x)
         if lg is not None:  # settle on the final posterior, not a late resample
-            extras["pdgids"] = torch.where(sp_gen, lg.argmax(-1), extras["pdgids"])
+            extras["pdgids"] = torch.where(sp_gen, self._settle(lg, extras["pdgids"]), extras["pdgids"])
+        return (torch.stack(xs) if return_intermediates else x), extras["pdgids"]
+
+    def _rk4_steps(
+        self, x: Tensor, time_grid: Tensor, sp_gen: Tensor,
+        return_intermediates: bool = False, **extras,
+    ) -> tuple[Tensor, Tensor]:
+        """Classical RK4 on the ``mask == 1`` slots, as a projection method: the stages run in
+        the ambient space (``ProjectModel`` projects every stage point onto the manifold before
+        the field sees it and returns a tangent velocity there) and the end point is projected
+        back, which keeps the fourth order (geodesic stages with velocities pulled to ``T_x``
+        measured only 4x better than Euler at 4 steps; this is 800x, and 16x per halving of the step). Every stage is
+        instantaneous (``d = 0``: the order comes from the four samples, not the flow map), and
+        the species jump of a step uses the last stage's posterior."""
+        xs  = [x]
+        man = self.model.manifold
+        gen = (extras["mask"] == 1).unsqueeze(-1)
+        lg  = None
+        for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
+            dt     = t_b - t_a
+            k1     = self.model(x, t_a, **extras)
+            k2     = self.model(x + dt / 2 * k1, t_a + dt / 2, **extras)
+            k3     = self.model(x + dt / 2 * k2, t_a + dt / 2, **extras)
+            k4, lg = self.model(x + dt * k3, t_b, return_species=True, **extras)
+            x      = torch.where(gen, man.projx(x + dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4)), x)
+            extras["pdgids"] = self._species_jump(extras["pdgids"], lg, sp_gen, t_a, dt)
+            if return_intermediates:
+                xs.append(x)
+        if lg is not None:  # settle on the final posterior, not a late resample
+            extras["pdgids"] = torch.where(sp_gen, self._settle(lg, extras["pdgids"]), extras["pdgids"])
         return (torch.stack(xs) if return_intermediates else x), extras["pdgids"]
 
     @torch.no_grad()
