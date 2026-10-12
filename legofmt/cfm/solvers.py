@@ -20,6 +20,7 @@ from flow_matching.solver import ODESolver
 from legofmt.data.struct import DataStruct, _F
 
 from legofmt.cfm.project_model import is_compiled
+from legofmt.compat import dynamic_shape_attention
 
 from legofmt.mod_comps.config import _amp_dtype
 
@@ -312,7 +313,11 @@ class Solvers:
         if cfg.get("fwd_compile", False) and not (
             is_compiled(self.model) or is_compiled(self.model.vf)
         ):
-            self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=False)
+            # one symbolic-shape graph (needs the einx patch); CUDA graphs are recorded per distinct
+            # shape and kept, so they are only safe when compile_buckets bounds the shapes
+            dynamic_shape_attention()
+            self.model = torch.compile(self.model, mode="reduce-overhead" if cfg.get("compile_buckets") else None,
+                                       dynamic=True)
 
         ds_t = DataStruct(*batch) if isinstance(batch, tuple) else batch
         if self.sym is not None:
