@@ -251,7 +251,8 @@ class BaseDist:
         fwd   = m[:, self.rc.n_prefix] == 0  # incoming slot conditions => forward event
         noise = None if fwd.all() else self.gen_base.iso(m.shape, data.device)
         if not fwd.any():
-            return torch.where((m == 1).unsqueeze(-1), noise, data)
+            out = torch.where((m == 1).unsqueeze(-1), noise, data)
+            return self._with_species_block(out, m) if self.rc.species_flow else out
 
         if hasattr(self, "base_head"):
             self._fit_base_head(ds_t, fwd)
@@ -264,7 +265,16 @@ class BaseDist:
             base = self._lead_base(base, m)
         base = self.gen_base.insert_add(base)
         noise = base if noise is None else torch.where(fwd.view(-1, 1, 1), base, noise)
-        return torch.where((m == 1).unsqueeze(-1), noise, data)
+        out   = torch.where((m == 1).unsqueeze(-1), noise, data)
+        return self._with_species_block(out, m) if self.rc.species_flow else out
+
+    def _with_species_block(self, base: Tensor, m: Tensor) -> Tensor:
+        """``species_flow``: append the block's base draw, N(0, I_d) on every generated outgoing row and
+        zero elsewhere, after the OT coupling and the lead-base rule (both on the 7 kinematic columns;
+        base draws are iid, so the block needs no pairing). A pinned row's block is never read."""
+        rows = (m == 1) & (torch.arange(m.shape[1], device=m.device) >= self.rc.n_prefix + 1)
+        blk  = torch.randn(*m.shape, self.rc.model_args["sp_block"], device=base.device, dtype=base.dtype)
+        return torch.cat((base, blk * rows.unsqueeze(-1)), dim=-1)
 
     def _lead_base(self, base: Tensor, m: Tensor) -> Tensor:
         """``lead_slot``: the hardest base draw (smallest energy scalar) among the open outgoing slots

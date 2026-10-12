@@ -68,6 +68,8 @@ class ResolvedLEGOConfig:
     lead_slot: bool
     species_tau: float
     species_mask: bool
+    species_flow: bool
+    species_learn_vertices: bool
     count_fac: float
     survive_fac: float
     passthrough_fac: float
@@ -253,6 +255,14 @@ def _build_resolved(
         if not model_conf.get("count_head", False):  # without it an empty lead slot cascades (exp/lead-slot)
             raise ValueError("model_conf.lead_slot needs model_conf.count_head")
         model_args["ntypes"] = n_prefix + 3
+    if model_conf.get("species_flow", False):  # the species as a flowed block: one coordinate per real class
+        if not model_conf.get("count_head", False):
+            raise ValueError("model_conf.species_flow needs model_conf.count_head (class 0 has no vertex)")
+        if model_conf.get("reflow_path") or model_conf.get("reflow_start_epoch", 0) > 0:
+            raise ValueError("model_conf.species_flow does not support reflow (the teacher's block base is not coupled)")
+        model_args["sp_block"] = int(pdgids.shape[0])
+    else:
+        model_args.pop("sp_block", None)   # a saved species_flow config with the flag turned off
 
     sections = model_conf.get("one_step_euler_sections", 8)
     if model_conf.get("one_step_euler_fac", 0.0) > 0:
@@ -297,6 +307,8 @@ def _build_resolved(
         lead_slot=bool(model_conf.get("lead_slot", False)),
         species_tau=float(model_conf.get("species_tau", 1.0)),
         species_mask=bool(model_conf.get("species_mask", False)),
+        species_flow=bool(model_conf.get("species_flow", False)),
+        species_learn_vertices=bool(model_conf.get("species_learn_vertices", False)),
         count_fac=float(model_conf.get("count_fac", 1.0)),
         survive_fac=float(model_conf.get("survive_fac", 1.0)),
         passthrough_fac=model_conf.get("passthrough_fac", 1.0),

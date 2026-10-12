@@ -412,9 +412,9 @@ def test_flow_map_under_learned_loss_weights() -> None:
     # exp(lv_flow) must track E[L_flow]: drive it with a constant flow-map loss
     import legofmt.distill.distill as D
     const = 0.05
-    with patch.object(D, "one_step_euler_loss", lambda *a, **k: torch.tensor(const)):
+    with patch.object(D, "one_step_euler_loss", lambda *a, **k: (torch.tensor(const), None)):
         with patch("legofmt.main.train_step.one_step_euler_loss",
-                   lambda *a, **k: torch.tensor(const)):
+                   lambda *a, **k: (torch.tensor(const), None)):
             opt = torch.optim.Adam([model.lv_flow], lr=0.1)
             for _ in range(400):
                 opt.zero_grad()

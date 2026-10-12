@@ -19,7 +19,7 @@ from flow_matching.solver import ODESolver
 
 from legofmt.data.struct import DataStruct, _F
 
-from legofmt.cfm.project_model import is_compiled
+from legofmt.cfm.project_model import is_compiled, uncompiled
 from legofmt.compat import dynamic_shape_attention
 
 from legofmt.mod_comps.config import _amp_dtype
@@ -117,7 +117,7 @@ class Solvers:
         am = ds_t.am.full.unsqueeze(-1)
         if x_init is None:
             x_init = self.gen_base_wrapper(ds_t)
-        if x_init.shape == ds_t.f.model_in.shape:
+        if x_init.shape[:-1] == ds_t.f.model_in.shape[:-1]:
             x_init = x_init.where(am, _F(x_init).in_p)
 
         if time_grid is None:
@@ -131,12 +131,18 @@ class Solvers:
 
         sp     = pdgids_idx.reshape(*ds_t.m.full.shape).long()
         sp_gen = self._species_gen(ds_t.m.full, sp)
-        if method not in ("euler", "midpoint", "rk4") and bool(sp_gen.any()):
-            raise ValueError(
-                f"method={method!r} has no species jumps: only euler, midpoint and rk4 generate the species "
-                "channel (an ODESolver method would emit only the pinned slots); pin every class or switch method.")
-        sp     = torch.where(
-            sp_gen, self._species_noise(sp, self._in_species(ds_t)), sp)
+        if self.rc.species_flow:   # the block is the species channel: a generated row carries the sentinel and
+            # is decoded from its final block; no jumps
+            sp      = torch.where(sp_gen, torch.full_like(sp, -1), sp)
+            sp_jump = torch.zeros_like(sp_gen)
+        else:
+            if method not in ("euler", "midpoint", "rk4") and bool(sp_gen.any()):
+                raise ValueError(
+                    f"method={method!r} has no species jumps: only euler, midpoint and rk4 generate the species "
+                    "channel (an ODESolver method would emit only the pinned slots); pin every class or switch method.")
+            sp      = torch.where(
+                sp_gen, self._species_noise(sp, self._in_species(ds_t)), sp)
+            sp_jump = sp_gen
 
         def _sample(x_init, mask, attn_mask, sp, sp_gen):
             extras = dict(mask=mask, attn_mask=attn_mask, types=self.types_embd, pdgids=sp)
@@ -167,12 +173,18 @@ class Solvers:
             return torch.cat((out, sp_out.unsqueeze(-1).to(out.dtype)), dim=-1)
 
         res = self.chunked(
-            _sample, x_init, ds_t.m.full, ds_t.am.full, sp, sp_gen,
+            _sample, x_init, ds_t.m.full, ds_t.am.full, sp, sp_jump,
             split_size=split_size, cat_dim=-3, buckets=buckets,
         )
         x, sp_out = res[..., :-1], res[..., -1].long()
         if return_intermediates:  # the class is constant across the stack
             sp_out = sp_out[-1]
+        if self.rc.species_flow:   # decode: nearest vertex (equal norms: largest dot product), fp32; strip the block
+            C = uncompiled(self.model).vf.vertices()
+            with torch.autocast(x.device.type, enabled=False):
+                dec = ((x[-1] if return_intermediates else x)[..., 7:].float() @ C.t()).argmax(-1) + 1
+            sp_out = torch.where(sp_out < 0, dec, sp_out)
+            x      = x[..., :7]
         return (x, sp_out) if return_species else x
 
     def _species_noise(self, like: Tensor, prim: Tensor) -> Tensor:
@@ -221,6 +233,8 @@ class Solvers:
         posterior over ``x_1`` at rate ``dt / (1 - t)``. Gumbel-argmax draws that
         categorical without materialising a softmax. A reverse grid gives a negative
         rate, which clamps to zero -- reverse solves do not regenerate."""
+        if self.rc.species_flow:                     # the block is the species channel: nothing jumps
+            return sp
         lg     = self._sp_logits(logits.float())
         tau    = self.rc.species_tau                    # species time-warp: the class path runs on t / tau
         sa, sb = (t_a / tau).clamp(max=1.0), ((t_a + dt) / tau).clamp(max=1.0)
@@ -335,7 +349,7 @@ class Solvers:
         am_out = ds_t.am.full
 
         if cfg.get("return_base", False):
-            sols = base.masked_fill(~am_out.unsqueeze(-1), torch.nan)
+            sols = base[..., :7].masked_fill(~am_out.unsqueeze(-1), torch.nan)
         else:
             amp = (_amp_dtype(cfg["amp"]) if "amp" in cfg
                    else self.rc.amp_dtype)

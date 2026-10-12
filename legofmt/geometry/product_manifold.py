@@ -1,7 +1,8 @@
 """``ProductManifold``: one manifold per slice of the feature dimension.
 
 Each factor's map is applied to its own slice of the last dimension, so the
-factor dims must sum to the model's ``in_dim``. The path sampler that trains
+factor dims must sum to the width of the flowed state (``in_dim``, plus the
+species block under ``species_flow``). The path sampler that trains
 against it lives in ``legofmt.cfm.path_sampler``.
 """
 

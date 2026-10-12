@@ -48,9 +48,11 @@ def test_survival_target_pins_the_leading_class_and_trains_the_head() -> None:
     assert float(g) > 0
 
 
-def test_generation_pins_a_surviving_primary(tmp_path) -> None:
+@pytest.mark.parametrize("species_flow", [False, True])
+def test_generation_pins_a_surviving_primary(tmp_path, species_flow: bool) -> None:
     torch.manual_seed(0)
     cfg = _cfg()["config"]
+    cfg["model_conf"]["species_flow"] = species_flow
     a = LEGOLtng({"state_dict": {}, "config": cfg})
     torch.save({"state_dict": a.model.vf.state_dict(), "config": cfg}, tmp_path / "f.pt")
     gen = GenerateOut(str(tmp_path / "f.pt"), device="cpu")

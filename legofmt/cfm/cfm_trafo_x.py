@@ -20,6 +20,9 @@ from x_transformers import ContinuousTransformerWrapper, Encoder
 from legofmt.compat import fp32_attention, legacy_param_rename, needs_fp32_attention
 
 
+SPECIES_R = 2.0   # species_flow: radius of the species vertices (base std 1)
+
+
 class CFMTrafo_x(nn.Module):
 
     def __init__(
@@ -46,6 +49,7 @@ class CFMTrafo_x(nn.Module):
         ct_nmax: int = 0,
         sp_layers: int = 0,
         sp_dim: int | None = None,
+        sp_block: int = 0,
         dim_in_out: int | None = None,
         time_cond: bool = True,
         step_cond: bool = False,
@@ -62,6 +66,7 @@ class CFMTrafo_x(nn.Module):
         self.nvtypes = nvtypes
         self.ntypes = ntypes
         self.npdgids = npdgids
+        self.sp_block = sp_block
         self.time_cond = time_cond
         self.step_cond = step_cond
 
@@ -106,6 +111,10 @@ class CFMTrafo_x(nn.Module):
             self.species_head = nn.Sequential(*layers, nn.Linear(w, npdgids))
         else:
             self.species_head = nn.Linear(h_dim, npdgids)
+        if sp_block > 0:   # species_flow: one vertex direction per real class (frozen at r I unless learned), flat so
+            # muon_factory gives this embedding table AdamW; a checkpoint without it (count_s6) loads r I
+            self.species_vertices = nn.Parameter(torch.eye(sp_block).flatten())
+            self._register_load_state_dict_pre_hook(self._default_vertices)
         self.pt_head = nn.Sequential(
             nn.Linear(n_cond + in_dim + npdgids, pt_dim), nn.Mish(), nn.Linear(pt_dim, 1),
         )
@@ -156,6 +165,33 @@ class CFMTrafo_x(nn.Module):
             nn.functional.one_hot(pdgids.reshape(batch, n).long(), self.npdgids),
         ), dim=-1).to(self.cond_w_mask.dtype)
 
+    def _default_vertices(self, state_dict, prefix, *_) -> None:
+        state_dict.setdefault(prefix + "species_vertices", torch.eye(self.sp_block).flatten())
+
+    def vertices(self) -> Tensor:
+        """``(d, d)``, row k = class k + 1's vertex: the learned directions on the sphere of radius r (fixed, so
+        the margin against the unit base is fixed and the vertices cannot shrink toward the base mean)."""
+        return SPECIES_R * nn.functional.normalize(self.species_vertices.float().view(self.sp_block, -1), dim=-1)
+
+    def _soft_label(self, z: Tensor, t: Tensor, C: Tensor) -> Tensor:
+        """``(1 - t) e_0 + t softmax(beta z . C)``: the block-only likelihood ratio over the real classes on the
+        path ``z_t = (1 - t) z_0 + t c_s`` (base std 1, equal vertex norms, ``beta = t / (1 - t)^2``), mixed with
+        today's "unknown" label so that t = 0 is exactly class 0 and t -> 1 the hard one-hot of the nearest
+        vertex. fp32: beta reaches 1e6."""
+        with torch.autocast(z.device.type, enabled=False):
+            tt  = t.float().unsqueeze(-1)
+            omt = 1.0 - tt
+            p   = torch.softmax((z.float() @ C.t()) * (tt / omt.clamp(min=1e-3) ** 2), dim=-1)
+            return torch.cat((omt, tt * p), dim=-1)
+
+    def _block_velocity(self, logits: Tensor, z: Tensor, t: Tensor, C: Tensor) -> Tensor:
+        """``(p C - z_t) / (1 - t)`` with ``p`` the posterior over the real classes: on the linear path the
+        conditional velocity is ``(c_s - z_t) / (1 - t)``, so this is the marginal flow-matching velocity at the
+        true posterior, and the species cross-entropy is the block's transport loss."""
+        with torch.autocast(z.device.type, enabled=False):
+            p = torch.softmax(logits[..., 1:].float(), dim=-1)
+            return (p @ C - z.float()) / (1.0 - t.float()).clamp(min=1e-3).unsqueeze(-1)
+
     def _embed(self, x: Tensor, oh: Tensor) -> Tensor:
         """Mean of the mask-, type- and pdgid-conditional up-projections of ``x``."""
         w  = torch.cat((self.cond_w_mask[:, 0], self.cond_w_types[:, 0], self.cond_w_pdgids[:, 0]))
@@ -190,7 +226,14 @@ class CFMTrafo_x(nn.Module):
         else:
             cond = self.global_cond.expand(x.shape[0], -1)
 
-        oh   = self._one_hot(mask, types, pdgids, x.shape[0])
+        if self.sp_block > 0:   # species_flow: a generated row carries -1 and reads a soft label off its block
+            x, z = x[..., :self.in_dim], x[..., self.in_dim:]
+            C    = self.vertices().detach()   # through the network the vertices collapse; _step's own loss moves them
+            gen  = (pdgids.reshape(mask.shape) < 0).unsqueeze(-1)
+            oh   = self._one_hot(mask, types, pdgids.clamp(min=0), x.shape[0])
+            oh[..., -self.npdgids:] = torch.where(gen, self._soft_label(z, t, C), oh[..., -self.npdgids:])
+        else:
+            oh   = self._one_hot(mask, types, pdgids, x.shape[0])
         embd = self._embed(x, oh)
         if self.time_cond:
             embd = embd + cond
@@ -201,4 +244,8 @@ class CFMTrafo_x(nn.Module):
             embd = self.vf.emb_dropout(embd)
         h = self.vf.project_out(self.vf.attn_layers(embd, mask=attn_mask, condition=cond))
         v = self._project_out(h, mask, oh)
+        if self.sp_block > 0:   # the block's velocity rides the species head's posterior, on generated rows only
+            sp = self.species_head(h)
+            v  = torch.cat((v, gen * self._block_velocity(sp, z, t, C)), dim=-1)
+            return (v, sp) if return_species else v
         return (v, self.species_head(h)) if return_species else v

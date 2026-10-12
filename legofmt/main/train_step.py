@@ -17,6 +17,7 @@ Members resolved through ``self`` and owned by ``LEGOLtng``: ``rc``, ``model``,
 import torch
 from torch import Tensor
 
+from legofmt.cfm.project_model import uncompiled
 from legofmt.data.struct import DataStruct, _F
 
 from legofmt.distill.distill import one_step_euler_loss
@@ -125,7 +126,8 @@ class TrainStep:
     ) -> Tensor:
         """Add ``fac * (lv_flow + every * exp(-lv_flow) * one_step_euler)`` on firing
         steps and the barrier alone otherwise, so the per-step expectation equals
-        the ungated Kendall term; validation evaluates it every step with ``every=1``."""
+        the ungated Kendall term; validation evaluates it every step with ``every=1``.
+        Under ``species_flow`` the block's ladder term is added at ``fac * every``, without a cell."""
         fac = self.rc.one_step_euler_fac
         if fac <= 0:
             return loss
@@ -141,12 +143,16 @@ class TrainStep:
         if self.training and self.global_step % every != 0:
             return loss
 
-        sc = one_step_euler_loss(self, base, ds_t, pdgid_idx)
+        sc, sc_sp = one_step_euler_loss(self, base, ds_t, pdgid_idx)
         w = fac * (every if self.training else 1)
+        if sc_sp is not None:   # the block's ladder term, no Kendall cell
+            loss = loss + w * sc_sp
         if lvf is not None:
             w = w * torch.exp(-lvf)
         if self.training:
             fm_logs = {"loss/one_step_euler": sc.detach()}
+            if sc_sp is not None:
+                fm_logs["loss/one_step_euler_sp"] = sc_sp.detach()
             if lvf is not None:
                 fm_logs["loss_weight/var_flow"] = lvf.detach().exp()
             self.log_dict(fm_logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
@@ -215,11 +221,17 @@ class TrainStep:
                 # filler; transporting them gave that row an off-manifold target
                 data[:, :self.rc.n_prefix, 1:] = ds_t.f.non_cc[..., 1:]
                 s1 = torch.where(rows, sp, s1)
-            t_sp = (t / self.rc.species_tau).clamp(max=1.0)   # species time-warp: labels are final from t = tau on
-            s_t  = torch.where(
-                rows & (torch.rand_like(s1, dtype=t.dtype) >= t_sp.unsqueeze(-1)),
-                self._species_noise(s1, pt_idx), s1,
-            )
+            if self.rc.species_flow:   # the block is the species channel: no label noise, the trunk reads a
+                # soft label off the block; target = the class's vertex
+                vtx  = uncompiled(self.model).vf.vertices()[(s1 - 1).clamp(min=0)]
+                s_t  = torch.where(rows, torch.full_like(s1, -1), s1)
+                data = torch.cat((data, vtx * rows.unsqueeze(-1)), dim=-1)
+            else:
+                t_sp = (t / self.rc.species_tau).clamp(max=1.0)   # species time-warp: labels are final from t = tau on
+                s_t  = torch.where(
+                    rows & (torch.rand_like(s1, dtype=t.dtype) >= t_sp.unsqueeze(-1)),
+                    self._species_noise(s1, pt_idx), s1,
+                )
             if sv_pin is not None:  # the surviving primary's class is given, as at generation
                 s_t = torch.where(sv_pin, s1, s_t)
             pad  = (rows & (s1 == 0)).unsqueeze(-1)
@@ -227,7 +239,7 @@ class TrainStep:
                 torch.cat((torch.where(pad, base, data), ds_t.f.pdgids), dim=-1),
                 m, ds_t.am.full | rows,
             )
-            ps_ = self.ps.sample(base, ds_t.f.model_in, t)
+            ps_ = self.ps.sample(base, ds_t.f.full[..., :-1], t)   # the flowed state: all but the pdgid column
         step_extras = ({"d": torch.zeros_like(ps_.t)}
                        if getattr(self.model.vf, "step_cond", False) else {})
         v_out, sp_logits = self.model(
@@ -266,6 +278,20 @@ class TrainStep:
             if self.training:
                 logs = {**logs, "loss/species": loss_sp.detach(),
                         "loss/species_acc": (lg.argmax(-1) == tg).float().mean()}
+            vf = uncompiled(self.model).vf
+            if self.rc.species_flow and vf.species_vertices.requires_grad:
+                # species_learn_vertices: the vertices' only loss, the block-only posterior softmax(beta z_t . C) of
+                # the true class on the blocks the trunk saw (the soft label's own decoder). Through the network they
+                # collapse (the kinematic loss prefers a less discriminative soft label); with this loss a 10-class
+                # toy still piles the rare classes together and drifts frequent ones to 0.5-0.7 -- hence off by default
+                C       = vf.vertices()
+                tt      = t.view(-1, 1).expand_as(rows)[rows].unsqueeze(-1)
+                beta    = tt / (1.0 - tt).clamp(min=1e-3) ** 2
+                loss_vx = torch.nn.functional.cross_entropy((ps_.x_t[..., 7:][rows] @ C.t()) * beta, tg - 1)
+                loss    = loss + loss_vx
+                if self.training:
+                    logs = {**logs, "loss/vertices": loss_vx.detach(),
+                            "species/min_vertex_dist": torch.pdist(C.detach()).min()}
         if logs:
             self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
 

@@ -18,6 +18,8 @@ from legofmt.base_dist.base_nn import (
 )
 from legofmt.base_dist.gen_base import GenerateBase
 
+from flow_matching.utils.manifolds import Euclidean
+
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt.cfm.project_model import ProjectModel, uncompiled
 from legofmt.cfm.solvers import Solvers
@@ -29,6 +31,7 @@ from legofmt.data.prep import DataPrep
 from legofmt.data.struct import _F
 
 from legofmt.geometry.geom_trafos import GeomTrafos
+from legofmt.geometry.product_manifold import ProductManifold
 
 from legofmt.cfm.path_sampler import ProductPathSampler
 from legofmt.geometry.symmetry_projections import CubeSymmetry
@@ -73,11 +76,13 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         self.register_buffer("types_embd", types_embd)
 
         self.model       = self._build_model(self.rc)
+        if self.rc.species_flow and not self.rc.species_learn_vertices:   # fixed vertices r I (the default)
+            self.model.vf.species_vertices.requires_grad_(False)
         self.gen_base    = GenerateBase(self.rc.config)
         self.geom_trafos = GeomTrafos()
         self.sym         = CubeSymmetry() if self.rc.canon_sym else None
         self.val_metrics = ShowerValMetrics()
-        self.ps          = ProductPathSampler(self.rc.manifold)
+        self.ps          = ProductPathSampler(self.model.manifold)
 
         self.register_buffer(
             "_pt_allowed",
@@ -113,9 +118,12 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         object.__setattr__(self, "reflow_teacher", teacher)  # not a submodule: no state_dict/DDP
 
     def _build_model(self, rc) -> nn.Module:
+        man = rc.manifold
+        if rc.species_flow:   # + the species block as a Euclidean factor; rc.manifold stays the 7-column one
+            man = ProductManifold([*man.manifolds, Euclidean()], (*man.ambient_dims, rc.model_args["sp_block"]))
         return ProjectModel(
             CFMTrafo_x(**rc.model_args),
-            rc.manifold,
+            man,
         )
 
     def _opt_train(self) -> None:

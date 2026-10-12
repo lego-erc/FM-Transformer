@@ -2,6 +2,7 @@
 and the species channel only ever chooses among particle classes."""
 from __future__ import annotations
 
+import pytest
 import torch
 
 from legofmt.data.struct import DataStruct, _F, set_layout
@@ -48,9 +49,11 @@ def test_training_generates_only_the_real_particles() -> None:
     assert float(g) > 0
 
 
-def test_generation_emits_exactly_the_sampled_count(tmp_path) -> None:
+@pytest.mark.parametrize("species_flow", [False, True])
+def test_generation_emits_exactly_the_sampled_count(tmp_path, species_flow: bool) -> None:
     torch.manual_seed(0)
     cfg = _cfg()["config"]
+    cfg["model_conf"]["species_flow"] = species_flow
     a = LEGOLtng({"state_dict": {}, "config": cfg})
     torch.save({"state_dict": a.model.vf.state_dict(), "config": cfg}, tmp_path / "f.pt")
     gen = GenerateOut(str(tmp_path / "f.pt"), device="cpu")
@@ -135,9 +138,11 @@ def test_closed_slots_do_not_change_the_field() -> None:
     assert torch.allclose(v_full[:, :5], v_cut, atol=1e-5) and torch.allclose(lg_full[:, :5], lg_cut, atol=1e-5)
 
 
-def test_bucketed_generation_opens_each_events_count(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("species_flow", [False, True])
+def test_bucketed_generation_opens_each_events_count(tmp_path, monkeypatch, species_flow: bool) -> None:
     torch.manual_seed(0)
     cfg = _cfg(survive=True, max_seq_l=23)["config"]     # 20 outgoing slots: every bucket (2, 4, 8, 16, 20) is used
+    cfg["model_conf"]["species_flow"] = species_flow
     a = LEGOLtng({"state_dict": {}, "config": cfg})
     torch.save({"state_dict": a.model.vf.state_dict(), "config": cfg}, tmp_path / "f.pt")
     gen = GenerateOut(str(tmp_path / "f.pt"), device="cpu")
