@@ -123,10 +123,15 @@ else:
 resume_from = run.get("resume_from")
 if resume_from:
     prev = torch.load(resume_from, map_location="cpu", weights_only=False)
-    target = model.model.vf if train_model == "fm" else model
-    incompat = target.load_state_dict(prev["state_dict"], strict=False)
+    # a Lightning .ckpt holds the whole module (lv, base_head included), keyed through the compile wrapper
+    is_ltng = "pytorch-lightning_version" in prev
+    target = model.model.vf if train_model == "fm" and not is_ltng else model
+    sd = {k.replace("_orig_mod.", ""): v for k, v in prev["state_dict"].items()}
+    incompat = target.load_state_dict(sd, strict=False)
     assert not incompat.unexpected_keys, f"resume_from arch mismatch: {incompat}"
-    prev_mc = migrate_loss_weight_keys(prev["config"]["model_conf"])
+    if is_ltng and hasattr(model, "base_head"):  # keep the trained-against head: setup skips a frozen one
+        model.base_head.requires_grad_(False)
+    prev_mc = migrate_loss_weight_keys(prev["config"]["model_conf"]) if "config" in prev else {}
     for k, v in prev_mc.get("loss_weights", {}).items():
         if hasattr(model, k):
             getattr(model, k).data.copy_(v)
