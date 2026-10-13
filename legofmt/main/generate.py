@@ -13,11 +13,14 @@ import torch
 import torch.nn.functional as F
 
 from legofmt.cfm.project_model import is_compiled
+from legofmt.data.prep import DataPrep
 from legofmt.data.struct import _F, DataStruct, set_layout
 from legofmt.geometry.energy_proj import EnergyProjections
 from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.main.modules import LEGOLtng
 from legofmt.multiplicity.model import MultModel
+
+_EDEP_EXCESS_MEV = {11: 0.0, -11: 1.022, 22: 0.0, 2212: 0.0}
 
 
 class GenerateOut(torch.nn.Module):
@@ -78,6 +81,7 @@ class GenerateOut(torch.nn.Module):
         self.pen = EnergyProjections(
             cutoff_mev=self.model.rc.cutoff_mev, max_energy=self.model.rc.max_energy,
         )
+        self.dp = DataPrep(flow_conf)   # the E_dep row's normalisation (edep_log_min), for the E_in ceiling
 
     def __call__(self, cond: torch.Tensor, prepped: bool = False):
         """``cond`` is ``[B, n_cond + 7] = [*cond_scalars, mom * E_MeV (3), pos (3), pdgid]``;
@@ -107,6 +111,12 @@ class GenerateOut(torch.nn.Module):
         else:
             sols, mask, attn_mask = self.model((cond_fm, mask, attn_mask))
         sols[..., -1] = torch.cat([sols.new_zeros(1), self.pdgids.to(sols.dtype)])[sols[..., -1].long()]
+        nc = self.n_cond
+        e_in = self.pen.from_scalar(cond_model[:, nc + 1:nc + 4], cond_model[:, nc:nc + 1]).norm(dim=-1)
+        pid_in, edep = cond_model[:, -1].long(), _F(sols).edep
+        for pid, excess in _EDEP_EXCESS_MEV.items():
+            hit = pid_in == pid
+            edep[..., hit] = torch.minimum(edep[..., hit], self.dp.norm_edep(e_in[hit] + excess).to(edep))
         return sols, mask, attn_mask
 
     def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None):
