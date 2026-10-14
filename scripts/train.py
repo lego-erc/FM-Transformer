@@ -61,7 +61,9 @@ config["dl_conf"]["lds_args"]["data"] = dpath_prefix + config["dl_conf"]["lds_ar
 scheduler = config["opt_conf"].get("scheduler")
 if scheduler is not None and "total_steps" not in scheduler:
     bs = config["dl_conf"]["bs"]
-    scheduler["total_steps"] = epochs * int(run["dataset_size"] / (bs * len(devices) * nodes))
+    scheduler["total_steps"] = epochs * int(
+        run["dataset_size"] / (bs * len(devices) * nodes * run.get("accumulate_grad_batches", 1))
+    )
 
 if log_conf["comet"]:
     from lightning.pytorch.loggers import CometLogger
@@ -109,6 +111,7 @@ trainer = ltng.Trainer(
     val_check_interval=run["val_check_interval"],
     limit_val_batches=run["limit_val_batches"],
     gradient_clip_val=run["gradient_clip_val"],
+    accumulate_grad_batches=run.get("accumulate_grad_batches", 1),
 )
 
 train_model = run["train_model"]

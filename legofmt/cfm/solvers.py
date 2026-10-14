@@ -13,6 +13,7 @@ Members resolved through ``self`` and owned by ``LEGOLtng``: ``model``,
 import contextlib
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 from flow_matching.solver import ODESolver
@@ -91,7 +92,7 @@ class Solvers:
             _, log_ll = solver.compute_likelihood(
                 x_1=cc, log_p0=log_p0,
                 mask=ds_t.m.full, attn_mask=ds_t.am.full,
-                pdgids=pdgids_idx, types=self.types_embd,
+                pdgids=pdgids_idx, types=self.types_embd[:, :ds_t.am.full.shape[1]],
                 step_size=step_size, method=method,
             )
         finally:
@@ -128,7 +129,7 @@ class Solvers:
                 time_grid = time_grid.flip(0)
 
         def _sample(x_init, mask, attn_mask, pdgids_idx):
-            extras = dict(mask=mask, attn_mask=attn_mask, types=self.types_embd, pdgids=pdgids_idx)
+            extras = dict(mask=mask, attn_mask=attn_mask, types=self.types_embd[:, :mask.shape[1]], pdgids=pdgids_idx)
             if method == "midpoint":
                 return self._midpoint_steps(
                     x_init, time_grid, return_intermediates=return_intermediates, **extras,
@@ -186,6 +187,23 @@ class Solvers:
                 xs.append(x)
         return torch.stack(xs) if return_intermediates else x
 
+    def _solve_by_length(self, ds_t: DataStruct, base: Tensor, **kw) -> Tensor:
+        buckets = self.rc.gen_len_buckets
+        if buckets is None:
+            return self.solve(ds_t, x_init=base, **kw)
+        L_max = ds_t.am.full.shape[1]
+        buckets = [min(b, L_max) for b in buckets]
+        lengths, order = ds_t.am.full.sum(1).sort()
+        counts = torch.bincount(lengths, minlength=L_max + 1).cumsum(0)[buckets].tolist()
+        ds_t, base = ds_t[order], base[order]
+        sols, a = [], 0
+        for L, b in zip(buckets, counts):
+            if b > a:
+                sol = self.solve(ds_t[a:b].trim(L), x_init=base[a:b, :L], **kw)
+                sols.append(F.pad(sol, (0, 0, 0, L_max - L)))
+            a = b
+        return torch.cat(sols, dim=-3).index_select(-3, order.argsort())
+
     @torch.no_grad()
     def forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None) -> tuple:
         self._to_eval()
@@ -195,6 +213,9 @@ class Solvers:
             is_compiled(self.model) or is_compiled(self.model.vf)
         ):
             self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=False)
+            if self.rc.gen_len_buckets is not None:
+                n = len(self.rc.gen_len_buckets) * max(1, len(cfg.get("compile_buckets") or ()))
+                torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, n + 8)
 
         ds_t = DataStruct(*batch) if isinstance(batch, tuple) else batch
         if self.sym is not None:
@@ -215,8 +236,8 @@ class Solvers:
                    else self.rc.amp_dtype)
             with (contextlib.nullcontext() if amp is None
                   else torch.autocast(base.device.type, dtype=amp)):
-                sols = self.solve(
-                    ds_t, x_init=base,
+                sols = self._solve_by_length(
+                    ds_t, base,
                     split_size=cfg.get("split_size"),
                     step_size=cfg.get("step_size", 0.04),
                     method=cfg.get("method", "midpoint"),

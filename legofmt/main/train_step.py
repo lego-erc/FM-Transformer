@@ -15,6 +15,7 @@ Members resolved through ``self`` and owned by ``LEGOLtng``: ``rc``, ``model``,
 """
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 from legofmt.data.struct import DataStruct, _F
@@ -112,8 +113,29 @@ class TrainStep:
             t = t.clamp(min=0) ** (1.0 / self.rc.t_dist_shift)
         return t
 
+    def _len_pieces(self, ds_t: DataStruct) -> tuple[DataStruct, list[tuple[slice, int]]]:
+        lengths = ds_t.am.full.sum(1)
+        n = lengths.shape[0]
+        k = self.rc.len_split if self.rc.len_mode == "split" and n % self.rc.len_split == 0 else 1
+        if k > 1:
+            lengths, order = lengths.sort(stable=True)
+            ds_t = ds_t[order]
+        size = n // k
+        longest = (lengths[size - 1::size] if k > 1 else lengths.max().view(1)).tolist()
+        Ls = [next(b for b in self.rc.len_buckets if b >= x) for x in longest]
+        return ds_t.trim(Ls[-1]), [(slice(j * size, (j + 1) * size), L) for j, L in enumerate(Ls)]
+
+    def _piecewise(self, pieces: list[tuple[slice, int]]):
+        def run(x, t, mask, attn_mask, types, pdgids, d=None):
+            return torch.cat([F.pad(self.model(
+                x[i, :L].contiguous(), t[i, :L].contiguous(), mask[i, :L].contiguous(),
+                attn_mask[i, :L].contiguous(), types[:, :L], pdgids[i, :L].contiguous(),
+                None if d is None else d[i, :L].contiguous(),
+            ), (0, 0, 0, x.shape[1] - L)) for i, L in pieces])
+        return run
+
     def _flow_map_loss(
-        self, loss: Tensor, base: Tensor, ds_t: DataStruct, pdgid_idx: Tensor,
+        self, loss: Tensor, base: Tensor, ds_t: DataStruct, pdgid_idx: Tensor, model=None,
     ) -> Tensor:
         """Add ``fac * (lv_flow + every * exp(-lv_flow) * one_step_euler)`` on firing
         steps and the barrier alone otherwise, so the per-step expectation equals
@@ -133,7 +155,7 @@ class TrainStep:
         if self.training and self.global_step % every != 0:
             return loss
 
-        sc = one_step_euler_loss(self, base, ds_t, pdgid_idx)
+        sc = one_step_euler_loss(self, base, ds_t, pdgid_idx, model)
         w = fac * (every if self.training else 1)
         if lvf is not None:
             w = w * torch.exp(-lvf)
@@ -145,6 +167,11 @@ class TrainStep:
         return loss + w * sc
 
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
+        model, pieces = self.model, None
+        if self.rc.len_buckets is not None:
+            ds_t, pieces = self._len_pieces(ds_t)
+            if len(pieces) > 1:
+                model = self._piecewise(pieces)
         with torch.no_grad():
             ds_t = DataStruct(ds_t.f.full, self._sample_mask(ds_t), ds_t.am.full)
             if self.rc.overflow_delta > 0:
@@ -172,17 +199,17 @@ class TrainStep:
             ps_ = self.ps.sample(base, ds_t.f.model_in, t)
         step_extras = ({"d": torch.zeros_like(ps_.t)}
                        if getattr(self.model.vf, "step_cond", False) else {})
-        v_out = self.model(
+        v_out = model(
             ps_.x_t, ps_.t,
             mask=ds_t.m.full, attn_mask=ds_t.am.full,
-            types=self.types_embd, pdgids=pdgid_idx, **step_extras,
+            types=self.types_embd[:, :ds_t.am.full.shape[1]], pdgids=pdgid_idx, **step_extras,
         )
         sq = (v_out - ps_.dx_t) ** 2
         loss, logs = self.reduce_loss(sq, ds_t)
         if logs:
             self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
 
-        loss = self._flow_map_loss(loss, base, ds_t, pdgid_idx)
+        loss = self._flow_map_loss(loss, base, ds_t, pdgid_idx, model)
 
         return loss
 

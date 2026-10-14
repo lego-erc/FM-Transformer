@@ -78,6 +78,11 @@ class ResolvedLEGOConfig:
     cutoff_mev: float
     amp_dtype: torch.dtype | None
 
+    len_buckets: tuple[int, ...] | None      # training: run each batch / piece at its bucket length
+    len_mode: str                            # split | group
+    len_split: int
+    gen_len_buckets: tuple[int, ...] | None  # generation (Solvers.forward)
+
     dl_conf: dict
     opt_conf: dict
     odeint_conf: dict
@@ -210,6 +215,14 @@ def migrate_loss_weight_keys(model_conf: dict) -> dict:
     return model_conf
 
 
+def resolve_len_buckets(spec, max_seq_l: int) -> tuple[int, ...] | None:
+    if spec is None:
+        return None
+    if spec == "auto":
+        spec = [2 ** k for k in range(3, max_seq_l.bit_length())]
+    return tuple(sorted({int(b) for b in spec if int(b) < max_seq_l} | {max_seq_l}))
+
+
 def _build_resolved(
     config: dict,
     model_conf: dict,
@@ -245,6 +258,15 @@ def _build_resolved(
             f"got cuboid_dim={cuboid_dim}."
         )
     max_loss_weight = model_conf.get("max_loss_weight", -6.0)
+    dl_conf = config["dl_conf"]
+    len_buckets = resolve_len_buckets(dl_conf.get("len_buckets"), max_seq_l)
+    len_mode = dl_conf.get("len_mode", "split")
+    len_split = dl_conf.get("len_split", 8)
+    if len_buckets is not None:
+        if len_mode not in ("split", "group"):
+            raise ValueError(f"dl_conf.len_mode must be 'split' or 'group', got {len_mode!r}.")
+        if len_mode == "split" and dl_conf["bs"] % len_split:
+            raise ValueError(f"dl_conf.len_split={len_split} must divide dl_conf.bs={dl_conf['bs']}.")
 
     return ResolvedLEGOConfig(
         max_seq_l=max_seq_l,
@@ -275,7 +297,13 @@ def _build_resolved(
         max_energy=model_conf["max_energy"],
         cutoff_mev=config["dl_conf"]["lds_args"]["cutoff_mev"],
         amp_dtype=_amp_dtype((config.get("additional") or {}).get("precision")),
-        dl_conf=config["dl_conf"],
+        len_buckets=len_buckets,
+        len_mode=len_mode,
+        len_split=len_split,
+        gen_len_buckets=resolve_len_buckets(
+            config.get("odeint_conf", {}).get("len_buckets"), max_seq_l,
+        ),
+        dl_conf=dl_conf,
         opt_conf=config["opt_conf"],
         odeint_conf=config.get("odeint_conf", {}),
         val_conf=config.get("val_conf", {}),

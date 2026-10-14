@@ -104,7 +104,34 @@ class LEGODataset(Dataset):
         return self.data[idx]
 
 
-def make_loader(dataset, *, bs, shuffle, num_workers=4, batched_sampler=False):
+class LengthBucketBatchSampler:
+    def __init__(self, lengths: Tensor, buckets, bs: int, seed: int | None = None,
+                 world_size: int = 1) -> None:
+        if world_size > 1:
+            raise ValueError(
+                "dl_conf.len_mode: group does not shard batches across ranks; "
+                f"got world_size={world_size}. Use len_mode: split with several devices."
+            )
+        self.bucket_of = torch.bucketize(torch.as_tensor(lengths), torch.as_tensor(buckets))
+        self.bs = bs
+        self.n_batches = int((torch.bincount(self.bucket_of) // bs).sum())
+        seed = int(torch.randint(2**62, (1,))) if seed is None else seed   # follows the global seed
+        self.gen = torch.Generator().manual_seed(seed)
+
+    def __len__(self) -> int:
+        return self.n_batches
+
+    def __iter__(self):
+        perm = torch.randperm(len(self.bucket_of), generator=self.gen)
+        b, idx = self.bucket_of[perm].sort(stable=True)
+        perm = perm[idx]
+        counts = torch.bincount(b)
+        rank = torch.arange(len(b)) - (counts.cumsum(0) - counts)[b]
+        batches = perm[rank < (counts - counts % self.bs)[b]].view(-1, self.bs)
+        return iter(batches[torch.randperm(len(batches), generator=self.gen)].tolist())
+
+
+def make_loader(dataset, *, bs, shuffle, num_workers=4, batched_sampler=False, batch_sampler=None):
     """The worker plumbing both LightningModules share.
 
     ``batched_sampler`` hands the dataset a tensor of indices per call
@@ -119,10 +146,12 @@ def make_loader(dataset, *, bs, shuffle, num_workers=4, batched_sampler=False):
         multiprocessing_context="fork" if num_workers > 0 else None,
     )
     if batched_sampler:
-        sampler = (RandomSampler if shuffle else SequentialSampler)(dataset)
+        if batch_sampler is None:
+            sampler = (RandomSampler if shuffle else SequentialSampler)(dataset)
+            batch_sampler = BatchSampler(sampler, bs, drop_last=False)
         return DataLoader(
             dataset,
-            sampler=BatchSampler(sampler, bs, drop_last=False),
+            sampler=batch_sampler,
             batch_size=None,
             **common,
         )

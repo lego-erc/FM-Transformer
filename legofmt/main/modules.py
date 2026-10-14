@@ -8,7 +8,7 @@ solving, likelihood, and ``forward``).
 
 import torch
 from torch import Tensor, nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset, random_split
 
 import lightning as ltng
 
@@ -24,7 +24,7 @@ from legofmt.cfm.solvers import Solvers
 
 from legofmt.main.train_step import TrainStep
 
-from legofmt.data.dataloaders import LEGODataset, make_loader
+from legofmt.data.dataloaders import LEGODataset, LengthBucketBatchSampler, make_loader
 from legofmt.data.prep import DataPrep
 from legofmt.data.struct import _F
 
@@ -50,6 +50,14 @@ class _Interacting:
 
     def __getitem__(self, i):
         return self.ds[self.keep_idx[i]]
+
+
+def _event_lengths(ds) -> Tensor:
+    if isinstance(ds, Subset):
+        return _event_lengths(ds.dataset)[torch.as_tensor(ds.indices)]
+    if isinstance(ds, _Interacting):
+        return _event_lengths(ds.ds)[ds.keep_idx]
+    return ds.data.am.full.sum(1)
 
 
 def _interacting_only(ds) -> _Interacting:
@@ -180,16 +188,23 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         )
         self._pretrain_base_if_needed()
 
-    def _make_loader(self, dataset, *, shuffle: bool, bs: int | None = None) -> DataLoader:
+    def _make_loader(self, dataset, *, shuffle: bool, bs: int | None = None,
+                     batch_sampler=None) -> DataLoader:
         return make_loader(
             dataset,
             bs=bs if bs is not None else self.rc.dl_conf.get("bs", 2**12),
             shuffle=shuffle,
             num_workers=self.rc.dl_conf.get("num_workers", 4),
             batched_sampler=True,
+            batch_sampler=batch_sampler,
         )
 
     def train_dataloader(self) -> DataLoader:
+        if self.rc.len_buckets is not None and self.rc.len_mode == "group":
+            return self._make_loader(self._train_ds, shuffle=True, batch_sampler=LengthBucketBatchSampler(
+                _event_lengths(self._train_ds), self.rc.len_buckets, self.rc.dl_conf.get("bs", 2**12),
+                world_size=self.trainer.world_size if self._trainer is not None else 1,
+            ))
         return self._make_loader(self._train_ds, shuffle=True)
 
     def val_dataloader(self) -> DataLoader:

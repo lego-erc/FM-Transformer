@@ -92,6 +92,9 @@ class DataStruct:
         return type(self)(self.f.full[idx], self.m.full[idx], self.am.full[idx],
                           None if e is None else e[idx])
 
+    def trim(self, L: int) -> "DataStruct":
+        return type(self)(self.f.full[:, :L], self.m.full[:, :L], self.am.full[:, :L], self.edep_layers)
+
     def to(self, *args, **kwargs) -> "DataStruct":
         kwargs.setdefault("non_blocking", True)
         e = self.edep_layers
