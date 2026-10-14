@@ -27,10 +27,8 @@ corner = "*"
 schedulefree = ">=1.4.1"
 pytorch-optimizer = "*"
 flow-matching = ">=1.0.10"
+torch-linear-assignment = "==0.1.0"  # OT coupling (Triton on CUDA, SciPy on CPU)
 legofmt = { path = ".", editable = true }
-
-[feature.cuda.pypi-options]
-no-build-isolation = ["torch-lap-cuda"]
 
 [feature.cuda]
 platforms = ["linux-64-cuda"]
@@ -52,9 +50,6 @@ libcusolver-dev = "*"
 
 [feature.base.tasks]
 install-notebook = "uv pip --no-cache install --no-build-isolation --reinstall notebook"
-
-[feature.cuda.target.linux-64.tasks]
-install-lap = "uv pip install --no-build-isolation git+https://github.com/rdebrand/torch-lap-cuda"
 
 [feature.cpu.target.linux-64.dependencies]
 torchvision = ">=0.26"

@@ -133,11 +133,11 @@ if sched is not None and "total_steps" not in sched and isinstance(dev, list):
 print("\n[deps]")
 if train_model == "fm" and mc.get("ot_coupling"):
     try:
-        import torch_lap_cuda_lib  # noqa: F401
-        ok("ot_coupling=True and torch_lap_cuda_lib importable")
+        import torch_linear_assignment  # noqa: F401
+        ok("ot_coupling=True and torch_linear_assignment importable")
     except ImportError:
-        bad("ot_coupling=True but torch_lap_cuda_lib missing -> on_fit_start raises. "
-            "Run `pixi run -e <env> install-lap` (needs __cuda: use a GPU node)")
+        bad("ot_coupling=True but torch_linear_assignment missing -> on_fit_start raises. "
+            "It is a pixi dependency: run `pixi install -e <env>`")
 if cfg.get("logging", {}).get("comet"):
     try:
         import comet_ml  # noqa: F401

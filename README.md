@@ -260,7 +260,7 @@ Top-level FM options:
 | `overflow_delta` | `0.0` | Sentinel offset: zero-deposit / fully-absorbed targets are written to `-overflow_delta` in the energy channel so the flow can separate the atom from the continuum. |
 | `proj_ray` | `True` (read by `DataPrep` only) | At prep-time, ray-trace the incoming position onto the unit-cube surface via `CubeTrace`. |
 | `canon_sym` | `False` | Canonicalise directions onto a reference cube face before the flow and undo it after (`CubeSymmetry`). |
-| `ot_coupling` | `False` | At training time, Hungarian-assign base→data slots per event (same pdgid only). Requires `torch_lap_cuda_lib`; `on_fit_start` raises otherwise. |
+| `ot_coupling` | `False` | At training time, Hungarian-assign base→data slots per event (same pdgid only). Solved with `torch-linear-assignment` (a pixi dependency); `on_fit_start` raises if it is missing. |
 | `t_dist` | `"sd3"` | Training-time `t` sampling: `"sd3"` (mode sampling `1-u + s/3·(sin²(πu/2) - u)`; `s = 0` is uniform) or `"sm_norm"` (`sigmoid(s·N(0,1))`, i.e. logit-normal). |
 | `t_dist_scale`, `t_dist_shift` | `1.4`, `1.0` | Scale `s` above; `shift != 1` applies `t ** (1/shift)`. |
 | `mask_conf.p_forward` | — | If `mask_conf` is set, per-event coin flip between the forward mask and its inverse (generate the incoming from the outgoing set). |

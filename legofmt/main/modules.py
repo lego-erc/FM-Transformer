@@ -123,7 +123,7 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
 
     @torch.no_grad()
     def on_fit_start(self) -> None:
-        if self.rc.ot_coupling and base_nn.slap is None:
+        if self.rc.ot_coupling and base_nn.batch_linear_assignment is None:
             raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
         if self.reflow_teacher is not None:
             self.reflow_teacher.to(self.device)

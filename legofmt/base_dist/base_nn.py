@@ -25,12 +25,12 @@ from legofmt.compat import load_legacy_base_head
 from legofmt.data.struct import DataStruct, _F
 
 try:
-    from torch_lap_cuda_lib import solve_lap as slap
+    from torch_linear_assignment import batch_linear_assignment
 except ImportError:
-    slap = None
+    batch_linear_assignment = None
 
 _OT_COUPLING_REQUIRES_LAP = (
-    "ot_coupling=True requires `torch_lap_cuda_lib`. "
+    "ot_coupling=True requires `torch-linear-assignment` (a pixi dependency). "
     "Install it or set model_conf.ot_coupling=False."
 )
 
@@ -212,7 +212,7 @@ class BaseDist:
     def _ot_couple(self, base: Tensor, ds_t, data: Tensor) -> Tensor:
         """Per-event Hungarian assignment of base slots to data slots, blocked across
         pdgids and valid/pad pairs; base samples are pdgid-independent so permuting is free."""
-        if slap is None:
+        if batch_linear_assignment is None:
             raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
         base = base.where(ds_t.am.full.unsqueeze(-1), data)
         pid  = ds_t.f.out_p[..., -1]
@@ -229,7 +229,7 @@ class BaseDist:
               if isinstance(mf, Sphere) else (a - b).norm(dim=-1).float()) ** 2)
             for mf, a, b in zip(man.manifolds, tgt, ref)
         ) + blocked * 1e6
-        assign = slap(cost, cost.device).long()
+        assign = batch_linear_assignment(cost).long()
         out[:] = torch.take_along_dim(out, assign.unsqueeze(-1), dim=1)
         return base
 

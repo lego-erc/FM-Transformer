@@ -54,12 +54,12 @@ def _batch(B: int = 3, L: int = 7) -> DataStruct:
 
 
 class _BruteLap:
-    """Exact CPU stand-in for torch_lap_cuda's solve_lap; records the cost."""
+    """Exact CPU stand-in for torch_linear_assignment's batch_linear_assignment; records the cost."""
 
     def __init__(self) -> None:
         self.cost = None
 
-    def __call__(self, cost: torch.Tensor, device) -> torch.Tensor:
+    def __call__(self, cost: torch.Tensor) -> torch.Tensor:
         self.cost = cost.detach().clone()
         B, n, _ = cost.shape
         out = torch.empty(B, n, dtype=torch.long)
@@ -72,8 +72,8 @@ class _BruteLap:
 
 def _run(model_conf: dict) -> tuple[_BruteLap, torch.Tensor]:
     lap = _BruteLap()
-    orig = base_nn.slap
-    base_nn.slap = lap
+    orig = base_nn.batch_linear_assignment
+    base_nn.batch_linear_assignment = lap
     try:
         model = LEGOLtng(_config(**model_conf))
         model.on_fit_start()
@@ -81,7 +81,7 @@ def _run(model_conf: dict) -> tuple[_BruteLap, torch.Tensor]:
         torch.manual_seed(0)
         model.gen_base_wrapper(_batch())
     finally:
-        base_nn.slap = orig
+        base_nn.batch_linear_assignment = orig
     pid = _batch().f.out_p[..., -1]
     return lap, pid
 
@@ -97,7 +97,7 @@ def test_cost_blocks_cross_species_pairs() -> None:
 def test_assignment_stays_within_species() -> None:
     lap, pid = _run({})
     B, n, _ = lap.cost.shape
-    assign = _BruteLap.__call__(lap, lap.cost, "cpu")
+    assign = _BruteLap.__call__(lap, lap.cost)
     picked = torch.take_along_dim(pid, assign, dim=1)
     assert torch.equal(picked, pid), f"assignment crossed species:\n{pid}\n{picked}"
 
