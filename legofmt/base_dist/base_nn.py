@@ -28,6 +28,10 @@ try:
     from torch_linear_assignment import batch_linear_assignment
 except ImportError:
     batch_linear_assignment = None
+try:  # skips TLA's NaN / infeasibility .item() checks: our costs are finite and square
+    from torch_linear_assignment._triton import batch_linear_assignment as _lap_cuda_unchecked
+except ImportError:
+    _lap_cuda_unchecked = None
 
 _OT_COUPLING_REQUIRES_LAP = (
     "ot_coupling=True requires `torch-linear-assignment` (a pixi dependency). "
@@ -105,8 +109,7 @@ class BaseDist:
         # (longest-edge lengths); fwd+bwd -> entry/exit-storage invariant
         inc     = ds_t.f.in_cc[..., 0, 1:7].nan_to_num(1.0)
         u, pos  = inc[..., :3], inc[..., 3:]
-        d       = u.new_tensor(self.rc.config["model_conf"].get("cuboid_dim") or [1.0, 1.0, 1.0])
-        d       = d / d.max()
+        d       = self.cuboid_unit.to(u)
         p       = pos / pos.abs().amax(-1, keepdim=True).clamp_min(1e-8) * d  # pos is dir(x / d)
         ok_u    = u.abs() > 1e-6
         tf      = torch.where(ok_u, (u.sign() * d - p) / u, torch.full_like(u, 4.0))
@@ -229,11 +232,12 @@ class BaseDist:
               if isinstance(mf, Sphere) else (a - b).norm(dim=-1).float()) ** 2)
             for mf, a, b in zip(man.manifolds, tgt, ref)
         ) + blocked * 1e6
-        assign = batch_linear_assignment(cost).long()
+        assign = (_lap_cuda_unchecked(cost, validation="off") if cost.is_cuda and _lap_cuda_unchecked is not None
+                  else batch_linear_assignment(cost)).long()
         out[:] = torch.take_along_dim(out, assign.unsqueeze(-1), dim=1)
         return base
 
-    def gen_base_wrapper(self, ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]") -> Tensor:
+    def gen_base_wrapper(self, ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]", all_forward: bool = False) -> Tensor:
         """Draw ``x_0``: data on conditioning cells, the (learned) prior on generated
         ones, an isotropic sample for inverse-mask events. ``lego_eval`` calls this."""
         if not isinstance(ds_t, DataStruct):
@@ -242,8 +246,8 @@ class BaseDist:
         data  = ds_t.f.model_in
         m     = ds_t.m.full
         fwd   = m[:, self.rc.n_prefix] == 0  # incoming slot conditions => forward event
-        noise = None if fwd.all() else self.gen_base.iso(m.shape, data.device)
-        if not fwd.any():
+        noise = None if all_forward or fwd.all() else self.gen_base.iso(m.shape, data.device)
+        if not all_forward and not fwd.any():
             return torch.where((m == 1).unsqueeze(-1), noise, data)
 
         if hasattr(self, "base_head"):
@@ -268,6 +272,10 @@ class BaseDist:
         ot = float("nan")
         try:
             for ds_t in batches:
+                if rc.dir_zoom:
+                    fwd_z = ds_t.m.full[:, rc.n_prefix] == 0
+                    ds_t = DataStruct(self._zoom_dirs(ds_t.f.full, ds_t.am.full, fwd_z, pdgids=ds_t.f.pdgids),
+                                      ds_t.m.full, ds_t.am.full)
                 opt.zero_grad()
                 self.gen_base_wrapper(ds_t)
                 if self._base_head_loss is None:
