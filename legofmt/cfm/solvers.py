@@ -21,8 +21,9 @@ from flow_matching.solver import ODESolver
 from legofmt.data.struct import DataStruct, _F
 
 from legofmt.cfm.project_model import is_compiled
+from legofmt.compat import dynamic_shape_attention
 
-from legofmt.mod_comps.config import _amp_dtype
+from legofmt.mod_comps.config import _amp_dtype, resolve_len_buckets
 
 
 class Solvers:
@@ -129,7 +130,10 @@ class Solvers:
                 time_grid = time_grid.flip(0)
 
         def _sample(x_init, mask, attn_mask, pdgids_idx):
-            extras = dict(mask=mask, attn_mask=attn_mask, types=self.types_embd[:, :mask.shape[1]], pdgids=pdgids_idx)
+            # contiguous: a dynamic graph is guarded on the strides / offsets of the bucket and chunk views
+            x_init, mask, attn_mask, pdgids_idx = (a.contiguous() for a in (x_init, mask, attn_mask, pdgids_idx))
+            extras = dict(mask=mask, attn_mask=attn_mask, types=self.types_embd[:, :mask.shape[1]].contiguous(),
+                          pdgids=pdgids_idx)
             if method == "midpoint":
                 return self._midpoint_steps(
                     x_init, time_grid, return_intermediates=return_intermediates, **extras,
@@ -188,10 +192,11 @@ class Solvers:
         return torch.stack(xs) if return_intermediates else x
 
     def _solve_by_length(self, ds_t: DataStruct, base: Tensor, **kw) -> Tensor:
-        buckets = self.rc.gen_len_buckets
+        L_max = ds_t.am.full.shape[1]
+        # odeint_conf may gain len_buckets after construction (lego_eval's per-model odeint override)
+        buckets = self.rc.gen_len_buckets or resolve_len_buckets(self.rc.odeint_conf.get("len_buckets"), L_max)
         if buckets is None:
             return self.solve(ds_t, x_init=base, **kw)
-        L_max = ds_t.am.full.shape[1]
         buckets = [min(b, L_max) for b in buckets]
         lengths, order = ds_t.am.full.sum(1).sort()
         counts = torch.bincount(lengths, minlength=L_max + 1).cumsum(0)[buckets].tolist()
@@ -212,10 +217,17 @@ class Solvers:
         if cfg.get("fwd_compile", False) and not (
             is_compiled(self.model) or is_compiled(self.model.vf)
         ):
-            self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=False)
-            if self.rc.gen_len_buckets is not None:
-                n = len(self.rc.gen_len_buckets) * max(1, len(cfg.get("compile_buckets") or ()))
-                torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, n + 8)
+            dynamic = cfg.get("compile_dynamic", False)
+            if dynamic:
+                dynamic_shape_attention()
+            # CUDA graphs are recorded per distinct shape and kept: a dynamic graph takes them only when compile_buckets
+            # bounds the row counts
+            self.model = torch.compile(self.model, dynamic=dynamic, mode="reduce-overhead"
+                                       if not dynamic or cfg.get("compile_buckets") else None)
+            len_b = self.rc.gen_len_buckets or resolve_len_buckets(cfg.get("len_buckets"), self.rc.max_seq_l)
+            if len_b is not None and not dynamic:
+                n = len(len_b) * max(1, len(cfg.get("compile_buckets") or ()))
+                torch._dynamo.config.recompile_limit += n
 
         ds_t = DataStruct(*batch) if isinstance(batch, tuple) else batch
         if self.sym is not None:
@@ -243,7 +255,8 @@ class Solvers:
                     method=cfg.get("method", "midpoint"),
                     time_grid=cfg.get("time_grid"),
                     return_intermediates=cfg.get("return_timesteps", False),
-                    buckets=cfg.get("compile_buckets"),
+                    # a dynamic graph still specialises on a 1-row batch: tile those to 2
+                    buckets=cfg.get("compile_buckets") or ((2,) if cfg.get("compile_dynamic") else None),
                 )
             sols = sols.float()
             sols = sols.masked_fill_(~am, torch.nan)
@@ -253,6 +266,11 @@ class Solvers:
                 keep = torch.isin(pdgids_idx, self.convert_pdgids(filter_pdgid)) | (pdgids_idx == 0)
                 sols.masked_fill_(~keep, torch.nan)
                 pdgids = pdgids.masked_fill(~keep, 0)
+
+        if self.rc.dir_zoom:
+            fwd_z = ds_t.m.full[:, self.rc.n_prefix] == 0
+            zoom = lambda s: self._zoom_dirs(s, ds_t.am.full, fwd_z, inverse=True, pdgids=ds_t.f.pdgids)
+            sols = torch.stack([zoom(s) for s in sols]) if sols.dim() == 4 else zoom(sols)
 
         if self.sym is not None:
             if sols.dim() == 4:
