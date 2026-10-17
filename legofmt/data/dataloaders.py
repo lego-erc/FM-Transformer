@@ -9,7 +9,7 @@ tensor; ``make_loader`` is the worker plumbing both LightningModules share.
 import torch
 from torch import Tensor
 from torch.utils.data import (
-    BatchSampler, DataLoader, Dataset, RandomSampler, SequentialSampler,
+    BatchSampler, DataLoader, Dataset, DistributedSampler, RandomSampler, SequentialSampler,
 )
 
 from legofmt.data.struct import DataStruct
@@ -104,31 +104,33 @@ class LEGODataset(Dataset):
         return self.data[idx]
 
 
-class LengthBucketBatchSampler:
-    def __init__(self, lengths: Tensor, buckets, bs: int, seed: int | None = None,
-                 world_size: int = 1) -> None:
-        if world_size > 1:
-            raise ValueError(
-                "dl_conf.len_mode: group does not shard batches across ranks; "
-                f"got world_size={world_size}. Use len_mode: split with several devices."
-            )
-        self.bucket_of = torch.bucketize(torch.as_tensor(lengths), torch.as_tensor(buckets))
-        self.bs = bs
-        self.n_batches = int((torch.bincount(self.bucket_of) // bs).sum())
-        seed = int(torch.randint(2**62, (1,))) if seed is None else seed   # follows the global seed
-        self.gen = torch.Generator().manual_seed(seed)
+class LengthBucketBatchSampler(DistributedSampler):
+    def __init__(self, lengths: Tensor, buckets, bs: int, seed: int = 0,
+                 rank: int = 0, world_size: int = 1, max_tokens: int | None = None) -> None:
+        buckets = torch.as_tensor(buckets)
+        self.bucket_of = torch.bucketize(torch.as_tensor(lengths), buckets)
+        self.bs_of = torch.full_like(buckets, bs) if max_tokens is None else (max_tokens // buckets).clamp(min=1)
+        self.seed, self.rank, self.world_size, self.epoch = seed, rank, world_size, 0
+        counts = torch.bincount(self.bucket_of, minlength=len(buckets))
+        self.n_batches = int((counts // (self.bs_of * world_size)).sum())
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = epoch
 
     def __len__(self) -> int:
         return self.n_batches
 
     def __iter__(self):
-        perm = torch.randperm(len(self.bucket_of), generator=self.gen)
+        gen = torch.Generator().manual_seed(self.seed + self.epoch)
+        perm = torch.randperm(len(self.bucket_of), generator=gen)
         b, idx = self.bucket_of[perm].sort(stable=True)
         perm = perm[idx]
-        counts = torch.bincount(b)
-        rank = torch.arange(len(b)) - (counts.cumsum(0) - counts)[b]
-        batches = perm[rank < (counts - counts % self.bs)[b]].view(-1, self.bs)
-        return iter(batches[torch.randperm(len(batches), generator=self.gen)].tolist())
+        counts = torch.bincount(b, minlength=len(self.bs_of))
+        batches = []
+        for start, c, bs in zip((counts.cumsum(0) - counts).tolist(), counts.tolist(), self.bs_of.tolist()):
+            n = c - c % (bs * self.world_size)
+            batches += perm[start:start + n].view(-1, self.world_size, bs)[:, self.rank].tolist()
+        return iter([batches[i] for i in torch.randperm(len(batches), generator=gen).tolist()])
 
 
 def make_loader(dataset, *, bs, shuffle, num_workers=4, batched_sampler=False, batch_sampler=None):
