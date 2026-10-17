@@ -171,6 +171,30 @@ def fp32_attention(module: nn.Module) -> None:
             m.forward = _wrap(m.forward)
 
 
+def dynamic_shape_attention() -> None:
+    """Make ``torch.compile(dynamic=True)`` actually symbolic in batch and length.
+
+    x-transformers masks ``Attention``'s output with
+    ``einx.where('b n, b n d, -> b n d', mask, out, 0.)``, and einx traces per
+    concrete shape, so dynamo specialises both dims and compiles one graph per
+    bucket shape. Replacing that one pattern by the equivalent ``torch.where``
+    leaves a single graph. Module-global, idempotent."""
+    import types
+    import x_transformers.x_transformers as xt
+
+    einx = xt.einx
+    if getattr(einx, "_legofmt_where", False):
+        return
+
+    def where(pattern, mask, out, val):
+        if pattern != "b n, b n d, -> b n d":
+            return einx.where(pattern, mask, out, val)
+        return torch.where(mask.unsqueeze(-1), out, val)
+
+    ns = {n: getattr(einx, n) for n in dir(einx) if not n.startswith("_")}
+    xt.einx = types.SimpleNamespace(**ns | {"where": where, "_legofmt_where": True})
+
+
 # ---------------------------------------------------------------------------
 # 3. format deprecations
 # ---------------------------------------------------------------------------
