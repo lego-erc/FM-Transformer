@@ -57,9 +57,7 @@ class TrainStep:
         else:
             # clamp in place: below the floor clamp() has zero gradient, so a cell
             # that overshoots would latch there and stop responding to its loss
-            lo = torch.full_like(self.lv, self.rc.max_loss_weight)
-            if self.rc.edep_cell:
-                lo[3] = self.rc.max_loss_weight_edep
+            lo = self.lv_floor
             with torch.no_grad():
                 self.lv.clamp_(min=lo)
             lv  = self.lv.clamp(min=lo)  # (3,) or (4,), one per channel
@@ -115,13 +113,16 @@ class TrainStep:
 
     def _len_pieces(self, ds_t: DataStruct) -> tuple[DataStruct, list[tuple[slice, int]]]:
         lengths = ds_t.am.full.sum(1)
-        n = lengths.shape[0]
+        cpu = self.__dict__.pop("_cpu_lengths", None)
+        if cpu is None or len(cpu) != len(lengths):
+            cpu = lengths.cpu()
+        n = len(cpu)
         k = self.rc.len_split if self.rc.len_mode == "split" and n % self.rc.len_split == 0 else 1
         if k > 1:
-            lengths, order = lengths.sort(stable=True)
-            ds_t = ds_t[order]
+            ds_t = ds_t[lengths.sort(stable=True).indices]
+            cpu = cpu.sort().values
         size = n // k
-        longest = (lengths[size - 1::size] if k > 1 else lengths.max().view(1)).tolist()
+        longest = (cpu[size - 1::size] if k > 1 else cpu.max().view(1)).tolist()
         Ls = [next(b for b in self.rc.len_buckets if b >= x) for x in longest]
         return ds_t.trim(Ls[-1]), [(slice(j * size, (j + 1) * size), L) for j, L in enumerate(Ls)]
 
@@ -181,7 +182,13 @@ class TrainStep:
                 face = self.sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
                 g    = torch.randint(8, face.shape, device=face.device) if self.rc.sym_aug else None
                 ds_t = DataStruct(self._canon_dirs(ds_t.f.full, face, fwd, g=g), ds_t.m.full, ds_t.am.full)
-            base      = self.gen_base_wrapper(ds_t)
+            if self.rc.dir_zoom:
+                fwd_z = ds_t.m.full[:, self.rc.n_prefix] == 0
+                ds_t = DataStruct(self._zoom_dirs(ds_t.f.full, ds_t.am.full, fwd_z, pdgids=ds_t.f.pdgids),
+                                  ds_t.m.full, ds_t.am.full)
+            base      = self.gen_base_wrapper(
+                ds_t, all_forward=not self.rc.mask_conf or self.rc.mask_conf.get("p_forward", 0.5) >= 1,
+            )
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
             t = self._sample_t(ds_t)
             if (
