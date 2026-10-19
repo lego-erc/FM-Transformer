@@ -14,6 +14,7 @@ import torch
 import torch.nn.functional as F
 
 from legofmt.cfm.project_model import is_compiled
+from legofmt.compat import dynamic_shape_attention
 from legofmt.data.prep import DataPrep
 from legofmt.data.struct import _F, DataStruct, set_layout
 from legofmt.geometry.energy_proj import EnergyProjections
@@ -89,7 +90,10 @@ class GenerateOut(torch.nn.Module):
         if mult_conf["config"]["mm_conf"].get("fwd_compile", False) and not is_compiled(
             self.gen_mult.model
         ):
-            self.gen_mult.model = torch.compile(self.gen_mult.model, dynamic=False)
+            # dynamic: the KV-cache decode grows the cache every step, so a static graph recompiled per
+            # step until the recompile limit sent it to eager -- 115 vs 68 ms per 8192 events (plateSi pair)
+            dynamic_shape_attention()
+            self.gen_mult.model = torch.compile(self.gen_mult.model, dynamic=True)
 
         self.pdgid_in = mult_conf["config"]["mm_conf"]["ptypes_in"].to(device)
         self.ptypes = mult_conf["config"]["mm_conf"]["ptypes"].to(device)
