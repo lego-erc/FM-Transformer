@@ -260,6 +260,8 @@ Top-level FM options:
 | `overflow_delta` | `0.0` | Sentinel offset: zero-deposit / fully-absorbed targets are written to `-overflow_delta` in the energy channel so the flow can separate the atom from the continuum. |
 | `proj_ray` | `True` (read by `DataPrep` only) | At prep-time, ray-trace the incoming position onto the unit-cube surface via `CubeTrace`. |
 | `canon_sym` | `False` | Canonicalise directions onto a reference cube face before the flow and undo it after (`CubeSymmetry`). |
+| `dir_zoom` | `None` | `theta_s` (rad). Learn each outgoing momentum direction with its polar angle about the incoming direction remapped to `pi*log1p(theta/theta_s)/log1p(pi/theta_s)` (azimuth kept; applied to the targets in training, undone in `forward`), so a particle that crosses a thin plate nearly undeflected (mrad) is resolvable. `2e-3` magnifies 7 mrad ~47x and compresses 1 rad ~2.3x. Changes what the flow learns: train with it. |
+| `dir_zoom_nucleons_max` | `None` | With `dir_zoom`: leave events with more outgoing nucleons (p, n) than this unzoomed. `1` skips nuclear interactions (in G4, >= 2 nucleons marks 99.4-99.9% of them in 1.4 mm W, and <= 1 holds for 99.9% of survivor and EM events), whose secondaries are spread over the sphere; zooming them cost the W plate ~20% of its nuclear-interaction deposit (two controlled pairs, 17.10.26). Read from the pdgids, which the count model fixes before the flow, so training and generation agree. |
 | `ot_coupling` | `False` | At training time, Hungarian-assign base→data slots per event (same pdgid only). Solved with `torch-linear-assignment` (a pixi dependency); `on_fit_start` raises if it is missing. |
 | `t_dist` | `"sd3"` | Training-time `t` sampling: `"sd3"` (mode sampling `1-u + s/3·(sin²(πu/2) - u)`; `s = 0` is uniform) or `"sm_norm"` (`sigmoid(s·N(0,1))`, i.e. logit-normal). |
 | `t_dist_scale`, `t_dist_shift` | `1.4`, `1.0` | Scale `s` above; `shift != 1` applies `t ** (1/shift)`. |
@@ -362,7 +364,10 @@ Used by `LEGOLtng.forward` / `LEGOLtng.solve`:
 | `return_timesteps` | `False` | Return intermediate states on a uniform time grid. |
 | `return_base` | `False` | Skip the solve and return the sampled base directly. |
 | `fwd_compile` | `False` | `torch.compile(model, mode="reduce-overhead")` once on first forward. |
+| `compile_dynamic` | `False` | With `fwd_compile`: one symbolic-shape graph instead of one per (length bucket, row count). Patches x-transformers' shape-specialising `einx.where` (`compat.dynamic_shape_attention`), hands the field contiguous inputs and tiles 1-row chunks (dynamo would recompile on either). CUDA graphs only with `compile_buckets`. Slab chain: 2 graphs for the W/Si pair instead of 28, ~1 min of compile instead of ~5. |
 | `filter_pdgid` | `None` | Tensor of PDG-ids to retain; others are NaN-ed. |
+| `energy_balance` | `False` | `GenerateOut` only. Keep the generated E_dep and close the kinetic balance `E_in = E_dep + sum E_out + 1.022 (n_e+ out - n_e+ in)` per event: e+-/gamma in rescale every outgoing energy (an absorbed one deposits the budget), a hadron survivor (incoming species, > 90% of E_in) takes the remainder, nuclear interactions are left alone. Only for data whose own balance closes (0.1 MeV-cutoff plates; a 10 MeV cutoff loses ~7% below it). Set per model via lego_eval's `odeint` override. |
+| `exit_consistency` | `False` | `GenerateOut` only. Mirror the momentum component of an outgoing particle that points into the face its exit position is on. Position and direction are separate channels, so the flow can emit one leaving +z while moving -z (Geant4 never does); a slab chain hands it to the next slab moving away from it, which the count model answers with spurious species. |
 
 `LEGOLtng.solve(..., compute_ll=True, log_p0=...)` runs
 `ODESolver.compute_likelihood` (reverse-time) to score samples.
