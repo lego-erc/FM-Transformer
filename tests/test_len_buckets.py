@@ -199,17 +199,47 @@ def test_group_sampler_batches_come_from_one_bucket_each_event_at_most_once() ->
     assert len(sampler) == int((per_bucket // 4).sum())        # only partial batches are dropped
 
 
-def test_group_sampler_reshuffles_each_epoch() -> None:
+def test_group_sampler_order_is_set_by_the_epoch() -> None:
+    """DistributedSampler semantics: the order is a function of (seed, epoch), so every rank
+    builds the same list and a resumed run replays it; Lightning calls set_epoch each epoch."""
     from legofmt.data.dataloaders import LengthBucketBatchSampler
     lengths = torch.randint(4, 9, (200,), generator=torch.Generator().manual_seed(0))
     sampler = LengthBucketBatchSampler(lengths, (4, 6, 8), bs=4, seed=0)
-    assert list(sampler) != list(sampler)
+    sampler.set_epoch(0)
+    first = list(sampler)
+    assert list(sampler) == first
+    sampler.set_epoch(1)
+    assert list(sampler) != first
 
 
-def test_group_sampler_refuses_more_than_one_rank() -> None:
+def test_group_sampler_shards_ranks_with_one_bucket_per_step() -> None:
+    """Each rank gets the same number of batches, no event twice across ranks, and in every
+    step all ranks hold a batch from the same bucket, so no rank waits on a longer one."""
     from legofmt.data.dataloaders import LengthBucketBatchSampler
-    with pytest.raises(ValueError, match="len_mode"):
-        LengthBucketBatchSampler(torch.full((8,), 4), (4, 8), bs=4, world_size=2)
+    lengths = torch.randint(4, 9, (403,), generator=torch.Generator().manual_seed(0))
+    buckets, bs, world = (4, 6, 8), 4, 4
+    samplers = [LengthBucketBatchSampler(lengths, buckets, bs=bs, seed=7, rank=r, world_size=world)
+                for r in range(world)]
+    for s in samplers:
+        s.set_epoch(3)
+    per_rank = [list(s) for s in samplers]
+    assert len({len(b) for b in per_rank}) == 1 and len(per_rank[0]) == len(samplers[0]) > 0
+    seen = torch.tensor([i for b in per_rank for batch in b for i in batch])
+    assert seen.unique().numel() == seen.numel()
+    bucket_of = torch.bucketize(lengths, torch.tensor(buckets))
+    for step in zip(*per_rank):
+        assert all(len(batch) == bs for batch in step)
+        assert bucket_of[torch.tensor(step)].unique().numel() == 1
+    per_bucket = torch.bincount(bucket_of, minlength=3)
+    assert len(samplers[0]) == int((per_bucket // (bs * world)).sum())
+
+
+def test_group_sampler_is_already_distributed_for_lightning() -> None:
+    """Lightning wraps any sampler that is not a DistributedSampler in its own wrapper,
+    which would reshuffle the batches across ranks and undo the per-step bucket match."""
+    from torch.utils.data import DistributedSampler
+    from legofmt.data.dataloaders import LengthBucketBatchSampler
+    assert isinstance(LengthBucketBatchSampler(torch.full((8,), 4), (4, 8), bs=4), DistributedSampler)
 
 
 # ---------------------------------------------------------------- generation
@@ -232,6 +262,32 @@ def test_bucketed_generation_matches_unbucketed(timesteps: bool) -> None:
         torch.testing.assert_close(a, b, rtol=1e-5, atol=1e-6, equal_nan=True)
 
 
+def test_generation_buckets_set_after_construction_take_effect() -> None:
+    """lego_eval's per-model `odeint` override writes into rc.odeint_conf after the model is built; a `len_buckets`
+    there must bucket generation too (a slab chain pads every call to max_seq_l = 134 for ~7 real tokens)."""
+    model = _model(_config(odeint={"method": "euler", "step_size": 0.25}))
+    model.rc.odeint_conf["len_buckets"] = [4, 6]
+    seen = set()
+    model.model.register_forward_pre_hook(lambda mod, args: seen.add(args[0].shape[1]))
+    model(_ragged_batch())
+    assert seen == {4, 6, 8}
+
+
+def test_compile_limit_counts_buckets_set_after_construction(monkeypatch) -> None:
+    """Every (length bucket, row bucket) pair is its own graph; past dynamo's recompile_limit the solve silently runs
+    eager. The limit must be raised for buckets that came from lego_eval's odeint override as well."""
+    model = _model(_config(odeint={"method": "euler", "step_size": 0.25}))
+    model.rc.odeint_conf.update(len_buckets=[4, 6], fwd_compile=True, compile_buckets=[2, 4, 8])
+    monkeypatch.setattr(torch, "compile", lambda m, **k: m)
+    monkeypatch.setattr(torch._dynamo.config, "recompile_limit", 8)
+    model(_ragged_batch())
+    assert torch._dynamo.config.recompile_limit >= 3 * 3 + 8
+    other = _model(_config(odeint={"method": "euler", "step_size": 0.25}))     # a second plate model shares the frame
+    other.rc.odeint_conf.update(len_buckets=[4], fwd_compile=True, compile_buckets=[2, 4, 8])
+    other(_ragged_batch())
+    assert torch._dynamo.config.recompile_limit >= 3 * 3 + 2 * 3 + 8
+
+
 def test_group_sampler_skips_a_bucket_smaller_than_a_batch() -> None:
     from legofmt.data.dataloaders import LengthBucketBatchSampler
     lengths = torch.tensor([4] * 9 + [8] * 3)           # bucket 8 holds fewer than bs events
@@ -239,3 +295,104 @@ def test_group_sampler_skips_a_bucket_smaller_than_a_batch() -> None:
     batches = list(sampler)
     assert len(batches) == len(sampler) == 2
     assert all(len(b) == 4 for b in batches)
+
+
+def test_group_sampler_sizes_batches_by_token_budget() -> None:
+    """With max_tokens every bucket's batch is max_tokens // length events, on every rank
+    alike: fewer for long buckets (8: 16 // 8 = 2), more than bs for short ones (4: 4 > bs 2)."""
+    from legofmt.data.dataloaders import LengthBucketBatchSampler
+    lengths = torch.randint(4, 9, (403,), generator=torch.Generator().manual_seed(0))
+    buckets, bs, world = (4, 8), 2, 2
+    samplers = [LengthBucketBatchSampler(lengths, buckets, bs=bs, seed=0, rank=r, world_size=world, max_tokens=16)
+                for r in range(world)]
+    per_rank = [list(s) for s in samplers]
+    bucket_of = torch.bucketize(lengths, torch.tensor(buckets))
+    sizes = {}
+    for step in zip(*per_rank):
+        k = int(bucket_of[step[0][0]])
+        assert all(len(batch) == len(step[0]) and int(bucket_of[batch].unique()) == k for batch in step)
+        assert len(step[0]) * buckets[k] <= 16
+        sizes.setdefault(k, set()).add(len(step[0]))
+    assert sizes == {0: {4}, 1: {2}}
+    per_bucket = torch.bincount(bucket_of, minlength=2)
+    assert len(samplers[0]) == len(per_rank[0]) == int(per_bucket[0] // (4 * world) + per_bucket[1] // (2 * world))
+
+
+def test_transfer_hook_trims_the_batch_to_its_bucket() -> None:
+    """The batch crosses to the GPU at its bucket's width, not max_seq_l: events of length 4
+    under buckets (4, 8) ship 4 slots, identical to the first 4 of the padded batch."""
+    model = _model(_config(dl={"len_buckets": [4, 8], "len_mode": "group"}))
+    ds = _ragged_batch(n_out=(1, 1))
+    out = model.on_before_batch_transfer(ds, 0)
+    assert out.f.full.shape[1] == 4
+    for a, b in ((out.f, ds.f), (out.m, ds.m), (out.am, ds.am)):
+        assert torch.equal(a.full, b.full[:, :4])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="pinned host memory needs a GPU")
+def test_pinned_batch_is_contiguous_and_unchanged() -> None:
+    """pin_memory lets DataLoader(pin_memory=True) pin DataStruct batches. A trimmed (strided) batch
+    comes back contiguous: a strided pinned source would be copied through pageable memory."""
+    ds = _ragged_batch().trim(5)
+    ds.edep_layers = torch.rand(len(ds), 3)
+    p = ds.pin_memory()
+    for a, b in ((p.f.full, ds.f.full), (p.m.full, ds.m.full), (p.am.full, ds.am.full), (p.edep_layers, ds.edep_layers)):
+        assert a.is_pinned() and a.is_contiguous() and torch.equal(a, b)
+
+
+def test_group_mode_schedule_spans_the_real_step_count() -> None:
+    """Group mode's step count is not dataset_size / bs, so configure_optimizers rebuilds the
+    schedule over Lightning's estimate, with the warmup applied once to the base LR."""
+    from types import SimpleNamespace
+    cfg = _config(dl={"len_buckets": "auto", "len_mode": "group", "len_max_tokens": 64})
+    cfg["config"]["opt_conf"] = {"opt": "muon", "lr": 1e-3,
+                                 "scheduler": {"cls": "warmup_cosine", "total_steps": 1000, "warmup_frac": 0.1}}
+    model = LEGOLtng(cfg)
+    model._trainer = SimpleNamespace(estimated_stepping_batches=37)
+    sched = model.configure_optimizers()["lr_scheduler"]["scheduler"]
+    assert sched._milestones == [3] and sched._schedulers[1].T_max == 34
+    assert model.rc.opt_conf["scheduler"]["total_steps"] == 37
+    assert model.opt.param_groups[0]["lr"] == pytest.approx(1e-3 * 1e-3)
+
+
+def test_config_resolves_len_max_tokens() -> None:
+    assert resolve_legoltng_config(_config()).len_max_tokens is None
+    rc = resolve_legoltng_config(_config(dl={"len_buckets": "auto", "len_mode": "group", "len_max_tokens": 64}))
+    assert rc.len_max_tokens == 64
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="host-device syncs only exist with a GPU")
+def test_training_step_has_no_host_device_sync() -> None:
+    """Every sync makes the CPU wait for the GPU, so Python, launches and data loading never
+    overlap GPU work. A group-mode step (OT coupling, learned loss weights, flow map) has none
+    once Lightning's on_before_batch_transfer has seen the batch on the CPU. The vector field is
+    a stand-in: x-transformers' eager einx ops sync on every call but compile to constants under
+    the torch.compile that training uses, so they would only hide this file's own regressions."""
+    pytest.importorskip("torch_linear_assignment")
+
+    class _VF(torch.nn.Module):
+        step_cond = True
+
+        def __init__(self):
+            super().__init__()
+            self.lin = torch.nn.Linear(7, 7)
+
+        def forward(self, x, mask, attn_mask, types, pdgids, t=None, d=None):
+            return self.lin(x) * (t + d).unsqueeze(-1)
+
+    cfg = _config(dl={"len_buckets": [4, 6], "len_mode": "group"}, ot_coupling=True,
+                  learned_loss_weights=True, edep_cell=True, one_step_euler_fac=0.5, one_step_euler_sections=4)
+    cfg["config"]["model_conf"]["model_args"]["step_cond"] = True
+    model = _model(cfg)
+    model.model.vf = _VF()
+    model = model.cuda()
+    model.train()
+    cpu = _edep_generated(_ragged_batch())
+    for sync_check in (False, True):                          # the first step does the lazy setup
+        batch = model.on_before_batch_transfer(cpu, 0).to("cuda")
+        torch.cuda.synchronize()
+        torch.cuda.set_sync_debug_mode("error" if sync_check else 0)
+        try:
+            model._step(batch, 0).backward()
+        finally:
+            torch.cuda.set_sync_debug_mode(0)
