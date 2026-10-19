@@ -39,11 +39,12 @@ pos     = torch.tensor([[0.0, 0.0, -50.0]])  # entry position (on surface)    (B
 mom     = torch.tensor([[0.0, 0.0, 1.0]])    # direction (auto-normalised)    (B, 3) or (1, 3)
 energy  = torch.tensor([300.0])              # incoming energy, MeV           (B,) or (1,)
 density = torch.tensor([3.0])                # material density               (B,) or (1,)
-size    = torch.tensor([100.0])              # required, but unused
+size    = torch.tensor([100.0])              # material size (the Size scalar) (B,) or (1,)
+Z, A    = torch.tensor([29.0]), torch.tensor([63.5])  # atomic / mass number  (B,) or (1,)
 pdgids  = torch.tensor([11])                 # a PDG-id, e^- in this case;    (B,) or (1,)
 
 with torch.no_grad():
-    out = gen.gen_model_w_g4_args(n, pos, mom, energy, density, size, pdgids)
+    out = gen.gen_model_w_g4_args(n, pos, mom, energy, density, size, pdgids, Z=Z, A=A)
 
 # out["per_particle"]["Outgoing"] : [B*n, max_seq_l - n_prefix - 1, 8]   model layout (see Data structure)
 # out["per_particle"]["Incoming"] : [B*n, 1, 8]
@@ -56,7 +57,9 @@ Each input has batch size `1` or `B`; with `B > 1` events, `n` samples are drawn
 per event, so the output has `B*n` rows. `mom` is a **direction** — it is
 normalised internally and scaled by `energy` — and `pos` is ray-traced onto the
 conditioning cube for you. (This differs from the raw `gen(cond)` path below,
-where the momentum must already be energy-scaled.)
+where the momentum must already be energy-scaled.) Every name in the flow's
+`cond_scalars` must be supplied -- `Density`, `Z`, `A`, `Size` for current
+checkpoints; a legacy `("Density",)` checkpoint ignores `Z`, `A` and `size`.
 
 ---
 
@@ -113,8 +116,10 @@ torch.save({"state_dict": vf_sd, "config": config}, "flow.pt")
 The same checkpoint dict (`{"state_dict": ..., "config": ...}`) is what
 `LEGOLtng(config)` expects when re-loading: pass the loaded dict in as `config`
 and the constructor pulls both keys out. `MultModel` follows the same pattern.
-A reference training entry point is in `scripts/train.py` (4-GPU DDP, Comet
-logger, Muon optimizer with warmup-cosine).
+`scripts/train.py <config>` is the reference entry point: devices, precision,
+compile, seeds and logging (Comet or CSV) come from the YAML's `run` / `logging`
+sections, and `warmup_cosine`'s `total_steps` is the trainer's exact step count
+(`run.dataset_size` only seeds a construction placeholder).
 
 ### Generation — lower-level API
 
@@ -168,7 +173,7 @@ Row layout along `N` (slot roles depend on `model_conf.cond_scalars`, default
 
 ```
 row 0              : cond_scalars[0] (Density)                    mask=0  attn=1
-row 1              : E_dep / max_energy  -- generated, not a condition   mask=1  attn=1
+row 1              : E_dep (normalised) -- generated, not a condition    mask=1  attn=1
 rows 2..n_prefix-1 : cond_scalars[1:] (Z, A, Size, ...)           mask=0  attn=1
 row n_prefix       : incoming particle (condition)                mask=0  attn=1
 rows n_prefix+1..  : outgoing particles (RVs, padded)             mask=1  attn=1/0
@@ -178,7 +183,7 @@ Column layout along the last dim of `f` (8 columns):
 
 | Col | Particle rows | Scalar rows |
 |---|---|---|
-| `0` | energy scalar: `log(E/cutoff)/log(max_energy/cutoff)` clamped to `[0, 1]`; **outgoing rows store `1 - e_out/e_in`** (relative to the incoming particle) | the scalar's value |
+| `0` | energy scalar: `log(E/cutoff)/log(max_energy/cutoff)` clamped to `[0, 1]`; **outgoing rows store `1 - log(E_out/cutoff)/log(E_in/cutoff)`** (relative to the incoming particle; `E_out >= E_in` clamps to `0`) | the scalar's value |
 | `1:4` | unit momentum direction | `1` |
 | `4:7` | unit position direction (ray-traced onto the cube surface for the incoming row if `proj_ray=True`) | `1` |
 | `7` | pdgid (raw, or a vocab index when `pdgid_is_idx`) | `0` |
@@ -221,6 +226,8 @@ Any key not listed defaults to the value shown in the source.
 | `lds_args.dtype` | `torch.float32` | Cast features to this dtype. |
 | `bs` | `2**12` | Batch size. |
 | `num_workers` | `4` | `DataLoader` workers (uses `fork` start method if >0). |
+| `seed` | `run.data_seed`, else Lightning's global seed, else `0` | Shuffle seed, identical on every DDP rank (`loader_seed`). |
+| `len_buckets`, `len_mode`, `len_split`, `len_max_tokens` | `None`, `"split"`, `8`, `None` | Length buckets (`"auto"` = powers of two): run each batch (`"group"`: one bucket per batch, `len_max_tokens` events x length per batch) or each sorted piece of it (`"split"`, `len_split` pieces) at its bucket's padded length. |
 
 ### `val_conf` — validation split
 
@@ -245,6 +252,7 @@ training set via `random_split`.
 | `e_dep_max` | `1.0` | Sigmoid scale for the sampled E_dep base value. |
 | `base_head` | — | Saved `base_head` state dict (written by training); always reloaded frozen — the head is never trained alongside the flow. |
 | `base_head_nout` | `False` | Also feed the outgoing multiplicity and per-pdgid composition to the head; only E_dep's `(mu, sig)` see them. |
+| `ang_shape`, `ang_nout`, `ang_species`, `ang_weight` | `False`, `False`, `False`, `1.0` | Angular prior: a shape exponent next to `kappa` (two matched moments); `kappa` sees the outgoing set; one `(kappa, pow)` per outgoing species, fitted per slot; weight of the angular moment loss. |
 
 ### `model_conf` — flow-matching model
 
@@ -259,8 +267,13 @@ Top-level FM options:
 | `edep_log_min` | `None` | Log-scale the E_dep row: `log(E_dep/edep_log_min)/log(max_energy/edep_log_min)`, clamped to `[0, 1]`; `None` keeps `E_dep/max_energy`. |
 | `overflow_delta` | `0.0` | Sentinel offset: zero-deposit / fully-absorbed targets are written to `-overflow_delta` in the energy channel so the flow can separate the atom from the continuum. |
 | `proj_ray` | `True` (read by `DataPrep` only) | At prep-time, ray-trace the incoming position onto the unit-cube surface via `CubeTrace`. |
-| `canon_sym` | `False` | Canonicalise directions onto a reference cube face before the flow and undo it after (`CubeSymmetry`). |
+| `canon_sym` | `False` | Canonicalise directions onto a reference cube face before the flow and undo it after (`CubeSymmetry`). Cube only (`cuboid_dim` with unequal sides raises). |
+| `sym_aug` | `False` | With `canon_sym`: a random in-face symmetry per event on top of the canonicalisation (training and generation). |
+| `cuboid_dim` | from `meta.json`, else a cube | Target dimensions: the ray trace and the position direction (that of `x / cuboid_dim`). |
+| `exclude_passthrough` | `False` | Train only on events where the primary interacted (`E_dep > 0` or `n_out != 1`); the count model's pass-through token emits the rest. |
+| `edep_cell`, `max_loss_weight_edep` | `False`, `= max_loss_weight` | Give the E_dep row its own learned loss cell, with its own floor. |
 | `dir_zoom` | `None` | `theta_s` (rad). Learn each outgoing momentum direction with its polar angle about the incoming direction remapped to `pi*log1p(theta/theta_s)/log1p(pi/theta_s)` (azimuth kept; applied to the targets in training, undone in `forward`), so a particle that crosses a thin plate nearly undeflected (mrad) is resolvable. `2e-3` magnifies 7 mrad ~47x and compresses 1 rad ~2.3x. Changes what the flow learns: train with it. |
+| `dir_zoom_mix` | `0.0` | Linear share of the `dir_zoom` map (`0` = pure log). |
 | `dir_zoom_nucleons_max` | `None` | With `dir_zoom`: leave events with more outgoing nucleons (p, n) than this unzoomed. `1` skips nuclear interactions (in G4, >= 2 nucleons marks 99.4-99.9% of them in 1.4 mm W, and <= 1 holds for 99.9% of survivor and EM events), whose secondaries are spread over the sphere; zooming them cost the W plate ~20% of its nuclear-interaction deposit (two controlled pairs, 17.10.26). Read from the pdgids, which the count model fixes before the flow, so training and generation agree. |
 | `ot_coupling` | `False` | At training time, Hungarian-assign base→data slots per event (same pdgid only). Solved with `torch-linear-assignment` (a pixi dependency); `on_fit_start` raises if it is missing. |
 | `t_dist` | `"sd3"` | Training-time `t` sampling: `"sd3"` (mode sampling `1-u + s/3·(sin²(πu/2) - u)`; `s = 0` is uniform) or `"sm_norm"` (`sigmoid(s·N(0,1))`, i.e. logit-normal). |
@@ -287,7 +300,7 @@ Top-level FM options:
 | `ntypes` | injected: `len(cond_scalars) + 3` | Vocab size of the per-slot type map; indices are `arange(max_seq_l).clamp_max(n_prefix + 1)`. |
 | `npdgids` | injected at training (`len(meta.particles) + 1`) | Vocab size of the pdgid conditional map (`+1` for the unknown / pad index `0`). |
 | `xavier_gain` | `1.0` | Gain on the init std of the conditional linear maps. |
-| `time_cond` | `True` | Sinusoidal per-token `t` embedding as the adaptive-norm condition; `False` uses a learned global vector (`LEGOLtngDirect`). |
+| `time_cond` | `True` | Sinusoidal `t` embedding as the adaptive-norm condition (conditioning tokens at `t = 1`); `False` uses a learned global vector (`LEGOLtngDirect`). With one `t` per event the adaptive norms compute their gammas on two rows per event instead of one per token. |
 | `step_cond` | `False` | Also embed the step size `d` (zero-init gain), required by `one_step_euler_fac > 0`. |
 | `grad_ckpt` | `False` | Activation checkpointing per attention block. |
 
@@ -312,19 +325,21 @@ reproduces exactly, while fresh configs use the library default of 10.
 | `train_inverse` | `False` | Also train `InvModel` (incoming PID from the outgoing set), needed by `GenerateIn`; `inv_h_dim`, `inv_n_layers`, `inv_n_heads`, `inv_model_args` default to the count model's. |
 | `h_dim` | `512` | Hidden dim of the Decoder. |
 | `n_layers`, `n_heads` | `6`, `8` | Decoder depth and heads. |
-| `dropout` | `0.1` | Shared attn / ff / layer / emb dropout. |
-| `pos_scale` | `50.0` | Multiplier on the position (last-3) part of the input before projection. |
+| `dropout` | `0.1` | Shared attn / ff / emb dropout (layer dropout is not plumbed: it breaks DDP). |
+| `pos_scale` | `50.0` | Half-size `d` of the L-infinity cube `GeomTrafos.to_cube` maps the position direction onto before the input projection. |
+| `sym_aug` | `False` | With `canon_sym`: random in-face symmetry per event. |
+| `passthrough_head`, `passthrough_pdgids`, `passthrough_on`, `passthrough_dim`, `passthrough_depth` | `False`, the neutrals, `"in_embd"`, `h_dim`, `0` | Pass-through token: P(the primary did not interact) for the listed incoming species, read from the input embedding or the trunk's slot 0, an MLP (`depth 0`) or `depth` residual blocks; the count CE is masked for those events. |
 | `max_out_particles` | `meta.ntokens - (n_prefix + 1)` | Cap on per-pdg-type counts during data loading. |
 | `max_count` | derived from data | Categorical vocab size of each per-slot count head; computed once from the train set. |
 | `ptypes` | `meta.particles` (sorted) | Outgoing pdg-id vocabulary (`torch.tensor`). One Decoder slot per entry. |
 | `ptypes_in` | `meta.particles_in` (sorted) | Incoming pdg-id vocabulary; used for the input embedding. |
-| `bs` | `2**12` | Batch size. |
+| `bs` | `2**12` | The loader's batch size; must equal `dl_conf.bs` (a fresh config raises otherwise). |
 | `lr`, `weight_decay`, `warmup_steps` | `1e-3`, `0.0`, `0` | Used only by the *default* `AdamWScheduleFree` (when `opt_conf` is absent). |
 | `post_emb_norm` | `True` | Forwarded to `ContinuousTransformerWrapper`. |
 | `use_abs_pos_emb` | `True` | Forwarded to `ContinuousTransformerWrapper`. Note the `use_` prefix. |
 | `model_args` | `{}` | Forwarded to `x-transformers` `Decoder` (same flag set as the FM encoder). |
-| `opt_conf` | `None` | Same schema as the FM-level `opt_conf` below (resolved by `build_optimizer`). If set, the flat `lr` / `weight_decay` / `warmup_steps` keys above are ignored and a `warnings.warn` is emitted for each. |
-| `fwd_compile` | `False` | Re-apply `torch.compile` to the count Decoder when a saved checkpoint is loaded by `GenerateOut`. `train.py` compiles it during training but unwraps it before saving, so generation otherwise runs eager. Plain compile, not `mode="reduce-overhead"` — the AR loop reuses its KV cache across steps and CUDA-graph capture rejects that. Measured 1.28x on the multiplicity phase at bs 8192; counts bit-identical under a fixed seed. |
+| `opt_conf` | `None` | Same schema as the FM-level `opt_conf` below (resolved by `build_optimizer`). If set, the flat `lr` / `weight_decay` / `warmup_steps` keys above are ignored. |
+| `fwd_compile` | `False` | `torch.compile(dynamic=True)` the count Decoder when `GenerateOut` loads the checkpoint (`train.py` unwraps it before saving). Dynamic because the KV-cache decode changes the cache length every slot: a static graph recompiled per step (68 vs 115 ms per 8192 events). Not `reduce-overhead`: CUDA-graph capture rejects the reused KV cache. Counts identical under a fixed seed. |
 
 ### `opt_conf` — optimizer (FM model)
 
@@ -347,10 +362,11 @@ Resolved by `build_optimizer`. Two shapes are accepted:
 }
 ```
 
-`"muon"` builds a parameter-group `Muon` (2D+ params get Muon; 1D params get
-AdamW), `"schedulefree"` builds `AdamWScheduleFree`. `"warmup_cosine"` builds a
-`SequentialLR(LinearLR → CosineAnnealingLR)`. Pass a class directly to bypass
-the registry.
+`"muon"` builds `BatchedMuon` (2D+ params get Muon; 1D params get AdamW),
+`"schedulefree"` builds `AdamWScheduleFree`. `"warmup_cosine"` builds a
+`SequentialLR(LinearLR → CosineAnnealingLR)`; under a Trainer `configure_optimizers`
+sets its `total_steps` to `trainer.estimated_stepping_batches`. Pass a class
+directly to bypass the registry.
 
 ### `odeint_conf` — inference-time ODE solve
 
@@ -358,10 +374,14 @@ Used by `LEGOLtng.forward` / `LEGOLtng.solve`:
 
 | Key | Default | Effect |
 |---|---|---|
-| `method` | `"midpoint"` | Any method supported by `flow_matching.solver.ODESolver` (`"midpoint"`, `"rk4"`, `"euler"`, …). |
-| `step_size` | `0.04` | ODE step. `0.5` + `"midpoint"` triggers a hand-unrolled 2-step fast path. |
+| `method` | `"midpoint"` | `"euler"`, `"midpoint"`, `"rk4"` are hand-unrolled and manifold-aware (only `mask == 1` slots move; euler and midpoint's first stage get the flow map's `d`); any other `flow_matching.solver.ODESolver` method runs in the ambient space. |
+| `step_size` | `0.04` | ODE step: `round(1/step_size)` equal steps. |
+| `time_grid` | `None` | Explicit grid (list or tensor), used as given. |
+| `amp` | the training precision | Autocast dtype of the solve (`"bf16"`, `"32"`, ...). |
+| `len_buckets`, `compile_buckets` | `None` | Solve events grouped by length at their bucket's padded length; pad chunk row counts to these sizes so a compiled field sees few shapes. |
+| `sym_rand` | `False` | With `canon_sym`: random in-face symmetry at generation even without `sym_aug`. |
 | `split_size` | `None` | Chunk the batch dim when solving to bound memory. |
-| `return_timesteps` | `False` | Return intermediate states on a uniform time grid. |
+| `return_timesteps` | `False` | Return the state after every solver step. |
 | `return_base` | `False` | Skip the solve and return the sampled base directly. |
 | `fwd_compile` | `False` | `torch.compile(model, mode="reduce-overhead")` once on first forward. |
 | `compile_dynamic` | `False` | With `fwd_compile`: one symbolic-shape graph instead of one per (length bucket, row count). Patches x-transformers' shape-specialising `einx.where` (`compat.dynamic_shape_attention`), hands the field contiguous inputs and tiles 1-row chunks (dynamo would recompile on either). CUDA graphs only with `compile_buckets`. Slab chain: 2 graphs for the W/Si pair instead of 28, ~1 min of compile instead of ~5. |
@@ -369,8 +389,10 @@ Used by `LEGOLtng.forward` / `LEGOLtng.solve`:
 | `energy_balance` | `False` | `GenerateOut` only. Keep the generated E_dep and close the kinetic balance `E_in = E_dep + sum E_out + 1.022 (n_e+ out - n_e+ in)` per event: e+-/gamma in rescale every outgoing energy (an absorbed one deposits the budget), a hadron survivor (incoming species, > 90% of E_in) takes the remainder, nuclear interactions are left alone. Only for data whose own balance closes (0.1 MeV-cutoff plates; a 10 MeV cutoff loses ~7% below it). Set per model via lego_eval's `odeint` override. |
 | `exit_consistency` | `False` | `GenerateOut` only. Mirror the momentum component of an outgoing particle that points into the face its exit position is on. Position and direction are separate channels, so the flow can emit one leaving +z while moving -z (Geant4 never does); a slab chain hands it to the next slab moving away from it, which the count model answers with spurious species. |
 
-`LEGOLtng.solve(..., compute_ll=True, log_p0=...)` runs
-`ODESolver.compute_likelihood` (reverse-time) to score samples.
+`LEGOLtng.log_likelihood(ds_t, log_p0, step_size, method)` runs
+`ODESolver.compute_likelihood` (reverse-time) to score samples. `solve` and
+`log_likelihood` work in the model frame: a `canon_sym` / `dir_zoom` caller must
+transform the batch first, as `forward` does.
 
 ### `additional`
 
@@ -384,7 +406,7 @@ Free-form bag for logging only (`epochs`, `precision`, `notes`,
 | Path | Purpose |
 |---|---|
 | `legofmt/cfm/cfm_trafo_x.py` | `CFMTrafo_x`: vector field. Per-(mask, type, pdgid) conditional linear embedding, `x-transformers` Encoder conditioned on sinusoidal `t` (and `d`) embeddings, mirrored output projection. |
-| `legofmt/cfm/project_model.py`, `legofmt/cfm/solvers.py`, `legofmt/cfm/path_sampler.py` | `ProjectModel` keeps state/velocity on the manifold; `Solvers` mixin (`solve`, hand-unrolled midpoint/Euler steps, `log_likelihood`, `forward`); `ProductPathSampler` (one `GeodesicProbPath` per factor). |
+| `legofmt/cfm/project_model.py`, `legofmt/cfm/solvers.py`, `legofmt/cfm/path_sampler.py` | `ProjectModel` keeps state/velocity on the manifold; `Solvers` mixin (`solve`, hand-unrolled euler / midpoint / rk4 steps, `log_likelihood`, `forward`); `ProductPathSampler` (the CondOT geodesic per factor, closed form). |
 | `legofmt/main/modules.py` | `LEGOLtng`: construction, Lightning hooks, data split, optimizer wiring. Behaviour lives in the mixins `TrainStep` / `BaseDist` / `Solvers`. |
 | `legofmt/main/train_step.py` | `TrainStep`: training step, per-cell uncertainty weighting, `t` and mask sampling, flow-map loss gating. |
 | `legofmt/main/generate.py` | `GenerateOut` / `GenerateIn`: chain `MultModel` + `LEGOLtng` for end-to-end sampling; build the padded conditioning batch. |
