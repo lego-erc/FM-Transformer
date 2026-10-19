@@ -343,6 +343,15 @@ def test_one_step_euler_requires_step_cond() -> None:
         LEGOLtngVelocity(cfg)
 
 
+def test_trained_checkpoint_without_step_cond_loads() -> None:
+    """The guard is a training requirement: 2026-06 checkpoints (rp_fm_v*) carry a non-zero
+    one_step_euler_fac without step_cond and must still load for inference."""
+    cfg = _tiny_config()
+    cfg["state_dict"] = LEGOLtngVelocity(_tiny_config()).model.vf.state_dict()
+    cfg["config"]["model_conf"]["one_step_euler_fac"] = 1.0
+    LEGOLtngVelocity(cfg)
+
+
 def test_one_step_euler_every_gates_the_term() -> None:
     """With every=2 an odd global_step must skip the term entirely."""
     cfg = _step_cond_config()

@@ -50,7 +50,7 @@ def test_v1_gets_half_the_step_and_v2_stays_instantaneous() -> None:
     v1_d, v2_d = seen[0], seen[1]
     assert isinstance(v1_d, torch.Tensor), f"v1 got d={v1_d!r}, want a tensor"
     assert torch.allclose(v1_d.float(), torch.tensor(0.25)), f"v1 d={v1_d}"
-    assert v2_d is None, f"v2 must stay instantaneous, got d={v2_d!r}"
+    assert float(v2_d) == 0.0, f"v2 must stay instantaneous, got d={v2_d!r}"
 
 
 def test_euler_still_passes_the_whole_step() -> None:

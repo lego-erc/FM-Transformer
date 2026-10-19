@@ -241,7 +241,7 @@ def _build_resolved(
     set_layout(cond_scalars)
 
     sections = model_conf.get("one_step_euler_sections", 8)
-    if model_conf.get("one_step_euler_fac", 0.0) > 0:
+    if not state_dict and model_conf.get("one_step_euler_fac", 0.0) > 0:  # loading weights never trains
         if not model_args.get("step_cond", False):
             raise ValueError(
                 "one_step_euler_fac > 0 requires model_args.step_cond=True; "

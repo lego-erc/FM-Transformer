@@ -128,6 +128,8 @@ class Solvers:
                 time_grid = x_init.new_tensor([0.0, 1.0])
             if reverse:
                 time_grid = time_grid.flip(0)
+        else:  # explicit grids (e.g. a YAML list) are used as given; ``reverse`` only flips the built one
+            time_grid = torch.as_tensor(time_grid, dtype=x_init.dtype, device=x_init.device)
 
         def _sample(x_init, mask, attn_mask, pdgids_idx):
             # contiguous: a dynamic graph is guarded on the strides / offsets of the bucket and chunk views
@@ -164,7 +166,8 @@ class Solvers:
         """Manifold midpoint steps on the ``mask == 1`` slots. ``v1`` is queried with
         ``d = dt/2`` (the flow map for the half-step it takes); ``v2`` stays
         instantaneous because it is applied as a full step from ``x``
-        (tests/test_midpoint_flow_map.py)."""
+        (tests/test_midpoint_flow_map.py). Its ``d = 0`` is passed as a tensor, not
+        omitted: a ``None`` is a separate dynamo guard, i.e. a second compiled graph."""
         xs  = [x]
         man = self.model.manifold
         gen = (extras["mask"] == 1).unsqueeze(-1)
@@ -172,7 +175,7 @@ class Solvers:
             dt     = t_b - t_a
             v1     = self.model(x, t_a, d=dt / 2, **extras)
             x_half = man.expmap(x, dt / 2 * v1)
-            v2     = self.model(x_half, t_a + dt / 2, **extras)
+            v2     = self.model(x_half, t_a + dt / 2, d=torch.zeros_like(dt), **extras)
             x      = torch.where(gen, man.expmap(x, dt * man.proju(x, v2)), x)
             if return_intermediates:
                 xs.append(x)

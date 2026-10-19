@@ -80,10 +80,7 @@ class LEGOLtngDirect(LEGOLtng):
         """The teacher's transport of ``base``, or the data target without one."""
         if self.reflow_teacher is None:
             return ds_t.f.model_in
-        solve_kwargs = dict(self.rc.reflow_kwargs)
-        if solve_kwargs.get("method", "midpoint") == "midpoint":
-            solve_kwargs.setdefault("time_grid", base.new_tensor([0.0, 1.0]))
-        return self._teacher_transport(ds_t, base, **solve_kwargs)
+        return self._teacher_transport(ds_t, base, **self.rc.reflow_kwargs)
 
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
         with torch.no_grad():

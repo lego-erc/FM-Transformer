@@ -90,6 +90,8 @@ class CFMTrafo_x(nn.Module):
         self.cond_bi_pdgids = nn.Parameter(torch.empty(npdgids, h_dim))
         self.cond_bo_pdgids = nn.Parameter(torch.empty(npdgids, in_dim))
 
+        self._register_load_state_dict_pre_hook(legacy_param_rename)
+
         w_std = xavier_gain * 3 ** 0.5 * (2.0 / (in_dim + h_dim)) ** 0.5
         for p in (self.cond_w_mask, self.cond_w_types, self.cond_w_pdgids):
             nn.init.normal_(p, std=w_std)
@@ -109,7 +111,6 @@ class CFMTrafo_x(nn.Module):
                     persistent=False,
                 )
                 self.step_gain = nn.Parameter(torch.zeros(1))
-            self._register_load_state_dict_pre_hook(legacy_param_rename)
         else:
             self.global_cond = nn.Parameter(torch.zeros(1, h_dim))
 
@@ -163,8 +164,6 @@ class CFMTrafo_x(nn.Module):
             embd = embd + cond
 
         # project_in / project_out are identities unless dim_in_out was set.
-        embd = self.vf.project_in(embd)
-        if self.training:
-            embd = self.vf.emb_dropout(embd)
+        embd = self.vf.emb_dropout(self.vf.project_in(embd))
         h = self.vf.project_out(self.vf.attn_layers(embd, mask=attn_mask, condition=cond))
         return self._project_out(h, mask, oh)
