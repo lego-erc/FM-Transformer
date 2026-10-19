@@ -40,7 +40,7 @@ def test_fp32_and_unknown_and_missing_disable_autocast() -> None:
 
 
 def test_resolved_config_carries_amp_dtype() -> None:
-    from test_modules_direct import _tiny_config
+    from test_helpers import _tiny_config
     from legofmt.mod_comps.config import resolve_legoltng_config
 
     cfg = _tiny_config()

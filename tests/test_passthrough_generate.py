@@ -2,38 +2,21 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 import torch
 
 from legofmt.data.struct import _F, set_layout
 from legofmt.main.generate import GenerateOut
 from legofmt.multiplicity.model import MultModel
-from test_generate_direct import _save_flow_ckpt
+from test_helpers import _mult_config, _save_flow_ckpt
 
 
-def _mult_config() -> dict:
-    return {
-        "dl_conf": {"lds_args": {"cutoff_mev": 10.0}, "bs": 2, "num_workers": 0},
-        "mm_conf": {
-            "ptypes": torch.tensor([22, 211], dtype=torch.int64),
-            "ptypes_in": torch.tensor([22, 211, 2212], dtype=torch.int64),
-            "max_out_particles": 4,
-            "max_count": 4,
-            "h_dim": 16,
-            "in_dim": 8,
-            "n_layers": 1,
-            "n_heads": 2,
-            "dropout": 0.0,
-            "use_abs_pos_emb": False,
-            "post_emb_norm": False,
-            "train_inverse": False,
-            "passthrough_head": True,
-            "model_args": {"use_adaptive_rmsnorm": True},
-        },
-        "opt_conf": {"opt": "schedulefree", "lr": 1e-3},
-    }
+def _pt_mult_config() -> dict:
+    cfg = _mult_config()
+    mm = cfg["mm_conf"]
+    mm.update(train_inverse=False, passthrough_head=True)
+    del mm["inv_model_args"]
+    return cfg
 
 
 @pytest.fixture(scope="module")
@@ -41,7 +24,7 @@ def generator(tmp_path_factory: pytest.TempPathFactory) -> GenerateOut:
     tmp = tmp_path_factory.mktemp("pt_ckpts")
     torch.manual_seed(0)
     fp = _save_flow_ckpt(tmp)
-    mcfg = _mult_config()
+    mcfg = _pt_mult_config()
     torch.manual_seed(0)
     mult = MultModel({"state_dict": {}, "config": mcfg})
     mp = tmp / "mult.pt"

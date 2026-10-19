@@ -37,7 +37,7 @@ def test_strings_still_resolve() -> None:
 def _dtypes_seen(model, cfg_amp: object, sentinel: object) -> list[torch.dtype]:
     """Run one solve and report the autocast dtype the vector field ran under."""
     from legofmt.data.struct import DataStruct
-    from test_modules_direct import _fake_batch
+    from test_helpers import _fake_batch
 
     if sentinel is not None:            # `None` here means "leave the key out"
         model.rc.odeint_conf["amp"] = cfg_amp
@@ -60,7 +60,7 @@ def _dtypes_seen(model, cfg_amp: object, sentinel: object) -> list[torch.dtype]:
 
 def test_absent_key_uses_the_stamp() -> None:
     from legofmt.main.modules import LEGOLtng
-    from test_modules_direct import _tiny_config
+    from test_helpers import _tiny_config
 
     cfg = _tiny_config()
     cfg["config"]["additional"] = {"precision": "bf16-mixed, medium"}
@@ -71,7 +71,7 @@ def test_absent_key_uses_the_stamp() -> None:
 
 def test_override_forces_bf16_on_an_fp32_checkpoint() -> None:
     from legofmt.main.modules import LEGOLtng
-    from test_modules_direct import _tiny_config
+    from test_helpers import _tiny_config
 
     m = LEGOLtng(_tiny_config())          # no stamp -> fp32
     assert m.rc.amp_dtype is None
@@ -80,7 +80,7 @@ def test_override_forces_bf16_on_an_fp32_checkpoint() -> None:
 
 def test_override_forces_fp32_on_a_bf16_checkpoint() -> None:
     from legofmt.main.modules import LEGOLtng
-    from test_modules_direct import _tiny_config
+    from test_helpers import _tiny_config
 
     cfg = _tiny_config()
     cfg["config"]["additional"] = {"precision": "bf16-mixed, medium"}

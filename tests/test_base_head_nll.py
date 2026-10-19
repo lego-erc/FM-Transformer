@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import torch
 
+from test_helpers import _head_config as _nout_config
 from legofmt.data.struct import DataStruct, _F
 from legofmt.main.modules import LEGOLtng
 
@@ -23,39 +24,9 @@ MU_TRUE, SIG_TRUE = -2.0, 0.5
 
 
 def _config() -> dict:
-    pdgids = torch.tensor([11, 22, 2212], dtype=torch.int64).sort().values
-    return {
-        "state_dict": {},
-        "config": {
-            "dl_conf": {"lds_args": {"cutoff_mev": 10.0}, "bs": 2, "num_workers": 0},
-            "val_conf": {"val_frac": 0.01, "seed": 0},
-            "base_conf": {
-                "base_range": 3.4, "kappa": torch.tensor(8.0), "bs_frac": 0.0,
-                "base_dist": "poles", "scale_dist": "sm_norm", "tanh_theta": True,
-            },
-            "model_conf": {
-                "manifold": [
-                    {"name": "euclidean", "dim": 1},
-                    {"name": "sphere", "dim": 3},
-                    {"name": "sphere", "dim": 3},
-                ],
-                "max_energy": 300.0,
-                "pdgids": pdgids,
-                "cond_scalars": ("Density", "Z", "A", "Size"),
-                # > 0 so __init__ builds base_head; the test drives
-                # pretrain_base itself, so the count is otherwise unused.
-                "base_pretrain_batches": 1,
-                "model_args": {
-                    "h_dim": 16, "nlayers": 1, "nhead": 2, "in_dim": 7,
-                    "max_seq_l": 8, "ntypes": 4, "nvtypes": 2,
-                    "npdgids": pdgids.numel() + 1, "ff_mult": 1, "dropout": 0.0,
-                    "use_adaptive_rmsnorm": True, "use_adaptive_layerscale": True,
-                    "ff_swish": True, "ff_glu": True,
-                },
-            },
-            "opt_conf": {"opt": "schedulefree", "lr": 1e-3},
-        },
-    }
+    cfg = _nout_config(False)
+    del cfg["config"]["base_conf"]["base_head_nout"]
+    return cfg
 
 
 def _batch(B: int, edep: torch.Tensor) -> DataStruct:

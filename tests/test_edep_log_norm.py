@@ -3,11 +3,11 @@
 import pytest
 import torch
 
+from test_helpers import MANIFOLD
 from legofmt.data.prep import DataPrep
 
 CFG = {
-    "manifold": [{"name": "euclidean", "dim": 1}, {"name": "sphere", "dim": 3},
-                 {"name": "sphere", "dim": 3}],
+    "manifold": MANIFOLD,
     "cutoff_mev": 10.0, "max_energy": 1000.0, "cond_scalars": ("Density",),
 }
 MEV = torch.tensor([0.0, 1e-6, 2.9e-4, 1.574, 10.0, 81.0, 1000.0, 5000.0])

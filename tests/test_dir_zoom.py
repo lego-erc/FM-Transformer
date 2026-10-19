@@ -19,7 +19,7 @@ from legofmt.geometry.geom_trafos import zoom_polar
 from legofmt.main.modules import LEGOLtng
 from legofmt.mod_comps.config import resolve_legoltng_config
 
-from test_modules_direct import _fake_batch, _tiny_config
+from test_helpers import _fake_batch, _tiny_config
 
 THETA_S = 2e-3
 

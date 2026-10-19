@@ -13,7 +13,7 @@ from legofmt.data.prep import DataPrep
 from legofmt.data.struct import _F
 from legofmt.main.generate import GenerateOut
 from legofmt.main.modules import LEGOLtng
-from test_generate_direct import _save_flow_ckpt, _save_mult_ckpt
+from test_helpers import _save_flow_ckpt, _save_mult_ckpt
 
 
 @pytest.fixture(scope="module")

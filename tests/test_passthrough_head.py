@@ -10,29 +10,18 @@ from __future__ import annotations
 import pytest
 import torch
 
+from test_helpers import _mult_config
 from legofmt.multiplicity.model import MultModel
 
 
 def _config(**mm) -> dict:
-    conf = {
-        "dl_conf": {"lds_args": {"cutoff_mev": 10.0}, "bs": 2, "num_workers": 0},
-        "mm_conf": {
-            "ptypes": torch.tensor([22, 211, 2112], dtype=torch.int64),
-            "ptypes_in": torch.tensor([22, 211, 2112, 2212], dtype=torch.int64),
-            "max_out_particles": 4,
-            "max_count": 4,
-            "h_dim": 16,
-            "in_dim": 8,
-            "n_layers": 1,
-            "n_heads": 2,
-            "dropout": 0.0,
-            "use_abs_pos_emb": False,
-            "post_emb_norm": False,
-            "train_inverse": False,
-            "model_args": {"use_adaptive_rmsnorm": True},
-        },
-        "opt_conf": {"opt": "schedulefree", "lr": 1e-3},
-    }
+    conf = _mult_config()
+    conf["mm_conf"].update(
+        ptypes=torch.tensor([22, 211, 2112], dtype=torch.int64),
+        ptypes_in=torch.tensor([22, 211, 2112, 2212], dtype=torch.int64),
+        train_inverse=False,
+    )
+    del conf["mm_conf"]["inv_model_args"]
     conf["mm_conf"].update(mm)
     return conf
 

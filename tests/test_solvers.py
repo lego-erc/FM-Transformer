@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from legofmt.main.modules import LEGOLtng
-from test_modules_direct import _fake_batch, _tiny_config
+from test_helpers import _fake_batch, _tiny_config
 
 
 @pytest.mark.parametrize("method", ["euler", "midpoint", "rk4"])

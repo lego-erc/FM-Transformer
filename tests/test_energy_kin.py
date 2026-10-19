@@ -12,6 +12,7 @@ import math
 
 import torch
 
+from test_helpers import MANIFOLD
 from legofmt.data.dataloaders import GetLEGOData
 from legofmt.data.prep import DataPrep
 from legofmt.data.struct import _F
@@ -38,8 +39,7 @@ def _prep(energy_kin: bool | None) -> DataPrep:
     cfg = {
         "cutoff_mev": CUTOFF, "max_energy": MAX_E, "proj_ray": False,
         "cond_scalars": ["Density"],
-        "manifold": [{"name": "euclidean", "dim": 1},
-                     {"name": "sphere", "dim": 3}, {"name": "sphere", "dim": 3}],
+        "manifold": MANIFOLD,
     }
     if energy_kin is not None:
         cfg["energy_kin"] = energy_kin
@@ -139,8 +139,7 @@ def test_energy_kin_is_carried_from_meta_into_model_conf(tmp_path) -> None:
     cfg = {
         "dl_conf": {"lds_args": {"data": str(tmp_path), "cutoff_mev": CUTOFF}, "bs": 2},
         "model_conf": {
-            "manifold": [{"name": "euclidean", "dim": 1},
-                         {"name": "sphere", "dim": 3}, {"name": "sphere", "dim": 3}],
+            "manifold": MANIFOLD,
             "max_energy": MAX_E, "base_pretrain_batches": 0,
             "model_args": {"h_dim": 8, "in_dim": 7, "nlayers": 1, "nhead": 1},
         },

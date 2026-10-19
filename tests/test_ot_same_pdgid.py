@@ -19,7 +19,7 @@ import torch
 from legofmt.base_dist import base_nn
 from legofmt.data.struct import DataStruct, _F
 from legofmt.main.modules import LEGOLtng
-from test_modules_direct import _tiny_config
+from test_helpers import _tiny_config
 
 
 def _config(**model_conf) -> dict:

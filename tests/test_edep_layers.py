@@ -11,13 +11,12 @@ import pytest
 import torch
 from torch.utils.data._utils.collate import default_collate
 
+from test_helpers import MANIFOLD
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.data.prep import DataPrep
 from legofmt.data.struct import DataStruct
 
 CUTOFF = 10.0
-MANIFOLD = [{"name": "euclidean", "dim": 1},
-            {"name": "sphere", "dim": 3}, {"name": "sphere", "dim": 3}]
 
 
 def _cfg(**kw):

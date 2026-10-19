@@ -10,7 +10,7 @@ from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt import compat
 from legofmt.mod_comps.config import resolve_legoltng_config, resolve_mult_config
 
-from test_modules_direct import _tiny_config
+from test_helpers import _tiny_config
 
 
 def _ckpt(xt_version: str | None):

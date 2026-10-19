@@ -21,7 +21,7 @@ from __future__ import annotations
 import torch
 
 from legofmt.main.modules import LEGOLtng
-from test_modules_direct import _fake_batch, _tiny_config
+from test_helpers import _fake_batch, _tiny_config
 
 
 def _model(step_cond: bool) -> LEGOLtng:

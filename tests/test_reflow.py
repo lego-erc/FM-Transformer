@@ -11,7 +11,7 @@ import torch
 
 from legofmt.distill.reflow import LEGOLtngDirect, _teacher_from_state
 from legofmt.main.modules import LEGOLtng
-from test_modules_direct import _fake_batch, _tiny_config
+from test_helpers import _fake_batch, _tiny_config
 
 
 def _with_teacher(cls, monkeypatch):

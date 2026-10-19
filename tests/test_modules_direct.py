@@ -13,6 +13,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from test_helpers import _fake_batch, _tiny_config
 from legofmt.data.struct import DataStruct, _F
 from legofmt.distill.reflow import LEGOLtngDirect as LEGOLtng
 from legofmt.main.modules import LEGOLtng as LEGOLtngVelocity
@@ -20,85 +21,6 @@ from legofmt.main.modules import LEGOLtng as LEGOLtngVelocity
 
 def _has_nonzero_grad(params) -> bool:
     return any(p.grad is not None and p.grad.abs().sum() > 0 for p in params)
-
-
-def _tiny_config() -> dict:
-    pdgids = torch.tensor([22, 211, 2212], dtype=torch.int64).sort().values
-    return {
-        "state_dict": {},
-        "config": {
-            "dl_conf": {
-                "lds_args": {"cutoff_mev": 10.0},
-                "bs": 2,
-                "num_workers": 0,
-            },
-            "val_conf": {"val_frac": 0.01, "seed": 0},
-            "base_conf": {
-                "base_range": 3.4,
-                "kappa": torch.tensor(8.0),
-                "bs_frac": 0.0,
-                "base_dist": "poles",
-                "scale_dist": "sm_norm",
-                "tanh_theta": True,
-            },
-            "model_conf": {
-                "manifold": [
-                    {"name": "euclidean", "dim": 1},
-                    {"name": "sphere",    "dim": 3},
-                    {"name": "sphere",    "dim": 3},
-                ],
-                "max_energy": 300.0,
-                "pdgids": pdgids,
-                # base_pretrain_batches defaults to 300, which (with
-                # scale_dist=sm_norm) builds base_head -- and that reads the
-                # Z/A cond scalars this fixture does not carry.
-                "base_pretrain_batches": 0,
-                "model_args": {
-                    "h_dim": 16,
-                    "nlayers": 2,
-                    "nhead": 2,
-                    "in_dim": 7,
-                    "max_seq_l": 5,
-                    "ntypes": 4,
-                    "nvtypes": 2,
-                    "npdgids": pdgids.numel() + 1,
-                    "ff_mult": 1,
-                    "dropout": 0.0,
-                    "use_adaptive_rmsnorm": True,
-                    "use_adaptive_layerscale": True,
-                    "ff_swish": True,
-                    "ff_glu": True,
-                },
-            },
-            "opt_conf": {"opt": "schedulefree", "lr": 1e-3},
-        },
-    }
-
-
-def _fake_batch(B: int = 2, L: int = 5) -> DataStruct:
-    """Synthetic batch matching the padded sequence layout: 2 conditioning
-    slots, 1 incoming-particle slot, then ``L - 3`` outgoing slots."""
-    f = torch.zeros(B, L, 8)
-    f[:, 0, 0] = 1.0
-    f[:, 1, 0] = 0.1
-    _F(f).non_p[..., 1:-1] = 1.0
-    f[:, 2, 0] = 0.8
-    f[:, 2, 1:4] = torch.tensor([0.0, 0.0, 1.0])
-    f[:, 2, 4:7] = torch.tensor([0.0, 0.0, -1.0])
-    f[:, 2, 7] = 22.0
-    g = torch.Generator().manual_seed(0)
-    f[:, 3:, 0] = torch.rand(B, L - 3, generator=g)
-    f[:, 3:, 1:4] = torch.nn.functional.normalize(
-        torch.randn(B, L - 3, 3, generator=g), dim=-1,
-    )
-    f[:, 3:, 4:7] = torch.nn.functional.normalize(
-        torch.randn(B, L - 3, 3, generator=g), dim=-1,
-    )
-    f[:, 3:, 7] = 211.0
-    m = torch.zeros(B, L, dtype=torch.long)
-    m[:, 3:] = 1
-    am = torch.ones(B, L, dtype=torch.bool)
-    return DataStruct(f, m, am)
 
 
 def test_instantiates_and_steps() -> None:

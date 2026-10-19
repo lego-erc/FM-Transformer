@@ -15,14 +15,13 @@ import math
 import pytest
 import torch
 
+from test_helpers import MANIFOLD
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.data.prep import DataPrep
 from legofmt.data.struct import _F
 
 CUTOFF = 10.0
 E_IN, E_OUT, E_DEP = 200.0, 50.0, 60.0
-MANIFOLD = [{"name": "euclidean", "dim": 1},
-            {"name": "sphere", "dim": 3}, {"name": "sphere", "dim": 3}]
 
 
 def _cfg(max_energy=None):

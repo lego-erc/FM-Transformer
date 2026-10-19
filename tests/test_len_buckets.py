@@ -14,7 +14,7 @@ from legofmt.data.struct import DataStruct
 from legofmt.main.modules import LEGOLtng
 from legofmt.mod_comps.config import resolve_legoltng_config
 
-from test_modules_direct import _fake_batch, _tiny_config
+from test_helpers import _fake_batch, _tiny_config
 
 L_MAX = 8          # n_prefix 2 (Density, E_dep) + incoming + 5 outgoing slots
 N_OUT = (1, 2, 5, 3, 1, 2)                   # event lengths 4, 5, 8, 6, 4, 5
@@ -372,7 +372,7 @@ def test_schedule_spans_the_real_step_count_in_every_mode(dl) -> None:
 def test_mult_schedule_spans_the_real_step_count() -> None:
     from types import SimpleNamespace
     from legofmt.multiplicity.model import MultModel
-    from test_generate_direct import _mult_config
+    from test_helpers import _mult_config
     cfg = _mult_config()
     cfg["opt_conf"] = {"opt": "muon", "lr": 1e-3,
                        "scheduler": {"cls": "warmup_cosine", "total_steps": 1000, "warmup_frac": 0.1}}

@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from legofmt.multiplicity.model import MultModel
-from test_generate_direct import _mult_config
+from test_helpers import _mult_config
 
 
 def _in(B: int = 4):
