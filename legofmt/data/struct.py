@@ -95,6 +95,11 @@ class DataStruct:
     def trim(self, L: int) -> "DataStruct":
         return type(self)(self.f.full[:, :L], self.m.full[:, :L], self.am.full[:, :L], self.edep_layers)
 
+    def pin_memory(self) -> "DataStruct":
+        e = self.edep_layers
+        return type(self)(*(t.contiguous().pin_memory() for t in (self.f.full, self.m.full, self.am.full)),
+                          None if e is None else e.contiguous().pin_memory())
+
     def to(self, *args, **kwargs) -> "DataStruct":
         kwargs.setdefault("non_blocking", True)
         e = self.edep_layers
