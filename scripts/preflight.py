@@ -85,7 +85,8 @@ else:
 mc = config.get("model_conf", {})
 if meta and train_model == "fm" and "max_energy" in mc:
     if float(mc["max_energy"]) != float(meta.get("max_energy", -1)):
-        bad(f"max_energy {mc['max_energy']} != dataset's {meta.get('max_energy')}")
+        warn(f"max_energy {mc['max_energy']} != dataset's {meta.get('max_energy')}: fine for a MeV file "
+             "(norm_e normalises at load); a pre-split, already-normalised file must match")
     else:
         ok(f"max_energy matches dataset ({mc['max_energy']})")
 
@@ -127,7 +128,8 @@ sched = config.get("opt_conf", {}).get("scheduler")
 if sched is not None and "total_steps" not in sched and isinstance(dev, list):
     bs = config["dl_conf"]["bs"]
     ts = run["epochs"] * int(run["dataset_size"] / (bs * len(dev)))
-    ok(f"total_steps={ts} (epochs {run['epochs']} x dataset {run['dataset_size']} / (bs {bs} x {len(dev)}))")
+    ok(f"total_steps~{ts} (epochs {run['epochs']} x dataset {run['dataset_size']} / (bs {bs} x {len(dev)})); "
+       "fit replaces it with the trainer's exact step count")
 
 # ---- optional-dependency gates ------------------------------------------
 print("\n[deps]")

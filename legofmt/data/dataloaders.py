@@ -78,7 +78,8 @@ class LEGODataset(Dataset):
     def __init__(self, data: (str | dict | tuple), *, prep=None, **kwargs) -> None:
         super().__init__()
         self.device = kwargs.get("device", "cpu")
-        if isinstance(data, str):
+        loaded = isinstance(data, str)  # a fresh load nobody else holds: normalise it in place
+        if loaded:
             path = data if data.endswith(".pt") else data + "/data_prepped.pt"
             data = torch.load(path, map_location="cpu", weights_only=False)
         if isinstance(data, dict):
@@ -89,7 +90,7 @@ class LEGODataset(Dataset):
                 )
             data = prep(GetLEGOData(**kwargs)(data))
         elif prep is not None:
-            data = getattr(prep, "norm_e", prep)(data)
+            data = prep.norm_e(data, inplace=loaded) if hasattr(prep, "norm_e") else prep(data)
         self.data = DataStruct(*data)
 
         frac = kwargs.get("frac")

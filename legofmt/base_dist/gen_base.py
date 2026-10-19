@@ -19,7 +19,6 @@ class GenerateBase:
 
     def __init__(self, config: dict):
         self.geom_trafos = GeomTrafos()
-        self.cutoff_mev = config["dl_conf"]["lds_args"].get("cutoff_mev", 10.0)
         base_conf = config.get("base_conf") or {}
         self.base_dist = base_conf.get("base_dist", "poles")
         self.tanh_theta = base_conf.get("tanh_theta", False)

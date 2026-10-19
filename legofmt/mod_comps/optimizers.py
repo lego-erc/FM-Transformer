@@ -50,8 +50,8 @@ class BatchedMuon(torch.optim.Optimizer):
             by_shape = defaultdict(list)  # >2-D weights flatten to (dim0, -1), as in pytorch_optimizer
             for i, p in enumerate(ps):
                 by_shape[(p.shape[0], p[0].numel())].append(i)
-            # pytorch_optimizer's get_adjusted_lr: Moonlight's sqrt(max(1, rows/cols)) if
-            # use_adjusted_lr, else the original Muon 0.2*sqrt(max(rows, cols)) -- always applied
+            # pytorch_optimizer's get_adjusted_lr: the original Muon sqrt(max(1, rows/cols)) if
+            # use_adjusted_lr, else Moonlight's RMS-matching 0.2*sqrt(max(rows, cols)) -- always applied
             self._shape_groups[key] = [
                 (idx, max(1.0, r / c) ** 0.5 if group["use_adjusted_lr"] else 0.2 * max(r, c) ** 0.5)
                 for (r, c), idx in by_shape.items()

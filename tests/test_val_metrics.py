@@ -174,3 +174,29 @@ def test_static_val_metric_keys_are_still_synced():
         | {f"val/w1_particle/{n}" for n in KIN_NAMES}
         | {f"val/w1_summary/{n}" for n in SUMMARY_FEATURE_NAMES}
     )
+
+
+def test_overflow_sentinel_is_decoded_before_comparing(monkeypatch):
+    """A model that reproduces the truth exactly, writing its zero-valued energy and
+    E_dep cells as the -overflow_delta sentinel it was trained on, must score zero."""
+    B, L = 64, 6
+    f = torch.zeros(B, L, 8)
+    f[:, 0, 0] = 1.0
+    f[:, 1, 0] = torch.rand(B) * (torch.rand(B) > 0.5)  # E_dep with a zero atom
+    f[:, 2:, 1:7] = torch.nn.functional.normalize(torch.randn(B, L - 2, 6), dim=-1)
+    f[:, 3:, 0] = torch.rand(B, L - 3) * (torch.rand(B, L - 3) > 0.5)
+    f[:, 3:, 7] = 22.0
+    m = torch.zeros(B, L, dtype=torch.long); m[:, 1] = 1; m[:, 3:] = 1
+    ds = DataStruct(f, m, torch.ones(B, L, dtype=torch.bool))
+
+    def sentinel_copy(lego, ds_t):
+        g = ds_t.f.full[..., :7].clone()
+        g[:, 1, 0].masked_fill_(g[:, 1, 0] == 0, -0.1)
+        g[:, 3:, 0].masked_fill_(g[:, 3:, 0] == 0, -0.1)
+        return torch.cat((g, ds_t.f.full[..., 7:]), -1)
+
+    from legofmt.data.struct import set_layout
+    set_layout(("Density",))
+    monkeypatch.setattr(ShowerValMetrics, "_generate", staticmethod(sentinel_copy))
+    out = ShowerValMetrics()(None, ds)
+    assert out["val/w1_particle/energy"] < 1e-6 and out["val/w1_summary/E_dep"] < 1e-6

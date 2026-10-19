@@ -86,11 +86,12 @@ class DataPrep:
         )
 
     @torch.no_grad()
-    def norm_e(self, batch: tuple) -> tuple:
+    def norm_e(self, batch: tuple, inplace: bool = False) -> tuple:
         """MeV -> model scale for the two channels that depend on ``max_energy``,
         so a dataset can be generated without knowing it. The outgoing column is
         a log ratio: ``cutoff_mev`` only, already final. An optional 4th tensor
-        (per-layer E_dep) goes on the E_dep row's scale. Returns new tensors.
+        (per-layer E_dep) goes on the E_dep row's scale. Returns new tensors unless
+        ``inplace`` (a freshly loaded file: the copy doubled the load's peak RAM).
 
         Datasets written before the energy split are passed through; see
         ``compat.dataset_already_normalised``.
@@ -98,7 +99,7 @@ class DataPrep:
         f, mask, attn_mask, *edep_layers = batch
         if dataset_already_normalised(f, self.pen.max_energy):
             return batch
-        f = f.clone()
+        f = f if inplace else f.clone()
         in_cc = _F(f).in_cc
         in_cc[..., 0:1] = self.pen.to_scalar_e(in_cc[..., 0:1])
         _F(f).edep.copy_(self.norm_edep(_F(f).edep))

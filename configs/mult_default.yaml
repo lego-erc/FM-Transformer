@@ -39,10 +39,7 @@ config:
     h_dim: 128
     n_layers: 6
     n_heads: 6
-    bs: 4096
-    lr: 1.0e-3
-    weight_decay: 1.0e-2
-    warmup_steps: 0
+    bs: 4096                 # the loader's batch; must equal dl_conf.bs
     post_emb_norm: false
     use_abs_pos_emb: true
     canon_sym: false

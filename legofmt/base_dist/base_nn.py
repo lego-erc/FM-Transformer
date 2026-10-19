@@ -124,11 +124,13 @@ class BaseDist:
             # 2x on direction losses; conditioning E_dep alone kept the gain.
             extra   = torch.cat(self._out_set_feats(ds_t), dim=-1)
             both    = torch.cat((torch.cat((x, extra), -1), torch.cat((x, torch.zeros_like(extra)), -1)))
-            out_e, out = self.base_head(both).chunk(2)  # one forward for both passes
+            with torch.autocast(x.device.type, enabled=False):  # fp32 as at inference and in pretraining
+                out_e, out = self.base_head(both).chunk(2)  # one forward for both passes
             ang     = out_e if (self.rc.config.get("base_conf") or {}).get("ang_nout", False) else out
             out     = torch.cat((out[..., 0:1], out_e[..., 1:3], ang[..., 3:]), dim=-1)
         else:
-            out     = self.base_head(x)
+            with torch.autocast(x.device.type, enabled=False):
+                out = self.base_head(x)
         bc      = self.rc.config.get("base_conf") or {}
         n_ang   = len(self.pdgids_template) + 1 if bc.get("ang_species", False) else 1
         return (out[..., 0:1].exp(), out[..., 1:2], out[..., 2:3].exp(),

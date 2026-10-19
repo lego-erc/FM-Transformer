@@ -29,7 +29,8 @@ class TrainStep:
 
     def _shift_overflow_targets(self, ds_t: DataStruct) -> DataStruct:
         """On a clone, write ``-overflow_delta`` into the zero-valued outgoing-energy
-        and E_dep cells: 'absorbed / no deposit' becomes a target outside ``[0, 1]``."""
+        and E_dep cells, a target outside ``[0, 1]``. An outgoing 0 is the full-energy
+        atom (E_out >= E_in; the column stores ``1 - log ratio``), an E_dep 0 no deposit."""
         f = ds_t.f.full.clone()
         delta = self.rc.overflow_delta
         op = _F(f).out_p
@@ -60,7 +61,7 @@ class TrainStep:
             lo = self.lv_floor
             with torch.no_grad():
                 self.lv.clamp_(min=lo)
-            lv  = self.lv.clamp(min=lo)  # (3,) or (4,), one per channel
+            lv  = self.lv  # (3,) or (4,), one per channel
             w   = torch.exp(-lv)
             total = (
                 w[0] * loss_e + w[1] * loss_dir + w[2] * loss_x
@@ -161,7 +162,7 @@ class TrainStep:
             # decades below the velocity losses, so it needs a lower floor of its own.
             with torch.no_grad():  # in place, so the gradient stays live on the floor
                 self.lv_flow.clamp_(min=self.rc.max_loss_weight_flow)
-            lvf = self.lv_flow.clamp(min=self.rc.max_loss_weight_flow).squeeze()
+            lvf = self.lv_flow.squeeze()
             loss = loss + fac * lvf
         if self.training and self.global_step % every != 0:
             return loss
@@ -210,6 +211,8 @@ class TrainStep:
                     torch.cat((tgt, ds_t.f.pdgids), dim=-1), ds_t.m.full, ds_t.am.full,
                 )
             ps_ = self.ps.sample(base, ds_t.f.model_in, t)
+        # an explicit zero d, not None: the flow-map calls pass a tensor, and a None is a
+        # separate dynamo guard (tests/test_compile_guards.py)
         step_extras = ({"d": torch.zeros_like(ps_.t)}
                        if getattr(self.model.vf, "step_cond", False) else {})
         v_out = model(

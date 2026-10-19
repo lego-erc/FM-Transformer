@@ -132,6 +132,10 @@ class ShowerValMetrics:
 
     def __call__(self, lego, ds_t) -> dict:
         gen = self._generate(lego, ds_t)
+        # decode the overflow sentinel as to_mev / denorm_edep do: a generated -overflow_delta
+        # is a truth zero, and compared raw it inflated val/mmd_particle 4.5x on plateSi_131026
+        _F(gen).out_p[..., 0].clamp_(0.0, 1.0)
+        _F(gen).edep.clamp_(0.0, 1.0)
         gout = _F(gen).out_p
         active, pdg, rcc = ds_t.am.out_p, ds_t.f.out_p[..., -1], ds_t.f.out_cc
         reps = {
