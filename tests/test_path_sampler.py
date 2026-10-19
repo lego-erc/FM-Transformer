@@ -30,7 +30,7 @@ def test_matches_geodesic_prob_path():
             x0[..., sl].flatten(0, 1), x1[..., sl].flatten(0, 1), tt)
         torch.testing.assert_close(new.x_t[..., sl].flatten(0, 1), ref.x_t, atol=1e-9, rtol=0)
         torch.testing.assert_close(new.dx_t[..., sl].flatten(0, 1), ref.dx_t, atol=1e-9, rtol=0)
-    assert new.t.shape == (B, L) and (new.t == t[:, None]).all()
+    assert new.t.shape == (B, 1) and (new.t == t[:, None]).all()
 
 
 def test_sphere_logmap_small_angles_fp32():

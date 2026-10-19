@@ -19,8 +19,8 @@ class ProductPathSampler:
         self.manifold = p_man
 
     def sample(self, bases, data, t):
-        """``t`` is one time per event, broadcast over the sequence; the returned
-        ``t`` is per token, shaped like ``bases`` without its last dimension."""
+        """``t`` is one time per event, broadcast over the sequence; it is returned
+        as ``(B, 1)``, the per-event form the vector field conditions on."""
         t_b = t.view(-1, *[1] * (bases.dim() - 1))
         x_t, dx_t = [], []
         for man, x0, x1 in zip(self.manifold.manifolds,
@@ -39,5 +39,5 @@ class ProductPathSampler:
                 dx_t.append(x1 - x0)
             else:
                 raise TypeError(f"no closed-form geodesic for {type(man).__name__}")
-        return PathSample(x_1=data, x_0=bases, t=t_b[..., 0].expand(bases.shape[:-1]).contiguous(),
+        return PathSample(x_1=data, x_0=bases, t=t_b.view(-1, 1),
                           x_t=torch.cat(x_t, -1), dx_t=torch.cat(dx_t, -1))

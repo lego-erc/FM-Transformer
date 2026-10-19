@@ -6,7 +6,9 @@ one-hot-Kronecker-``x`` against the stacked weight banks (no ``(B, L, h, in)``
 intermediate; its index backward was 60% of an eager step). The output
 projection mirrors it. Time, and with ``step_cond`` the step size, enter as
 sinusoidal embeddings passed to x-transformers as ``condition=`` for adaptive
-RMSNorm.
+RMSNorm. With one ``(t, d)`` per event the condition takes two values per event
+(generated tokens, conditioning tokens), and the adaptive norms are handed those
+two rows rather than ``L`` (``_per_event_gammas``).
 """
 
 from __future__ import annotations
@@ -14,10 +16,43 @@ from __future__ import annotations
 from functools import partial
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 from x_transformers import ContinuousTransformerWrapper, Encoder
+from x_transformers.x_transformers import AdaptiveLayerScale, AdaptiveRMSNorm
 from legofmt.compat import fp32_attention, legacy_param_rename, needs_fp32_attention
+
+
+def _per_event_gammas(attn_layers: nn.Module) -> bool:
+    """Let the adaptive norms / layer-scales take a packed ``(B, 3, D)`` condition: row 0
+    the conditioning tokens' condition, row 1 the generated tokens', row 2's first ``L``
+    entries the generated-token selector. Their ``to_gamma`` matmuls then run on 2 rows
+    per event instead of ``L``: ~10% of a training step and of a solve (plate-Si config,
+    H100). Any other condition goes through the original forward. Patches nothing and
+    returns False when something else would consume the condition."""
+    mods = [m for m in attn_layers.modules() if isinstance(m, (AdaptiveRMSNorm, AdaptiveLayerScale))]
+    other = any(type(m).__name__.startswith("Adaptive") for m in attn_layers.modules() if m not in mods)
+    if not mods or other or type(getattr(attn_layers, "adaptive_mlp", nn.Identity())).__name__ != "Identity":
+        return False
+    for m in mods:
+        m.forward = partial(_packed_forward, m, m.forward)
+    return True
+
+
+def _packed_forward(mod, orig, x, *, condition, **kwargs):
+    if condition.shape[1] != 3 or x.shape[1] == 3:
+        return orig(x, condition=condition, **kwargs)
+    sel = condition[:, 2, :x.shape[1], None] > 0.5
+    g = mod.to_gamma(condition[:, :2])
+    if isinstance(mod, AdaptiveRMSNorm):  # x_transformers.AdaptiveRMSNorm.forward
+        return F.normalize(x, dim=-1) * mod.scale * (torch.where(sel, g[:, 1:2], g[:, :1]) + 1.)
+    g = g.sigmoid()  # x_transformers.AdaptiveLayerScale.forward
+    out = mod.fn(x, **kwargs)
+    if isinstance(out, Tensor):
+        return out * torch.where(sel, g[:, 1:2], g[:, :1])
+    out, *rest = out
+    return out * torch.where(sel, g[:, 1:2], g[:, :1]), *rest
 
 
 class CFMTrafo_x(nn.Module):
@@ -74,6 +109,7 @@ class CFMTrafo_x(nn.Module):
         )
         if needs_fp32_attention(kwargs):
             fp32_attention(self.vf)
+        self._packed_cond = time_cond and _per_event_gammas(self.vf.attn_layers)
 
         if grad_ckpt:
             for _norms, _block, _residual in self.vf.attn_layers.layers:
@@ -140,6 +176,13 @@ class CFMTrafo_x(nn.Module):
         out = torch.einsum("blki,blk->bli", out, oh) + oh @ b
         return (mask == 1).unsqueeze(-1) * out / 3
 
+    def _time_emb(self, t: Tensor, d: Tensor | None) -> Tensor:
+        tf   = t.unsqueeze(-1) * self.freqs
+        cond = torch.where(self.mask_freqs.bool(), tf.sin(), tf.cos())
+        if self.step_cond and d is not None:
+            cond = cond + self.step_gain * (d.unsqueeze(-1) * self.freqs_d).sin()
+        return cond
+
     def forward(
         self,
         x: Tensor,
@@ -150,20 +193,31 @@ class CFMTrafo_x(nn.Module):
         t: Tensor | None = None,
         d: Tensor | None = None,
     ) -> Tensor:
-        if self.time_cond:
-            tf = t.unsqueeze(-1) * self.freqs
-            cond = torch.where(self.mask_freqs.bool(), tf.sin(), tf.cos())
-            if self.step_cond and d is not None:
-                cond = cond + self.step_gain * (d.unsqueeze(-1) * self.freqs_d).sin()
+        """``t`` / ``d`` per token ``(B, L)`` are used as given. Per event ``(B or 1, 1)``
+        they condition the generated (``mask == 1``) tokens, and the conditioning tokens
+        get ``t = 1, d = 0`` -- the values ``ProjectModel`` pins them to."""
+        B, L = x.shape[:2]
+        cond_attn = None
+        if not self.time_cond:
+            cond = self.global_cond.expand(B, -1)
+        elif t.shape[-1] == 1 and (d is None or d.shape[-1] == 1):
+            gen   = (mask == 1).unsqueeze(-1)
+            c_gen = self._time_emb(t, d).expand(B, 1, -1)
+            c_con = self._time_emb(t.new_ones(1, 1), None if d is None else d.new_zeros(1, 1)).expand(B, 1, -1)
+            cond  = torch.where(gen, c_gen, c_con)
+            if self._packed_cond and 3 != L <= self.h_dim:
+                sel = F.pad(gen.squeeze(-1).to(cond.dtype), (0, self.h_dim - L)).unsqueeze(1)
+                cond_attn = torch.cat((c_con, c_gen, sel), dim=1)
         else:
-            cond = self.global_cond.expand(x.shape[0], -1)
+            cond = self._time_emb(t, d)
 
-        oh   = self._one_hot(mask, types, pdgids, x.shape[0])
+        oh   = self._one_hot(mask, types, pdgids, B)
         embd = self._embed(x, oh)
         if self.time_cond:
             embd = embd + cond
 
         # project_in / project_out are identities unless dim_in_out was set.
         embd = self.vf.emb_dropout(self.vf.project_in(embd))
-        h = self.vf.project_out(self.vf.attn_layers(embd, mask=attn_mask, condition=cond))
+        h = self.vf.project_out(self.vf.attn_layers(
+            embd, mask=attn_mask, condition=cond if cond_attn is None else cond_attn))
         return self._project_out(h, mask, oh)
