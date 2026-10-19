@@ -8,6 +8,28 @@ import torch
 import torch.nn.functional as F
 
 
+def zoom_polar(v: torch.Tensor, u: torch.Tensor, theta_s: float, inverse: bool = False,
+               mix: float = 0.0) -> torch.Tensor:
+    """Remap the polar angle of unit vectors ``v`` about unit axes ``u`` to
+    theta' = mix * theta + (1 - mix) * pi * log1p(theta / theta_s) / log1p(pi / theta_s), keeping the azimuth
+    (``inverse`` undoes it, by Newton for mix > 0): a bijection of the sphere that magnifies deflections below
+    ~theta_s; ``mix`` keeps the large angles from being squeezed. ``v`` on +-u is left as is."""
+    cos = (v * u).sum(-1, keepdim=True).clamp(-1.0, 1.0)
+    perp = v - cos * u
+    sin = perp.norm(dim=-1, keepdim=True)
+    theta = torch.atan2(sin, cos)
+    k = torch.log1p(torch.tensor(torch.pi / theta_s, dtype=torch.float64)) / torch.pi
+    if not inverse:
+        new = mix * theta + (1 - mix) * torch.log1p(theta / theta_s) / k
+    else:
+        new = theta_s * torch.expm1(theta * k)
+        for _ in range(40 if mix else 0):   # increasing and concave: from the first step on, monotone from below
+            f = mix * new + (1 - mix) * torch.log1p(new / theta_s) / k - theta
+            new = (new - f / (mix + (1 - mix) / (k * (theta_s + new)))).clamp(0.0, torch.pi)
+    out = torch.cos(new) * u + torch.sin(new) * perp / sin.clamp_min(1e-30)
+    return torch.where(sin > 0, out, v)
+
+
 class GeomTrafos:
 
     def _batched(self, coords, c_dims, f_name):
