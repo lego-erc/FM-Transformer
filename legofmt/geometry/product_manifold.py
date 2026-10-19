@@ -6,7 +6,17 @@ against it lives in ``legofmt.cfm.path_sampler``.
 """
 
 import torch
-from flow_matching.utils.manifolds import Manifold
+from flow_matching.utils.manifolds import Manifold, Sphere
+
+
+def sphere_logmap(x, y):
+    """``Sphere.logmap`` with the angle from ``atan2(|u|, x.y)``: flow_matching's
+    ``acos(x.y)`` keeps few digits of small angles in fp32 (median relative error
+    2% at 1e-3 rad, 15% at 3e-4), the scale of one short flow-map step."""
+    u  = (y - x) - (x * (y - x)).sum(-1, keepdim=True) * x
+    su = u.norm(dim=-1, keepdim=True)
+    th = torch.atan2(su, (x * y).sum(-1, keepdim=True))
+    return u * (th / su.clamp_min(torch.finfo(su.dtype).tiny))
 
 
 class ProductManifold(Manifold):
@@ -30,7 +40,10 @@ class ProductManifold(Manifold):
         return self._batch_map("expmap", x, u)
 
     def logmap(self, x, y):
-        return self._batch_map("logmap", x, y)
+        return torch.cat([
+            sphere_logmap(a, b) if isinstance(man, Sphere) else man.logmap(a, b)
+            for man, a, b in zip(self.manifolds, x.split(self.ambient_dims, -1), y.split(self.ambient_dims, -1))
+        ], dim=-1)
 
     def projx(self, x):
         return self._batch_map("projx", x)

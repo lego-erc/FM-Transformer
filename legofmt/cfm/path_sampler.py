@@ -1,40 +1,43 @@
 """The probability path the flow trains against.
 
-``ProductPathSampler`` runs one ``GeodesicProbPath`` per manifold factor over
-that factor's slice of the last dimension, then stitches the per-factor samples
-back into a single ``(x_t, dx_t, t)`` triple shaped like the input batch.
+``ProductPathSampler`` samples the geodesic ``x_t = exp_{x_0}(t log_{x_0} x_1)``
+(flow_matching's ``GeodesicProbPath`` with the CondOT schedule) and its velocity
+per manifold factor, in closed form: the vmap + forward-mode jvp it replaces
+cost ~4 ms of a ~80 ms training step.
 """
 
 import torch
-from flow_matching.path import GeodesicProbPath
-from flow_matching.path.scheduler import CondOTScheduler, Scheduler
+import torch.nn.functional as F
+from flow_matching.path.path_sample import PathSample
+from flow_matching.utils.manifolds import Euclidean, Sphere
 
-from legofmt.geometry.product_manifold import ProductManifold
-
-
-class ProductPath:
-    def __init__(self, paths, view_as_: tuple):
-        self.x_t = torch.cat([p.x_t for p in paths], dim=-1).view(*view_as_)
-        self.dx_t = torch.cat([p.dx_t for p in paths], dim=-1).view(*view_as_)
-        self.t = paths[0].t.view(view_as_[:-1])
+from legofmt.geometry.product_manifold import ProductManifold, sphere_logmap
 
 
 class ProductPathSampler:
-    def __init__(
-        self, p_man: ProductManifold, scheduler: Scheduler = CondOTScheduler()
-    ):
-        self.ambient_dims = p_man.ambient_dims
-        self.paths = [
-            GeodesicProbPath(scheduler=scheduler, manifold=manifold)
-            for manifold in p_man.manifolds
-        ]
+    def __init__(self, p_man: ProductManifold):
+        self.manifold = p_man
 
     def sample(self, bases, data, t):
-        bases_ = bases.split(self.ambient_dims, dim=-1)
-        data_ = data.split(self.ambient_dims, dim=-1)
-        t = t.repeat_interleave(bases.shape[1:-1].numel())
-        paths = [
-            path.sample(bases_[i].flatten(0, -2), data_[i].flatten(0, -2), t)
-            for i, path in enumerate(self.paths)
-        ]
-        return ProductPath(paths, bases.shape)
+        """``t`` is one time per event, broadcast over the sequence; the returned
+        ``t`` is per token, shaped like ``bases`` without its last dimension."""
+        t_b = t.view(-1, *[1] * (bases.dim() - 1))
+        x_t, dx_t = [], []
+        for man, x0, x1 in zip(self.manifold.manifolds,
+                                bases.split(self.manifold.ambient_dims, -1),
+                                data.split(self.manifold.ambient_dims, -1)):
+            if isinstance(man, Sphere):
+                v  = sphere_logmap(x0, x1)
+                th = v.norm(dim=-1, keepdim=True)
+                c, s = (t_b * th).cos(), (t_b * th).sin()
+                # normalised like flow_matching's retraction branch, which also maps
+                # the E_dep row's (1, 1, 1) direction filler onto the sphere
+                x_t.append(F.normalize(c * x0 + s * v / th.clamp_min(torch.finfo(th.dtype).tiny), dim=-1))
+                dx_t.append(c * v - th * s * x0)
+            elif isinstance(man, Euclidean):
+                x_t.append(x0 + t_b * (x1 - x0))
+                dx_t.append(x1 - x0)
+            else:
+                raise TypeError(f"no closed-form geodesic for {type(man).__name__}")
+        return PathSample(x_1=data, x_0=bases, t=t_b[..., 0].expand(bases.shape[:-1]).contiguous(),
+                          x_t=torch.cat(x_t, -1), dx_t=torch.cat(dx_t, -1))
