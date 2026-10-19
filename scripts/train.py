@@ -60,6 +60,10 @@ if "adamw_betas" in config["opt_conf"]:
 dpath_prefix = os.environ.get("LEGO_DATA_DIR", "./data/")
 config["dl_conf"]["lds_args"]["data"] = dpath_prefix + config["dl_conf"]["lds_args"]["data"]
 
+if run.get("data_seed") is not None:  # the shuffle order, identical on every DDP rank
+    config["dl_conf"]["seed"] = int(run["data_seed"])
+
+# placeholder for construction: configure_optimizers replaces it with the trainer's exact count
 scheduler = config["opt_conf"].get("scheduler")
 if scheduler is not None and "total_steps" not in scheduler:
     bs = config["dl_conf"]["bs"]

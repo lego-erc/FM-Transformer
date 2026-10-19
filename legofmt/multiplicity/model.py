@@ -17,7 +17,7 @@ from x_transformers import ContinuousTransformerWrapper, Decoder, Encoder
 
 from legofmt.compat import fp32_attention, needs_fp32_attention
 
-from legofmt.data.dataloaders import LEGODataset, make_loader
+from legofmt.data.dataloaders import LEGODataset, loader_seed, make_loader
 from legofmt.data.prep import DataPrep
 from legofmt.data.struct import cond_scalars
 from legofmt.geometry.geom_trafos import GeomTrafos
@@ -340,6 +340,9 @@ class MultModel(LightningModule):
     def configure_optimizers(self):
         if self._sched is None:
             return self.opt
+        # the trainer's exact count, not scripts/train.py's dataset_size estimate
+        self.rc.opt_conf["scheduler"]["total_steps"] = int(self.trainer.estimated_stepping_batches)
+        self.opt, self._sched = build_optimizer(self.parameters(), self.rc.opt_conf)
         return {"optimizer": self.opt, "lr_scheduler": self._sched}
 
     def setup(self, stage: str | None = None) -> None:
@@ -359,6 +362,7 @@ class MultModel(LightningModule):
             shuffle=shuffle,
             num_workers=self.rc.dl_conf.get("num_workers", 4),
             batched_sampler=True,
+            seed=loader_seed(self.rc.dl_conf),
         )
 
     def train_dataloader(self):

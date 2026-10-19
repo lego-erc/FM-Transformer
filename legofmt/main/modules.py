@@ -6,8 +6,6 @@ mixins. The behaviour lives alongside: ``TrainStep`` (training step and loss),
 solving, likelihood, and ``forward``).
 """
 
-import os
-
 import torch
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, Subset, random_split
@@ -26,7 +24,7 @@ from legofmt.cfm.solvers import Solvers
 
 from legofmt.main.train_step import TrainStep
 
-from legofmt.data.dataloaders import LEGODataset, LengthBucketBatchSampler, make_loader
+from legofmt.data.dataloaders import LEGODataset, LengthBucketBatchSampler, loader_seed, make_loader
 from legofmt.data.prep import DataPrep
 from legofmt.data.struct import _F
 
@@ -194,7 +192,7 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         return torch.where((am & rows & fwd[:, None]).unsqueeze(-1), new, x)
 
     def configure_optimizers(self):
-        if self._lr_sched is not None and self.rc.len_buckets is not None and self.rc.len_mode == "group":
+        if self._lr_sched is not None:  # the trainer's exact count, not scripts/train.py's dataset_size estimate
             self.rc.opt_conf["scheduler"]["total_steps"] = int(self.trainer.estimated_stepping_batches)
             self.opt, self._lr_sched = build_optimizer(self._opt_params, self.rc.opt_conf)
         if self._lr_sched is None:
@@ -223,6 +221,7 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
             num_workers=self.rc.dl_conf.get("num_workers", 4),
             batched_sampler=True,
             batch_sampler=batch_sampler,
+            seed=loader_seed(self.rc.dl_conf),
         )
 
     def on_before_batch_transfer(self, batch, dataloader_idx: int):
@@ -239,7 +238,7 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
             t = self._trainer
             return self._make_loader(self._train_ds, shuffle=True, batch_sampler=LengthBucketBatchSampler(
                 _event_lengths(self._train_ds), self.rc.len_buckets, self.rc.dl_conf.get("bs", 2**12),
-                seed=int(os.environ.get("PL_GLOBAL_SEED", 0)),
+                seed=loader_seed(self.rc.dl_conf),
                 rank=t.global_rank if t is not None else 0, world_size=t.world_size if t is not None else 1,
                 max_tokens=self.rc.len_max_tokens,
             ))

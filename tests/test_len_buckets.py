@@ -355,6 +355,31 @@ def test_group_mode_schedule_spans_the_real_step_count() -> None:
     assert model.opt.param_groups[0]["lr"] == pytest.approx(1e-3 * 1e-3)
 
 
+
+@pytest.mark.parametrize("dl", [None, {"len_buckets": "auto", "len_mode": "split", "len_split": 2}])
+def test_schedule_spans_the_real_step_count_in_every_mode(dl) -> None:
+    """Not only group mode: run.dataset_size is hand-written (it must be the post-filter count),
+    and a schedule shorter than the run walks the cosine LR back up."""
+    from types import SimpleNamespace
+    cfg = _config(dl=dl)
+    cfg["config"]["opt_conf"] = {"opt": "muon", "lr": 1e-3,
+                                 "scheduler": {"cls": "warmup_cosine", "total_steps": 1000, "warmup_frac": 0.1}}
+    model = LEGOLtng(cfg)
+    model._trainer = SimpleNamespace(estimated_stepping_batches=37)
+    assert model.configure_optimizers()["lr_scheduler"]["scheduler"]._schedulers[1].T_max == 34
+
+
+def test_mult_schedule_spans_the_real_step_count() -> None:
+    from types import SimpleNamespace
+    from legofmt.multiplicity.model import MultModel
+    from test_generate_direct import _mult_config
+    cfg = _mult_config()
+    cfg["opt_conf"] = {"opt": "muon", "lr": 1e-3,
+                       "scheduler": {"cls": "warmup_cosine", "total_steps": 1000, "warmup_frac": 0.1}}
+    model = MultModel({"state_dict": {}, "config": cfg})
+    model._trainer = SimpleNamespace(estimated_stepping_batches=37)
+    assert model.configure_optimizers()["lr_scheduler"]["scheduler"]._schedulers[1].T_max == 34
+
 def test_config_resolves_len_max_tokens() -> None:
     assert resolve_legoltng_config(_config()).len_max_tokens is None
     rc = resolve_legoltng_config(_config(dl={"len_buckets": "auto", "len_mode": "group", "len_max_tokens": 64}))

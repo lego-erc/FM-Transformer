@@ -10,7 +10,7 @@ run:
   matmul_precision: medium
   dtype: float32
   epochs: 10
-  dataset_size: 20_000_000     # only used to compute scheduler total_steps
+  dataset_size: 20_000_000     # placeholder for the scheduler at construction; fit uses the exact step count
   compile: model             # false | model
   gradient_clip_val: 1.0
   val_check_interval: 0.2
@@ -92,7 +92,7 @@ config:
     adamw_betas: [0.9, 0.999]
     adamw_wd: 1.0e-2
     adamw_eps: 1.0e-8
-    scheduler:                # total_steps computed from run.* when absent
+    scheduler:                # total_steps = the trainer's exact step count
       cls: warmup_cosine
       warmup_frac: 0.1
       eta_min: 1.0e-6

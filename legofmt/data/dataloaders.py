@@ -6,6 +6,8 @@ and events left with too few survivors. ``LEGODataset`` serves an already-preppe
 tensor; ``make_loader`` is the worker plumbing both LightningModules share.
 """
 
+import os
+
 import torch
 from torch import Tensor
 from torch.utils.data import (
@@ -133,13 +135,25 @@ class LengthBucketBatchSampler(DistributedSampler):
         return iter([batches[i] for i in torch.randperm(len(batches), generator=gen).tolist()])
 
 
-def make_loader(dataset, *, bs, shuffle, num_workers=4, batched_sampler=False, batch_sampler=None):
+def loader_seed(dl_conf: dict) -> int:
+    """The shuffle seed, identical on every DDP rank: ``dl_conf.seed`` (scripts/train.py
+    sets it from ``run.data_seed``), else Lightning's global seed, else 0."""
+    return int(dl_conf.get("seed", os.environ.get("PL_GLOBAL_SEED", 0)))
+
+
+def make_loader(dataset, *, bs, shuffle, num_workers=4, batched_sampler=False, batch_sampler=None, seed=0):
     """The worker plumbing both LightningModules share.
 
     ``batched_sampler`` hands the dataset a tensor of indices per call
     (``batch_size=None``, no default collate), which is how ``LEGODataset`` is
     read; the plain path is torch's per-item fetch and collate. Workers only
     move CPU-side indexing off the training loop.
+
+    The shuffle draws from its own ``seed``-ed generator: under DDP, Lightning's
+    ``DistributedSamplerWrapper`` hands each rank every W-th batch of the list
+    that rank built, so per-rank RNG states (unseeded runs, or rank 0's base-head
+    pretraining) gave overlapping shards -- a quarter of every epoch never seen
+    on 2 GPUs.
     """
     common = dict(
         num_workers=num_workers,
@@ -149,7 +163,8 @@ def make_loader(dataset, *, bs, shuffle, num_workers=4, batched_sampler=False, b
     )
     if batched_sampler:
         if batch_sampler is None:
-            sampler = (RandomSampler if shuffle else SequentialSampler)(dataset)
+            sampler = (RandomSampler(dataset, generator=torch.Generator().manual_seed(seed)) if shuffle
+                       else SequentialSampler(dataset))
             batch_sampler = BatchSampler(sampler, bs, drop_last=False)
         return DataLoader(
             dataset,
