@@ -63,6 +63,9 @@ class ResolvedLEGOConfig:
     one_step_euler_every: int
     learned_loss_weights: bool
     edep_cell: bool
+    dir_zoom: float | None       # theta_s of the outgoing-direction polar zoom (rad); None = off
+    dir_zoom_mix: float          # linear share of that zoom; 0 = pure log
+    dir_zoom_nucleons_max: int | None  # events with more outgoing nucleons (nuclear interactions) are not zoomed
     max_loss_weight: float       # floors lv, so weight_bound = e^-max_loss_weight
     max_loss_weight_flow: float  # the same bound for the flow-map's own cell
     max_loss_weight_edep: float
@@ -81,6 +84,7 @@ class ResolvedLEGOConfig:
     len_buckets: tuple[int, ...] | None      # training: run each batch / piece at its bucket length
     len_mode: str                            # split | group
     len_split: int
+    len_max_tokens: int | None
     gen_len_buckets: tuple[int, ...] | None  # generation (Solvers.forward)
 
     dl_conf: dict
@@ -248,6 +252,15 @@ def _build_resolved(
             raise ValueError(
                 f"one_step_euler_sections must be >= 1, got {sections}."
             )
+    dir_zoom = model_conf.get("dir_zoom")
+    if dir_zoom is not None and not dir_zoom > 0:
+        raise ValueError(f"dir_zoom must be > 0 (rad) or absent, got {dir_zoom}.")
+    dir_zoom_mix = model_conf.get("dir_zoom_mix", 0.0)
+    if not 0.0 <= dir_zoom_mix < 1.0:
+        raise ValueError(f"dir_zoom_mix must be in [0, 1), got {dir_zoom_mix}.")
+    dir_zoom_nucleons_max = model_conf.get("dir_zoom_nucleons_max")
+    if dir_zoom_nucleons_max is not None and not (isinstance(dir_zoom_nucleons_max, int) and dir_zoom_nucleons_max >= 0):
+        raise ValueError(f"dir_zoom_nucleons_max must be an int >= 0 or absent, got {dir_zoom_nucleons_max}.")
     overflow_delta = model_conf.get("overflow_delta", 0.0)
     if overflow_delta < 0:
         raise ValueError(f"overflow_delta must be >= 0, got {overflow_delta}.")
@@ -285,6 +298,9 @@ def _build_resolved(
         one_step_euler_every=model_conf.get("one_step_euler_every", 1),
         learned_loss_weights=model_conf.get("learned_loss_weights", False),
         edep_cell=model_conf.get("edep_cell", False),
+        dir_zoom=dir_zoom,
+        dir_zoom_mix=dir_zoom_mix,
+        dir_zoom_nucleons_max=dir_zoom_nucleons_max,
         max_loss_weight=max_loss_weight,
         max_loss_weight_flow=model_conf.get("max_loss_weight_flow", max_loss_weight),
         max_loss_weight_edep=model_conf.get("max_loss_weight_edep", max_loss_weight),
@@ -300,6 +316,7 @@ def _build_resolved(
         len_buckets=len_buckets,
         len_mode=len_mode,
         len_split=len_split,
+        len_max_tokens=dl_conf.get("len_max_tokens"),
         gen_len_buckets=resolve_len_buckets(
             config.get("odeint_conf", {}).get("len_buckets"), max_seq_l,
         ),
