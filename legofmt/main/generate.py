@@ -20,7 +20,50 @@ from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.main.modules import LEGOLtng
 from legofmt.multiplicity.model import MultModel
 
-_EDEP_EXCESS_MEV = {11: 0.0, -11: 1.022, 22: 0.0, 2212: 0.0}
+_EDEP_EXCESS_MEV = {11: 0.0, -11: 1.022, 22: 0.0, 2212: 0.0, 2112: 10.0, 211: 150.0, -211: 150.0}
+
+
+def _balance_energy(sols: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor, pen, dp) -> None:
+    """Close the kinetic balance E_in = E_dep + sum E_out + 2 m_e (n_e+ out - n_e+ in) per event in place, keeping
+    the generated E_dep. e+-/gamma in: every outgoing energy is scaled to that budget, and an absorbed one (nothing
+    leaves) deposits the budget. Hadron in: only a survivor (the leading outgoing particle is the incoming species
+    with > 90% of E_in) changes, to the budget minus the others; a nuclear interaction, whose Geant4 balance is
+    open (fragments, binding), is left alone. Only valid where the data's own balance closes (the 0.1 MeV-cutoff
+    plates, not a 10 MeV cutoff), hence opt-in."""
+    s = _F(sols)
+    out = s.out_p
+    live = (out[..., -1] != 0) & out[..., 0].isfinite()
+    e_in = e_in.double()
+    e_in_n = pen.to_scalar_e(e_in).unsqueeze(-1)
+    E = torch.where(live, pen.to_mev(out[..., 0].double().nan_to_num(), e_in_n), 0.0)
+    pair = 1.022 * ((live & (out[..., -1] == -11)).sum(-1) - (pid_in == -11).long())
+    budget = (e_in - dp.denorm_edep(s.edep.double()) - pair).clamp_min(0.0)
+    tot = E.sum(-1)
+    em = (pid_in.abs() == 11) | (pid_in == 22)
+    absorbed = em & (tot == 0) & (e_in_n.squeeze(-1) > 1e-6)   # nothing leaves: the deposit is the budget
+    s.edep[absorbed] = dp.norm_edep(e_in - pair)[absorbed].to(s.edep.dtype)
+    E_new = E * torch.where(em & (tot > 0), budget / tot.clamp_min(1e-12), 1.0).unsqueeze(-1)
+    rows = torch.arange(len(E), device=E.device)
+    lead = E.argmax(-1)
+    surv = ~em & (out[rows, lead, -1].long() == pid_in) & (E[rows, lead] > 0.9 * e_in)
+    E_new[rows[surv], lead[surv]] = (budget - tot + E[rows, lead]).clamp_min(0.0)[surv]
+    changed = live & (em & (tot > 0)).unsqueeze(-1)
+    changed[rows[surv], lead[surv]] = True
+    changed &= e_in_n > 1e-6                       # E_in at the cutoff: the log ratio is 0/0
+    out[..., 0] = torch.where(changed, 1 - pen.to_scalar_e(E_new) / e_in_n, out[..., 0].double()).to(out.dtype)
+
+
+def _exit_outward(sols: torch.Tensor) -> None:
+    """Mirror, in place, the momentum component of an outgoing particle that points into the face its exit position
+    is on (the face is the dominant axis of the position direction, which is that of x / cuboid_dim). Position and
+    direction are separate channels, so the flow can emit a particle leaving through +z while moving -z; Geant4 never
+    does, and a chain hands such a particle to the next slab moving away from it."""
+    out = _F(sols).out_p
+    u, m = out[..., 4:7], out[..., 1:4]
+    ax = u.abs().nan_to_num(-1.0).argmax(-1, keepdim=True)
+    mn = m.gather(-1, ax)
+    flip = (mn * u.gather(-1, ax).sign() < 0) & (out[..., -1:] != 0)
+    m.scatter_(-1, ax, torch.where(flip, -mn, mn))
 
 
 class GenerateOut(torch.nn.Module):
@@ -83,23 +126,23 @@ class GenerateOut(torch.nn.Module):
         )
         self.dp = DataPrep(flow_conf)   # the E_dep row's normalisation (edep_log_min), for the E_in ceiling
 
-    def __call__(self, cond: torch.Tensor, prepped: bool = False):
+    def __call__(self, cond: torch.Tensor, prepped: bool = False, passthrough: bool = True):
         """``cond`` is ``[B, n_cond + 7] = [*cond_scalars, mom * E_MeV (3), pos (3), pdgid]``;
         the momentum must be energy-scaled. ``prepped=True`` skips the ray-trace and
-        the energy split. Returns ``(sols, mask, attn_mask)`` in the ``(B, L, 8)`` layout."""
-        cond_model = cond.clone()
-        if not prepped:
-            nc = self.n_cond
-            mom, pos = cond_model[:, nc:nc + 3], cond_model[:, nc + 3:nc + 6]
-            pos = F.normalize(
-                self.proj_ray(torch.cat((mom, pos), dim=-1))[..., 3:] / self.cuboid_dim.to(pos), dim=-1
-            )
-            dir_, e = self.pen.to_scalar(mom)
-            cond_model = torch.cat(
-                (cond_model[:, :nc], e, dir_, pos, cond_model[:, nc + 6:]), dim=-1
-            )
-        cond_fm, mask, attn_mask = self.gen_batch(cond_model)
+        the energy split. ``passthrough=False`` never fires the pass-through token: the
+        interacting branch, for a caller that drew the pass-through itself (``passthrough_prob``).
+        Returns ``(sols, mask, attn_mask)`` in the ``(B, L, 8)`` layout."""
+        cond_model = self._model_cond(cond, prepped)
+        cond_fm, mask, attn_mask = self.gen_batch(cond_model, passthrough=passthrough)
+        nc = self.n_cond
+        e_in = self.pen.from_scalar(cond_model[:, nc + 1:nc + 4], cond_model[:, nc:nc + 1]).norm(dim=-1)
+        pid_in = cond_model[:, -1].long()
         pt_mask = mask.sum(-1) == 0
+        if self.model.rc.odeint_conf.get("energy_balance", False):
+            # an e+-/gamma that leaves nothing deposits the balance budget, which overwrites the flow's E_dep
+            em = (pid_in.abs() == 11) | (pid_in == 22)
+            pt_mask = pt_mask | (em & (attn_mask[:, self.n_prefix + 1:].sum(-1) == 0)
+                                 & (self.pen.to_scalar_e(e_in.double()) > 1e-6))
         if pt_mask.all():
             sols = cond_fm.clone()
         elif pt_mask.any():
@@ -111,18 +154,54 @@ class GenerateOut(torch.nn.Module):
         else:
             sols, mask, attn_mask = self.model((cond_fm, mask, attn_mask))
         sols[..., -1] = torch.cat([sols.new_zeros(1), self.pdgids.to(sols.dtype)])[sols[..., -1].long()]
-        nc = self.n_cond
-        e_in = self.pen.from_scalar(cond_model[:, nc + 1:nc + 4], cond_model[:, nc:nc + 1]).norm(dim=-1)
-        pid_in, edep = cond_model[:, -1].long(), _F(sols).edep
+        edep = _F(sols).edep
         for pid, excess in _EDEP_EXCESS_MEV.items():
             hit = pid_in == pid
             edep[..., hit] = torch.minimum(edep[..., hit], self.dp.norm_edep(e_in[hit] + excess).to(edep))
+        if self.model.rc.odeint_conf.get("energy_balance", False):
+            _balance_energy(sols, e_in, pid_in, self.pen, self.dp)
+        if self.model.rc.odeint_conf.get("exit_consistency", False):
+            _exit_outward(sols)
         return sols, mask, attn_mask
 
-    def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None):
+    def _model_cond(self, cond: torch.Tensor, prepped: bool) -> torch.Tensor:
+        cond_model = cond.clone()
+        if not prepped:
+            nc = self.n_cond
+            mom, pos = cond_model[:, nc:nc + 3], cond_model[:, nc + 3:nc + 6]
+            pos = F.normalize(
+                self.proj_ray(torch.cat((mom, pos), dim=-1))[..., 3:] / self.cuboid_dim.to(pos), dim=-1
+            )
+            dir_, e = self.pen.to_scalar(mom)
+            cond_model = torch.cat(
+                (cond_model[:, :nc], e, dir_, pos, cond_model[:, nc + 6:]), dim=-1
+            )
+        return cond_model
+
+    def passthrough_prob(self, cond: torch.Tensor, prepped: bool = False) -> torch.Tensor:
+        """P(the incoming particle passes through unchanged): the probability the pass-through
+        token's draw uses, 0 for species the head does not cover. ``cond`` as for ``__call__``."""
+        return self.gen_mult.passthrough_prob(*self._mult_in(self._model_cond(cond, prepped)))
+
+    def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None, passthrough=True):
         """Geant4-shaped entry point: broadcast the per-gun arguments to ``B * n`` events
         and return ``{per_event, per_particle, per_voxel}`` in *model* normalisation
         (``per_event["E_dep"]`` is the normalised scalar, not MeV)."""
+        sols, _, _ = self(self._g4_cond(n, pos, mom, energy, density, size, pdgids, Z, A), passthrough=passthrough)
+        s = _F(sols)
+        per_event = {"E_dep": s.edep}
+        per_event.update({k: s.cond(k) for k in self.cond_names})
+        return {
+            "per_event": per_event,
+            "per_particle": {"Incoming": s.in_p, "Outgoing": s.out_p},
+            "per_voxel": {"E_dep": sols.new_empty(sols.shape[0], 0, 4)},
+        }
+
+    def passthrough_prob_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None):
+        """``passthrough_prob`` with the arguments of ``gen_model_w_g4_args``."""
+        return self.passthrough_prob(self._g4_cond(n, pos, mom, energy, density, size, pdgids, Z, A))
+
+    def _g4_cond(self, n, pos, mom, energy, density, size, pdgids, Z, A):
         device = next(self.model.parameters()).device
         pos, mom, energy, density, size, pdgids = (
             t.to(device) for t in (pos, mom, energy, density, size, pdgids)
@@ -163,21 +242,9 @@ class GenerateOut(torch.nn.Module):
 
         conds_b = torch.cat([_scalar_col(scalar_src[k]) for k in self.cond_names], dim=-1)
         pdgids_b = _scalar_col(pdgids).to(cc.dtype)
-        cond = torch.cat((conds_b, cc, pdgids_b), dim=-1)
+        return torch.cat((conds_b, cc, pdgids_b), dim=-1)
 
-        sols, _, _ = self(cond)
-        s = _F(sols)
-        per_event = {"E_dep": s.edep}
-        per_event.update({k: s.cond(k) for k in self.cond_names})
-        return {
-            "per_event": per_event,
-            "per_particle": {"Incoming": s.in_p, "Outgoing": s.out_p},
-            "per_voxel": {"E_dep": sols.new_empty(sols.shape[0], 0, 4)},
-        }
-
-    def gen_batch(self, cond: torch.Tensor):
-        """Sample per-pdgid counts, truncate to ``max_seq_l``, and build the padded
-        ``(cond_fm, mask, attn_mask)`` triple the flow consumes."""
+    def _mult_in(self, cond: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         pdgid_in = cond[:, -1].long()
         pdgid_in_idx = torch.searchsorted(self.pdgid_in, pdgid_in).clamp(max=len(self.pdgid_in) - 1)
         if (self.pdgid_in[pdgid_in_idx] != pdgid_in).any():
@@ -189,7 +256,14 @@ class GenerateOut(torch.nn.Module):
             mult_in[:, self.n_mult_cond] = (
                 mult_in[:, self.n_mult_cond] * self.mult_e_scale
             ).clamp(0.0, 1.0)
-        pt_mask = self.gen_mult.sample_passthrough(mult_in, pdgid_in_idx)
+        return mult_in, pdgid_in_idx
+
+    def gen_batch(self, cond: torch.Tensor, passthrough: bool = True):
+        """Sample per-pdgid counts, truncate to ``max_seq_l``, and build the padded
+        ``(cond_fm, mask, attn_mask)`` triple the flow consumes."""
+        mult_in, pdgid_in_idx = self._mult_in(cond)
+        pt_mask = (self.gen_mult.sample_passthrough(mult_in, pdgid_in_idx) if passthrough
+                   else torch.zeros(len(cond), dtype=torch.bool, device=cond.device))
         mult = self.gen_mult((mult_in, None, pdgid_in_idx), pt_mask=pt_mask)
         mult = mult[:, self.ptype_idx] * self.ptype_in_mask
 
