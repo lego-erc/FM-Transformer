@@ -321,17 +321,21 @@ class MultModel(LightningModule):
         return loss
 
     @torch.no_grad()
-    def sample_passthrough(self, in_tok: torch.Tensor, pdgid_in_idx: torch.Tensor) -> torch.Tensor:
-        """Bernoulli draw of "this particle did not interact", masked to neutrals."""
+    def passthrough_prob(self, in_tok: torch.Tensor, pdgid_in_idx: torch.Tensor) -> torch.Tensor:
+        """P("this particle did not interact"), 0 outside the neutrals the head covers."""
         if self.pt_head is None:
-            return torch.zeros(in_tok.shape[0], dtype=torch.bool, device=in_tok.device)
+            return torch.zeros(in_tok.shape[0], device=in_tok.device)
         in_embd = self.proj_in(in_tok) + self.embd_pp_(pdgid_in_idx)
         pt_in = in_embd
         if self.pt_on_trunk:
             # slot 0 is causal, so this equals training's out_f[:, 0]
             pt_in = self.model(in_embd.unsqueeze(1), mask=None, condition=in_embd)[:, 0]
-        p = self.pt_head(pt_in).squeeze(-1).sigmoid()
-        return (torch.rand_like(p) < p) & self._pt_pdgid_allowed[pdgid_in_idx]
+        return self.pt_head(pt_in).squeeze(-1).sigmoid() * self._pt_pdgid_allowed[pdgid_in_idx]
+
+    def sample_passthrough(self, in_tok: torch.Tensor, pdgid_in_idx: torch.Tensor) -> torch.Tensor:
+        """Bernoulli draw of "this particle did not interact", masked to neutrals."""
+        p = self.passthrough_prob(in_tok, pdgid_in_idx)
+        return torch.rand_like(p) < p
 
     def configure_optimizers(self):
         if self._sched is None:
