@@ -174,4 +174,7 @@ class ShowerValMetrics:
             ds_t, x_init=lego.gen_base_wrapper(ds_t),
             step_size=cfg.get("step_size", 0.04), method=cfg.get("method", "midpoint"),
         )
+        if getattr(lego.rc, "dir_zoom", None):
+            out = lego._zoom_dirs(out, ds_t.am.full, ds_t.m.full[:, lego.rc.n_prefix] == 0, inverse=True,
+                                  pdgids=ds_t.f.pdgids)
         return out if sym is None else lego._canon_dirs(out, face, fwd, inverse=True)
