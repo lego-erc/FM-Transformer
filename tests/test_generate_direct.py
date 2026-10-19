@@ -144,6 +144,21 @@ def test_unknown_incoming_pdgid_raises(generator: GenerateOut) -> None:
         generator(cond)
 
 
+@torch.no_grad()
+def test_saturation_refill_adds_no_unpredicted_species(generator: GenerateOut, monkeypatch) -> None:
+    """Counts (22: 5, 211: 1) exceed the 4 outgoing slots; flooring the rescaled counts
+    leaves one slot, which used to be drawn with weight 1 for every species -- 2212,
+    which the multiplicity model never predicted, included."""
+    B = 2000
+    monkeypatch.setattr(type(generator.gen_mult), "forward",
+                        lambda self, batch, pt_mask=None: torch.tensor([[5, 1]]).expand(B, -1))
+    cond = generator._model_cond(_dummy_cond(generator, batch=B), prepped=False)
+    cond_fm, _, attn = generator.gen_batch(cond, passthrough=False)
+    out_idx = _F(cond_fm).out_p[..., -1]
+    assert (attn[:, generator.n_prefix + 1:].sum(-1) == 4).all()
+    assert not (out_idx == 3).any(), "a 2212 (flow index 3) was refilled"
+
+
 def _fake_shower(B: int = 2, L: int = 7) -> tuple:
     """Synthetic shower with RAW PDG ids in the last column, as a dataset
     batch would carry them."""

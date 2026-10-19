@@ -7,6 +7,7 @@ rather than unit-norm, or the event conditions on a ~1 MeV particle. ``GenerateI
 is the reverse direction and needs a ``train_inverse`` multiplicity checkpoint.
 """
 
+import warnings
 from dataclasses import replace
 
 import torch
@@ -101,6 +102,10 @@ class GenerateOut(torch.nn.Module):
                 f"{self.cond_names}; cond carries only the flow's scalars."
             )
 
+        mm_cut = mult_conf["config"]["dl_conf"]["lds_args"].get("cutoff_mev")
+        if mm_cut is not None and mm_cut != self.model.rc.cutoff_mev:
+            warnings.warn(f"mult cutoff_mev {mm_cut} != flow {self.model.rc.cutoff_mev}: "
+                          "the two energy scales disagree and mult_e_scale assumes they do not", stacklevel=2)
         mm_max = mult_conf["config"]["mm_conf"].get("max_energy")
         self.mult_e_scale = 1.0
         if mm_max and mm_max != self.model.rc.max_energy:
@@ -270,10 +275,11 @@ class GenerateOut(torch.nn.Module):
         max_particles = self.max_seq_l - (self.n_prefix + 1)
         total = mult.sum(-1, keepdim=True)
         scale = (max_particles / total).clamp(max=1.0)
+        weights = mult.float() + (total == 0)  # the refill draws only species the model predicted
         mult = (mult * scale).long()
         scaled = total > max_particles
         remaining = (scaled * (max_particles - mult.sum(-1, keepdim=True))).clamp(min=0)
-        dist = torch.multinomial(mult.float().clamp(min=1), max_particles, replacement=True)
+        dist = torch.multinomial(weights, max_particles, replacement=True)
         valid = (torch.arange(max_particles, device=mult.device) < remaining).long()
         mult.scatter_add_(-1, dist, valid)
 

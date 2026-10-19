@@ -6,6 +6,8 @@ incoming particle and the per-event scalars, trained with cross-entropy.
 from the outgoing set and backs ``GenerateIn``.
 """
 
+import warnings
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -89,7 +91,8 @@ class MultLoader(torch.utils.data.Dataset):
             ptypes_in, ds_f.in_p[..., 0, -1].contiguous()
         ).clamp(0, ptypes_in.shape[0] - 1)
         self.in_tok = torch.cat((conds, ds_f.in_cc.squeeze(-2)), dim=-1)
-        self.counts = (ds_f.out_p[..., -1:] == ptypes.view(1, 1, -1)).sum(1).clamp_max(max_particles - 1)
+        pid = ds_f.out_p[..., -1]  # one species at a time: the broadcast compare made an (N, max_out, S) int64
+        self.counts = torch.stack([(pid == p).sum(1) for p in ptypes], -1).clamp_max(max_particles - 1)
         self.pt_target = None
         if mm_conf.get("passthrough_head", False):
             n_out = ds.am.out_p.sum(-1)
@@ -235,8 +238,10 @@ class MultModel(LightningModule):
         # so DDP sees no unused parameters in either mode (plain ``ddp`` works).
         self.inv = InvModel(rc) if rc.train_inverse else None
 
-        if rc.state_dict is not None:
-            self.load_state_dict(rc.state_dict, strict=False)
+        if rc.state_dict:
+            missing = self.load_state_dict(rc.state_dict, strict=False).missing_keys
+            if missing:
+                warnings.warn(f"MultModel checkpoint lacks {missing}: those parameters keep a random init", stacklevel=2)
 
         if rc.opt_conf is None:
             self.opt = schedulefree_adamw(
@@ -270,6 +275,14 @@ class MultModel(LightningModule):
     def on_fit_start(self):
         self._opt_train()
 
+    def on_validation_model_eval(self) -> None:
+        super().on_validation_model_eval()
+        self._opt_eval()
+
+    def on_validation_model_train(self) -> None:
+        super().on_validation_model_train()
+        self._opt_train()
+
     def on_fit_end(self):
         self._opt_eval()
 
@@ -286,22 +299,19 @@ class MultModel(LightningModule):
         ce = F.cross_entropy(
             logits_f.reshape(-1, self.rc.max_particles), counts.reshape(-1), reduction="none",
         ).view(counts.shape).mean(-1)
-        total, pt_logs = None, {}
+        pt_logs = {}
         if self.pt_head is None:
-            loss_count = ce.mean()
-            total = loss_count
+            loss_count = total = ce.mean()
         else:
             allowed = self._pt_pdgid_allowed[pdgid_in_idx]
             w = 1.0 - batch[-1].float() * allowed
             loss_count = (ce * w).sum() / w.sum().clamp(min=1.0)
-            total = loss_count
-            if allowed.any():
-                pt_in = out_f[:, 0] if self.pt_on_trunk else in_embd
-                loss_pt = F.binary_cross_entropy_with_logits(
-                    self.pt_head(pt_in).squeeze(-1)[allowed], batch[-1].float()[allowed],
-                )
-                total = loss_count + loss_pt
-                pt_logs = {"loss/passthrough": loss_pt.detach()}
+            pt_in = out_f[:, 0] if self.pt_on_trunk else in_embd
+            bce = F.binary_cross_entropy_with_logits(
+                self.pt_head(pt_in).squeeze(-1), batch[-1].float(), reduction="none")
+            loss_pt = (bce * allowed).sum() / allowed.sum().clamp(min=1)  # no allowed.any() host sync
+            total = loss_count + loss_pt
+            pt_logs = {"loss/passthrough": loss_pt.detach()}
 
         if self.inv is None:
             self.log_dict(
@@ -382,10 +392,12 @@ class MultModel(LightningModule):
         The loss saturates at the data's irreducible entropy while the sampled
         counts are still several percent off, so only a rollout metric tracks
         the thing that is actually wrong. ``force_eager`` keeps the 19 decode
-        shapes out of the dynamo cache the compiled training step lives in.
+        shapes out of the dynamo cache the compiled training step lives in. It runs in
+        fp32, like GenerateOut: under bf16-mixed the count logits (|logit| up to ~100)
+        moved per-species counts by up to 3.7%, the size of the errors being tracked.
         """
         in_tok, counts, pdgid_in_idx = batch[:3]
-        with torch.compiler.set_stance("force_eager"):
+        with torch.compiler.set_stance("force_eager"), torch.autocast(in_tok.device.type, enabled=False):
             pt_mask = self.sample_passthrough(in_tok, pdgid_in_idx)
             gen = self((in_tok, None, pdgid_in_idx), pt_mask=pt_mask)
         self._val_acc[0] += gen.sum(0)

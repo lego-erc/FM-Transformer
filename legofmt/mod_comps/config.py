@@ -1,8 +1,8 @@
 """Config resolution: raw YAML, or a checkpoint dict, -> a ``Resolved*Config``.
 
 Normalises model args, builds the manifold, and stamps the x-transformers
-version into every config. Both entry points mutate the dict they are handed
-(via ``set_layout`` and ``setdefault``), and ``set_layout`` is global state.
+version into every config. Both entry points deep-copy the dict they are handed,
+but ``set_layout`` is global state.
 Support for older artefacts lives in ``legofmt.compat``.
 """
 
@@ -394,6 +394,9 @@ def _resolve_fresh_mult(config: dict) -> ResolvedMultConfig:
     config["additional"]["x_transformers_version"] = str(XT_VERSION)
     if "max_energy" in meta:  # MultLoader's DataPrep needs it for norm_e
         mm_conf.setdefault("max_energy", meta["max_energy"])
+    lds_conf["cutoff_mev"] = meta.get("cutoff_mev", lds_conf.get("cutoff_mev"))  # as the flow: the file's cut wins
+    if "bs" in mm_conf and dl_conf.get("bs", mm_conf["bs"]) != mm_conf["bs"]:
+        raise ValueError(f"mm_conf.bs={mm_conf['bs']} (the loader's) != dl_conf.bs={dl_conf['bs']}: set one")
     mm_conf.setdefault("cond_scalars", tuple(meta.get("cond_scalars", ("Density",))))
     set_layout(tuple(mm_conf["cond_scalars"]))  # before MultLoader, which reads layout-dependent accessors
     n_prefix = len(mm_conf["cond_scalars"]) + 1
