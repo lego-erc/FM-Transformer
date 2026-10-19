@@ -83,7 +83,7 @@ class LEGOLtngDirect(LEGOLtng):
         solve_kwargs = dict(self.rc.reflow_kwargs)
         if solve_kwargs.get("method", "midpoint") == "midpoint":
             solve_kwargs.setdefault("time_grid", base.new_tensor([0.0, 1.0]))
-        return self.reflow_teacher.solve(ds_t, x_init=base, **solve_kwargs)
+        return self._teacher_transport(ds_t, base, **solve_kwargs)
 
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
         with torch.no_grad():

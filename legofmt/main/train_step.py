@@ -111,6 +111,16 @@ class TrainStep:
             t = t.clamp(min=0) ** (1.0 / self.rc.t_dist_shift)
         return t
 
+    @torch.no_grad()
+    def _teacher_transport(self, ds_t: DataStruct, base: Tensor, **solve_kwargs) -> Tensor:
+        """The reflow teacher's transport of ``base`` on the generated slots, the data
+        elsewhere. The E_dep row is generated but its direction columns are the
+        (1,1,1) filler; transporting them gave that row an off-manifold target."""
+        tgt = self.reflow_teacher.solve(ds_t, x_init=base, **solve_kwargs)
+        tgt = torch.where((ds_t.m.full == 1).unsqueeze(-1), tgt, ds_t.f.model_in)
+        tgt[:, :self.rc.n_prefix, 1:] = ds_t.f.non_cc[..., 1:]
+        return tgt
+
     def _len_pieces(self, ds_t: DataStruct) -> tuple[DataStruct, list[tuple[slice, int]]]:
         lengths = ds_t.am.full.sum(1)
         cpu = self.__dict__.pop("_cpu_lengths", None)
@@ -195,11 +205,7 @@ class TrainStep:
                 self.reflow_teacher is not None and self.training
                 and self.global_step % self.rc.reflow_every == 0
             ):  # reflow: couple base to the teacher's transport of it
-                tgt = self.reflow_teacher.solve(ds_t, x_init=base, **self.rc.reflow_kwargs)
-                tgt = torch.where((ds_t.m.full == 1).unsqueeze(-1), tgt, ds_t.f.model_in)
-                # the E_dep row is generated but its direction columns are the (1,1,1)
-                # filler; transporting them gave that row an off-manifold target
-                tgt[:, :self.rc.n_prefix, 1:] = ds_t.f.non_cc[..., 1:]
+                tgt = self._teacher_transport(ds_t, base, **self.rc.reflow_kwargs)
                 ds_t = DataStruct(
                     torch.cat((tgt, ds_t.f.pdgids), dim=-1), ds_t.m.full, ds_t.am.full,
                 )

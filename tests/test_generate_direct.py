@@ -134,6 +134,16 @@ def test_forward_shapes(generator: GenerateOut) -> None:
     assert torch.isfinite(sols[attn_mask]).all(), "non-finite values at attended slots"
 
 
+@torch.no_grad()
+def test_unknown_incoming_pdgid_raises(generator: GenerateOut) -> None:
+    """An incoming species outside the mult model's ptypes_in used to be relabelled
+    as its searchsorted neighbour, silently generating the wrong particle's shower."""
+    cond = _dummy_cond(generator)
+    cond[0, -1] = 2112.0  # neighbour of 2212 in ptypes_in = (22, 211, 2212)
+    with pytest.raises(ValueError, match="ptypes_in"):
+        generator(cond)
+
+
 def _fake_shower(B: int = 2, L: int = 7) -> tuple:
     """Synthetic shower with RAW PDG ids in the last column, as a dataset
     batch would carry them."""

@@ -136,7 +136,8 @@ def _save_velocity_teacher(tmp_path) -> str:
     return str(path)
 
 
-def test_reflow_uses_teacher_target(tmp_path) -> None:
+def test_reflow_uses_teacher_target(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(torch, "compile", lambda m, **k: m)  # inductor would cost ~10 s
     cfg = _tiny_config()
     cfg["config"]["model_conf"]["reflow_path"] = _save_velocity_teacher(tmp_path)
     cfg["config"]["model_conf"]["reflow_kwargs"] = {"method": "midpoint", "step_size": 0.5}
@@ -610,21 +611,19 @@ def test_uncert_lv_receives_grad_and_tracks_loss_scale() -> None:
 
 
 def test_uncert_floor_caps_the_weight() -> None:
-    """A near-zero loss would send w=exp(-lv) to infinity; max_loss_weight bounds it."""
+    """A near-zero loss would send w=exp(-lv) to infinity; max_loss_weight bounds it.
+    The floor is applied to the parameter in place, so a cell that overshot keeps a
+    live gradient instead of latching below it (clamp() has none there)."""
     cfg = _uncert_config()
     cfg["config"]["model_conf"]["max_loss_weight"] = -2.0
     model = LEGOLtngVelocity(cfg)
     model.on_fit_start(); model.train()
-    ds = _fake_batch(B=8)
-    opt = torch.optim.Adam([model.lv], lr=0.5)
-    for _ in range(200):
-        opt.zero_grad()
-        loss, _ = model.reduce_loss(torch.full((8, 5, 7), 1e-8), ds)
-        loss.backward()
-        opt.step()
-    used = model.lv.detach().clamp(min=-2.0)
-    assert torch.all(used >= -2.0 - 1e-6)
-    assert torch.exp(-used).max() <= torch.exp(torch.tensor(2.0)) + 1e-4
+    with torch.no_grad():
+        model.lv.fill_(-20.0)
+    loss, _ = model.reduce_loss(torch.full((8, 5, 7), 1e-8), _fake_batch(B=8))
+    loss.backward()
+    assert torch.equal(model.lv.detach(), torch.full_like(model.lv, -2.0))
+    assert (model.lv.grad != 0).all(), "a cell on the floor must keep its gradient"
 
 
 def test_uncert_runs_on_the_time_independent_path() -> None:
@@ -658,9 +657,11 @@ def test_max_loss_weight_flow_is_its_own_floor() -> None:
     cfg["config"]["model_conf"]["max_loss_weight_flow"] = -10.0
     m = LEGOLtngVelocity(cfg)
     assert m.rc.max_loss_weight == -6.0 and m.rc.max_loss_weight_flow == -10.0
+    m.on_fit_start(); m.train()
     with torch.no_grad():
         m.lv_flow.fill_(-20.0)
-    assert float(m.lv_flow.clamp(min=m.rc.max_loss_weight_flow)) == -10.0
+    m._step(_fake_batch(), 0).backward()  # global_step 0: the flow-map term fires
+    assert float(m.lv_flow) == -10.0 and float(m.lv_flow.grad) != 0.0
     plain = LEGOLtngVelocity(_uncert_config())
     assert plain.rc.max_loss_weight_flow == plain.rc.max_loss_weight, "default must follow max_loss_weight"
 
