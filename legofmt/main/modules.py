@@ -6,6 +6,8 @@ mixins. The behaviour lives alongside: ``TrainStep`` (training step and loss),
 solving, likelihood, and ``forward``).
 """
 
+import os
+
 import torch
 from torch import Tensor, nn
 from torch.utils.data import DataLoader, Subset, random_split
@@ -29,6 +31,7 @@ from legofmt.data.prep import DataPrep
 from legofmt.data.struct import _F
 
 from legofmt.cfm.path_sampler import ProductPathSampler
+from legofmt.geometry.geom_trafos import zoom_polar
 from legofmt.geometry.symmetry_projections import CubeSymmetry
 
 from legofmt.mod_comps.config import resolve_legoltng_config
@@ -76,6 +79,8 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
 
         self.register_buffer("pdgids_template", self.rc.pdgids_template)
         self.register_buffer("types_embd", types_embd)
+        cuboid = torch.tensor(self.rc.config["model_conf"].get("cuboid_dim") or [1.0, 1.0, 1.0])
+        self.register_buffer("cuboid_unit", cuboid / cuboid.max(), persistent=False)
 
         self.model       = self._build_model(self.rc)
         self.gen_base    = GenerateBase(self.rc.config)
@@ -93,10 +98,15 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         if self.rc.learned_loss_weights:
             self.lv = nn.Parameter(torch.zeros(3 + int(self.rc.edep_cell)))  # one cell per channel
             params += [self.lv]
+            floor = torch.full_like(self.lv, self.rc.max_loss_weight).detach()
+            if self.rc.edep_cell:
+                floor[3] = self.rc.max_loss_weight_edep
+            self.register_buffer("lv_floor", floor, persistent=False)
             if self.rc.one_step_euler_fac > 0:
                 self.lv_flow = nn.Parameter(torch.zeros(1))
                 params += [self.lv_flow]
 
+        self._opt_params = params
         self.opt, self._lr_sched = build_optimizer(params, self.rc.opt_conf)
         self._opt_is_sf = opt_is_schedulefree(self.opt)  # read by lego_eval
 
@@ -170,7 +180,23 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         new  = torch.where(rows.view(1, -1, 1), new, x)
         return torch.where(fwd[:, None, None], new, x)
 
+    def _zoom_dirs(self, x: Tensor, am: Tensor, fwd: Tensor, inverse: bool = False, pdgids: Tensor | None = None) -> Tensor:
+        u    = x[..., self.rc.n_prefix:self.rc.n_prefix + 1, 1:4]
+        dirs = zoom_polar(x[..., 1:4], u, self.rc.dir_zoom, inverse, self.rc.dir_zoom_mix)
+        new  = torch.cat((x[..., 0:1], dirs, x[..., 4:]), dim=-1)
+        rows = torch.arange(x.shape[-2], device=x.device) > self.rc.n_prefix
+        if self.rc.dir_zoom_nucleons_max is not None:
+            nucleons = torch.tensor([2112.0, 2212.0], device=x.device)
+            if self.rc.pdgid_is_idx:
+                nucleons = self.convert_pdgids(nucleons).to(pdgids.dtype)
+            n_nuc = (am & rows & torch.isin(pdgids[..., 0], nucleons)).sum(-1)
+            fwd = fwd & (n_nuc <= self.rc.dir_zoom_nucleons_max)
+        return torch.where((am & rows & fwd[:, None]).unsqueeze(-1), new, x)
+
     def configure_optimizers(self):
+        if self._lr_sched is not None and self.rc.len_buckets is not None and self.rc.len_mode == "group":
+            self.rc.opt_conf["scheduler"]["total_steps"] = int(self.trainer.estimated_stepping_batches)
+            self.opt, self._lr_sched = build_optimizer(self._opt_params, self.rc.opt_conf)
         if self._lr_sched is None:
             return self.opt
         return {"optimizer": self.opt, "lr_scheduler": self._lr_sched}
@@ -199,11 +225,23 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
             batch_sampler=batch_sampler,
         )
 
+    def on_before_batch_transfer(self, batch, dataloader_idx: int):
+        if self.rc.len_buckets is not None:
+            self._cpu_lengths = batch.am.full.sum(1)
+            n = int(self._cpu_lengths.max())
+            batch = batch.trim(next(b for b in self.rc.len_buckets if b >= n))
+            if self.device.type == "cuda":
+                batch = batch.pin_memory()
+        return batch
+
     def train_dataloader(self) -> DataLoader:
         if self.rc.len_buckets is not None and self.rc.len_mode == "group":
+            t = self._trainer
             return self._make_loader(self._train_ds, shuffle=True, batch_sampler=LengthBucketBatchSampler(
                 _event_lengths(self._train_ds), self.rc.len_buckets, self.rc.dl_conf.get("bs", 2**12),
-                world_size=self.trainer.world_size if self._trainer is not None else 1,
+                seed=int(os.environ.get("PL_GLOBAL_SEED", 0)),
+                rank=t.global_rank if t is not None else 0, world_size=t.world_size if t is not None else 1,
+                max_tokens=self.rc.len_max_tokens,
             ))
         return self._make_loader(self._train_ds, shuffle=True)
 
