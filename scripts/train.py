@@ -34,6 +34,8 @@ from legofmt.main.modules import LEGOLtng
 from legofmt.mod_comps.config import migrate_loss_weight_keys
 from legofmt.multiplicity.model import MultModel
 
+if "OMP_NUM_THREADS" not in os.environ:
+    torch.set_num_threads(8)
 d_dtype = getattr(torch, run["dtype"])
 torch.set_default_dtype(d_dtype)
 torch.set_float32_matmul_precision(run["matmul_precision"])
