@@ -121,7 +121,7 @@ class Solvers:
             x_init = x_init.where(am, _F(x_init).in_p)
 
         if time_grid is None:
-            if method in ("euler", "midpoint"):
+            if method in ("euler", "midpoint", "rk4"):
                 n = max(round(1.0 / step_size), 1)
                 time_grid = torch.linspace(0.0, 1.0, n + 1, device=x_init.device, dtype=x_init.dtype)
             else:
@@ -142,8 +142,11 @@ class Solvers:
                 return self._euler_steps(
                     x_init, time_grid, return_intermediates=return_intermediates, **extras,
                 )
-            vm = (lambda *a, **k: self.model(*a, **k).clone()) if method == "rk4" else self.model
-            return ODESolver(velocity_model=vm).sample(
+            if method == "rk4":
+                return self._rk4_steps(
+                    x_init, time_grid, return_intermediates=return_intermediates, **extras,
+                )
+            return ODESolver(velocity_model=self.model).sample(
                 x_init=x_init, time_grid=time_grid,
                 step_size=step_size, method=method,
                 return_intermediates=return_intermediates, **extras,
@@ -187,6 +190,29 @@ class Solvers:
             dt = t_b - t_a
             s  = self.model(x, t_a, d=dt, **extras)
             x  = torch.where(gen, self.model.manifold.expmap(x, dt * s), x)
+            if return_intermediates:
+                xs.append(x)
+        return torch.stack(xs) if return_intermediates else x
+
+    def _rk4_steps(
+        self, x: Tensor, time_grid: Tensor,
+        return_intermediates: bool = False, **extras,
+    ) -> Tensor:
+        """torchdiffeq's rk4 (the 3/8 rule) on the ``mask == 1`` slots as a projection
+        method: stages combine in the ambient space, every step ends on the manifold.
+        Through the Euclidean ODESolver the sphere factors drifted off it, shortening
+        every later angular step by the drifted norm. The velocity is instantaneous
+        (``d = 0``); the clones keep k1..k3 alive across CUDA-graph replays."""
+        xs  = [x]
+        man = self.model.manifold
+        gen = (extras["mask"] == 1).unsqueeze(-1)
+        for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
+            dt = t_b - t_a
+            k1 = self.model(x, t_a, **extras).clone()
+            k2 = self.model(x + dt * k1 / 3, t_a + dt / 3, **extras).clone()
+            k3 = self.model(x + dt * (k2 - k1 / 3), t_a + dt * 2 / 3, **extras).clone()
+            k4 = self.model(x + dt * (k1 - k2 + k3), t_b, **extras)
+            x  = torch.where(gen, man.projx(x + dt * (k1 + 3 * (k2 + k3) + k4) / 8), x)
             if return_intermediates:
                 xs.append(x)
         return torch.stack(xs) if return_intermediates else x
