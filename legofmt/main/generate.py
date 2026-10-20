@@ -33,26 +33,21 @@ def _balance_energy(sols: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor
     open (fragments, binding), is left alone. Only valid where the data's own balance closes (the 0.1 MeV-cutoff
     plates, not a 10 MeV cutoff), hence opt-in."""
     s = _F(sols)
-    out = s.out_p
-    live = (out[..., -1] != 0) & out[..., 0].isfinite()
-    e_in = e_in.double()
-    e_in_n = pen.to_scalar_e(e_in).unsqueeze(-1)
-    E = torch.where(live, pen.to_mev(out[..., 0].double().nan_to_num(), e_in_n), 0.0)
-    pair = 1.022 * ((live & (out[..., -1] == -11)).sum(-1) - (pid_in == -11).long())
-    budget = (e_in - dp.denorm_edep(s.edep.double()) - pair).clamp_min(0.0)
-    tot = E.sum(-1)
-    em = (pid_in.abs() == 11) | (pid_in == 22)
-    absorbed = em & (tot == 0) & (e_in_n.squeeze(-1) > 1e-6)   # nothing leaves: the deposit is the budget
-    s.edep[absorbed] = dp.norm_edep(e_in - pair)[absorbed].to(s.edep.dtype)
-    E_new = E * torch.where(em & (tot > 0), budget / tot.clamp_min(1e-12), 1.0).unsqueeze(-1)
-    rows = torch.arange(len(E), device=E.device)
-    lead = E.argmax(-1)
-    surv = ~em & (out[rows, lead, -1].long() == pid_in) & (E[rows, lead] > 0.9 * e_in)
-    E_new[rows[surv], lead[surv]] = (budget - tot + E[rows, lead]).clamp_min(0.0)[surv]
-    changed = live & (em & (tot > 0)).unsqueeze(-1)
-    changed[rows[surv], lead[surv]] = True
-    changed &= e_in_n > 1e-6                       # E_in at the cutoff: the log ratio is 0/0
-    out[..., 0] = torch.where(changed, 1 - pen.to_scalar_e(E_new) / e_in_n, out[..., 0].double()).to(out.dtype)
+    e, pid = s.out_p[..., 0], s.out_p[..., -1]                        # (B, K) slots; per event (B, 1)
+    e_in, pid_in = e_in.double()[:, None], pid_in[:, None]
+    e_in_n = pen.to_scalar_e(e_in)
+    live = (pid != 0) & e.isfinite()
+    E = torch.where(live, pen.to_mev(e.double().nan_to_num(), e_in_n), 0.0)
+    tot = E.sum(-1, keepdim=True)
+    pair = 1.022 * ((live & (pid == -11)).sum(-1, keepdim=True) - (pid_in == -11).long())
+    budget = (e_in - dp.denorm_edep(s.edep.double())[:, None] - pair).clamp_min(0.0)
+    em = ((pid_in.abs() == 11) | (pid_in == 22)) & (e_in_n > 1e-6)  # at the cutoff the log ratio is 0/0
+    lead_e, lead = E.max(-1, keepdim=True)
+    surv = ~em & (e_in_n > 1e-6) & (lead_e > 0.9 * e_in) & (pid.gather(-1, lead) == pid_in)
+    w = torch.where(em, E / tot, surv * F.one_hot(lead[:, 0], E.shape[-1]))  # who takes the residual budget - tot
+    absorbed = (em & (tot == 0))[:, 0]                              # nothing leaves: the deposit is the budget
+    s.edep[absorbed] = dp.norm_edep(e_in - pair)[absorbed, 0].to(s.edep.dtype)
+    e.copy_(torch.where(w > 0, 1 - pen.to_scalar_e(E + w * (budget - tot)) / e_in_n, e.double()))
 
 
 def _exit_outward(sols: torch.Tensor) -> None:
