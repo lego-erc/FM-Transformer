@@ -22,6 +22,7 @@ from torch.utils.checkpoint import checkpoint
 from x_transformers import ContinuousTransformerWrapper, Encoder
 from x_transformers.x_transformers import AdaptiveLayerScale, AdaptiveRMSNorm
 from legofmt.compat import fp32_attention, legacy_param_rename, needs_fp32_attention
+from legofmt.cfm.geom_encoder import GeomEncoder
 
 
 def _per_event_gammas(attn_layers: nn.Module) -> bool:
@@ -75,11 +76,19 @@ class CFMTrafo_x(nn.Module):
         time_cond: bool = True,
         step_cond: bool = False,
         grad_ckpt: bool = False,
+        geom_encoder: dict | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
         if step_cond and not time_cond:
             raise ValueError("step_cond=True requires time_cond=True")
+        self.geom = None
+        if geom_encoder is not None:
+            g = dict(geom_encoder)
+            n_prefix, self.geom_hide = g.pop("n_prefix"), g.pop("hide_scalars")
+            # the composite cond-scalar rows (E_dep is row 1, the incoming particle row n_prefix)
+            self.register_buffer("geom_scalar_rows", torch.tensor([0, *range(2, n_prefix)]), persistent=False)
+            self.geom = GeomEncoder(g.pop("layers"), h_dim, **g)
         ntypes = ntypes if ntypes is not None else max_seq_l
         self.h_dim = h_dim
         self.in_dim = in_dim
@@ -197,7 +206,8 @@ class CFMTrafo_x(nn.Module):
         they condition the generated (``mask == 1``) tokens, and the conditioning tokens
         get ``t = 1, d = 0`` -- the values ``ProjectModel`` pins them to."""
         B, L = x.shape[:2]
-        cond_attn = None
+        K = 0 if self.geom is None else self.geom.K
+        cond_attn = c_con = None
         if not self.time_cond:
             cond = self.global_cond.expand(B, -1)
         elif t.shape[-1] == 1 and (d is None or d.shape[-1] == 1):
@@ -205,8 +215,9 @@ class CFMTrafo_x(nn.Module):
             c_gen = self._time_emb(t, d).expand(B, 1, -1)
             c_con = self._time_emb(t.new_ones(1, 1), None if d is None else d.new_zeros(1, 1)).expand(B, 1, -1)
             cond  = torch.where(gen, c_gen, c_con)
-            if self._packed_cond and 3 != L <= self.h_dim:
-                sel = F.pad(gen.squeeze(-1).to(cond.dtype), (0, self.h_dim - L)).unsqueeze(1)
+            if self._packed_cond and 3 != L + K <= self.h_dim:
+                # the selector spans the whole sequence; the K geometry tokens are conditioning tokens
+                sel = F.pad(gen.squeeze(-1).to(cond.dtype), (K, self.h_dim - L - K)).unsqueeze(1)
                 cond_attn = torch.cat((c_con, c_gen, sel), dim=1)
         else:
             cond = self._time_emb(t, d)
@@ -215,9 +226,22 @@ class CFMTrafo_x(nn.Module):
         embd = self._embed(x, oh)
         if self.time_cond:
             embd = embd + cond
+        if self.geom is not None:
+            tok = self.geom().to(embd.dtype).expand(B, -1, -1)
+            if self.time_cond:
+                if c_con is None:
+                    c_con = self._time_emb(t.new_ones(1, 1), None if d is None else d.new_zeros(1, 1)).expand(B, 1, -1)
+                c_tok = c_con.expand(B, K, -1)
+                tok = tok + c_tok
+                cond = torch.cat((c_tok, cond), dim=1)
+            embd = torch.cat((tok, embd), dim=1)
+            if self.geom_hide:
+                attn_mask = attn_mask.clone()
+                attn_mask[:, self.geom_scalar_rows] = False
+            attn_mask = torch.cat((attn_mask.new_ones(B, K), attn_mask), dim=1)
 
         # project_in / project_out are identities unless dim_in_out was set.
         embd = self.vf.emb_dropout(self.vf.project_in(embd))
         h = self.vf.project_out(self.vf.attn_layers(
             embd, mask=attn_mask, condition=cond if cond_attn is None else cond_attn))
-        return self._project_out(h, mask, oh)
+        return self._project_out(h[:, K:], mask, oh)

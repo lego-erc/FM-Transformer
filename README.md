@@ -303,6 +303,7 @@ Top-level FM options:
 | `time_cond` | `True` | Sinusoidal `t` embedding as the adaptive-norm condition (conditioning tokens at `t = 1`); `False` uses a learned global vector (`LEGOLtngDirect`). With one `t` per event the adaptive norms compute their gammas on two rows per event instead of one per token. |
 | `step_cond` | `False` | Also embed the step size `d` (zero-init gain), required by `one_step_euler_fac > 0`. |
 | `grad_ckpt` | `False` | Activation checkpointing per attention block. |
+| `geom_encoder` | `None` | Layered-stack conditioning: `{layers: [[thickness mm, density, Z, A], ...] (beam side first), repeat: 1, tokens: 4, dim: 128, depth: 3, heads: 4, hide_scalars: true}`. A small bidirectional transformer over one token per layer (plus X0 / lambda_I thicknesses and Fourier features of the cumulative depth) prepends `tokens` summary tokens in `h_dim` to the sequence (conditioning tokens, dropped before the output projection; zero-init read-out). `hide_scalars` masks the composite Density / Z / A / Size rows out of the flow's attention (they stay in the data for the base head and the count model). One stack per model for now. `legofmt/cfm/geom_encoder.py`, design `docs/superpowers/specs/2026-10-20-geometry-condition-encoder-design.md`. |
 
 All remaining `model_args` keys flow into `x-transformers` `Encoder`, e.g.
 `use_adaptive_rmsnorm`, `use_adaptive_layerscale`, `residual_attn`, `ff_swish`,

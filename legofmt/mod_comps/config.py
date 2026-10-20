@@ -239,6 +239,14 @@ def _build_resolved(
     cond_scalars = tuple(model_conf.get("cond_scalars", ("Density",)))
     n_prefix = len(cond_scalars) + 1  # + edep slot (generated)
     set_layout(cond_scalars)
+    geom = model_args.get("geom_encoder")
+    if geom is not None:
+        layers = [[float(v) for v in row] for row in geom.get("layers") or []] * int(geom.pop("repeat", 1))
+        if not layers or any(len(r) != 4 or min(r) <= 0 for r in layers):
+            raise ValueError("model_args.geom_encoder.layers must be rows of positive [thickness mm, density, Z, A].")
+        geom["layers"] = layers
+        geom.setdefault("hide_scalars", True)
+        geom["n_prefix"] = n_prefix
 
     sections = model_conf.get("one_step_euler_sections", 8)
     if not state_dict and model_conf.get("one_step_euler_fac", 0.0) > 0:  # loading weights never trains
