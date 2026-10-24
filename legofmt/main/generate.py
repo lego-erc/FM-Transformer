@@ -40,13 +40,13 @@ def _balance_energy(sols: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor
     E = torch.where(live, pen.to_mev(e.double().nan_to_num(), e_in_n), 0.0)
     tot = E.sum(-1, keepdim=True)
     pair = 1.022 * ((live & (pid == -11)).sum(-1, keepdim=True) - (pid_in == -11).long())
-    budget = (e_in - dp.denorm_edep(s.edep.double())[:, None] - pair).clamp_min(0.0)
+    budget = (e_in - dp.denorm_edep_row(s.edep.double(), e_in[:, 0], pid_in[:, 0])[:, None] - pair).clamp_min(0.0)
     em = ((pid_in.abs() == 11) | (pid_in == 22)) & (e_in_n > 1e-6)  # at the cutoff the log ratio is 0/0
     lead_e, lead = E.max(-1, keepdim=True)
     surv = ~em & (e_in_n > 1e-6) & (lead_e > 0.9 * e_in) & (pid.gather(-1, lead) == pid_in)
     w = torch.where(em, E / tot, surv * F.one_hot(lead[:, 0], E.shape[-1]))  # who takes the residual budget - tot
     absorbed = (em & (tot == 0))[:, 0]                              # nothing leaves: the deposit is the budget
-    s.edep[absorbed] = dp.norm_edep(e_in - pair)[absorbed, 0].to(s.edep.dtype)
+    s.edep[absorbed] = dp.norm_edep_row((e_in - pair)[:, 0], e_in[:, 0], pid_in[:, 0])[absorbed].to(s.edep.dtype)
     e.copy_(torch.where(w > 0, 1 - pen.to_scalar_e(E + w * (budget - tot)) / e_in_n, e.double()))
 
 
@@ -142,7 +142,8 @@ class GenerateOut(torch.nn.Module):
         e_in = self.pen.from_scalar(cond_model[:, nc + 1:nc + 4], cond_model[:, nc:nc + 1]).norm(dim=-1)
         pid_in = cond_model[:, -1].long()
         pt_mask = mask.sum(-1) == 0
-        if self.model.rc.odeint_conf.get("energy_balance", False):
+        ae = self.model.edep_ae
+        if self.model.rc.odeint_conf.get("energy_balance", False) and ae is None:  # an edep_ae needs their latents
             # an e+-/gamma that leaves nothing deposits the balance budget, which overwrites the flow's E_dep
             em = (pid_in.abs() == 11) | (pid_in == 22)
             pt_mask = pt_mask | (em & (attn_mask[:, self.n_prefix + 1:].sum(-1) == 0)
@@ -159,13 +160,21 @@ class GenerateOut(torch.nn.Module):
             sols, mask, attn_mask = self.model((cond_fm, mask, attn_mask))
         sols[..., -1] = torch.cat([sols.new_zeros(1), self.pdgids.to(sols.dtype)])[sols[..., -1].long()]
         edep = _F(sols).edep
-        for pid, excess in _EDEP_EXCESS_MEV.items():
+        for pid, excess in (() if self.dp.edep_wall else _EDEP_EXCESS_MEV.items()):   # the wall row is capped already
             hit = pid_in == pid
             edep[..., hit] = torch.minimum(edep[..., hit], self.dp.norm_edep(e_in[hit] + excess).to(edep))
         if self.model.rc.odeint_conf.get("energy_balance", False):
             _balance_energy(sols, e_in, pid_in, self.pen, self.dp)
         if self.model.rc.odeint_conf.get("exit_consistency", False):
             _exit_outward(sols)
+        # per-layer E_dep [MeV], decoded after the balance rewrote the E_dep row; pass-throughs deposit nothing
+        self.edep_layers = None
+        if ae is not None:
+            self.edep_layers = sols.new_zeros(sols.shape[0], ae.n_layers)
+            run = ~pt_mask
+            if run.any():
+                self.edep_layers[run] = ae.sample(self.model._edep_latents, self.dp.denorm_edep_row(
+                    _F(sols).edep[run].float(), e_in[run].float(), pid_in[run]))
         return sols, mask, attn_mask
 
     def _model_cond(self, cond: torch.Tensor, prepped: bool) -> torch.Tensor:
@@ -195,11 +204,14 @@ class GenerateOut(torch.nn.Module):
         s = _F(sols)
         per_event = {"E_dep": s.edep}
         per_event.update({k: s.cond(k) for k in self.cond_names})
-        return {
+        out = {
             "per_event": per_event,
             "per_particle": {"Incoming": s.in_p, "Outgoing": s.out_p},
             "per_voxel": {"E_dep": sols.new_empty(sols.shape[0], 0, 4)},
         }
+        if self.edep_layers is not None:  # geom/slab_calo's own group, in model normalisation like E_dep
+            out["per_slab"] = {"E_dep": self.dp.norm_edep(self.edep_layers)}
+        return out
 
     def passthrough_prob_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None):
         """``passthrough_prob`` with the arguments of ``gen_model_w_g4_args``."""

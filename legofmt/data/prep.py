@@ -16,6 +16,13 @@ from legofmt.geometry.energy_proj import EnergyProjections
 from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.mod_comps.config import build_manifold
 
+# model_conf.edep_wall: the E_dep row's cap is E_in + this margin [MeV] per incoming species -- what Geant4 can deposit
+# above E_in (e+ annihilation; pions: absorption releases the rest mass, up to +178 MeV in the stack data; neutrons:
+# binding, 3e-5 of events by up to 4.6 MeV). Species not listed get the widest margin.
+EDEP_WALL_MARGIN_MEV = {11: 0.0, -11: 1.022, 22: 0.0, 2212: 0.0, 2112: 10.0, 211: 200.0, -211: 200.0}
+EDEP_WALL_DEFAULT_MARGIN_MEV = 200.0
+EDEP_WALL_EPS_MISSING_MEV = 1e-3   # the smallest missing energy E_cap - E_dep the channel resolves
+
 
 class DataPrep:
     def __init__(self, config):
@@ -29,6 +36,7 @@ class DataPrep:
             cond = model_conf.get("cond_scalars", ("Density",))
             self.energy_kin = model_conf.get("energy_kin", True)
             self.edep_log_min = model_conf.get("edep_log_min")
+            self.edep_wall = model_conf.get("edep_wall", False)
             cuboid_dim = model_conf.get("cuboid_dim")
         else:
             # manifold is only needed by cc_trafo (the dict path); norm_e-only
@@ -41,6 +49,7 @@ class DataPrep:
             cond = config.get("cond_scalars", ("Density",))
             self.energy_kin = config.get("energy_kin", True)
             self.edep_log_min = config.get("edep_log_min")
+            self.edep_wall = config.get("edep_wall", False)
             cuboid_dim = config.get("cuboid_dim")
         set_layout(cond)
         self.pen = EnergyProjections(cutoff_mev=cutoff_mev, max_energy=max_energy)
@@ -101,8 +110,9 @@ class DataPrep:
             return batch
         f = f if inplace else f.clone()
         in_cc = _F(f).in_cc
+        e_in, pid = in_cc[..., 0, 0].clone(), _F(f).in_p[..., 0, -1]   # MeV, before it becomes the scalar below
         in_cc[..., 0:1] = self.pen.to_scalar_e(in_cc[..., 0:1])
-        _F(f).edep.copy_(self.norm_edep(_F(f).edep))
+        _F(f).edep.copy_(self.norm_edep_row(_F(f).edep, e_in, pid))
         if edep_layers:   # optional (B, n_layers) tensor; norm_edep is elementwise
             return f, mask, attn_mask, self.norm_edep(edep_layers[0])
         return f, mask, attn_mask
@@ -115,6 +125,39 @@ class DataPrep:
         lo = self.edep_log_min
         rng = torch.tensor(self.pen.max_energy / lo).log().item()
         return ((edep / lo).clamp_min(1.0).log() / rng).clamp(0.0, 1.0)
+
+    def _edep_cap(self, e_in: Tensor, pid: Tensor) -> Tensor:
+        margin = torch.full_like(e_in, EDEP_WALL_DEFAULT_MARGIN_MEV)
+        for p, m in EDEP_WALL_MARGIN_MEV.items():
+            margin = torch.where(pid == p, torch.full_like(e_in, m), margin)
+        return e_in + margin
+
+    def _edep_wall_range(self, cap: Tensor) -> tuple[Tensor, Tensor]:
+        return torch.log((self.edep_log_min or 1e-6) / cap), torch.log(cap / EDEP_WALL_EPS_MISSING_MEV)
+
+    def norm_edep_row(self, edep: Tensor, e_in: Tensor, pid: Tensor) -> Tensor:
+        """MeV -> model scale for the E_dep ROW, given the incoming kinetic energy [MeV] and raw pdgid (same shape).
+        ``norm_edep`` unless ``model_conf.edep_wall``: then the log-odds of the deposited fraction of
+        E_cap = E_in + margin(species), z = log E_dep - log(E_cap - E_dep), rescaled from [log(eps / E_cap),
+        log(E_cap / eps_missing)] to [0, 1]. Small deposits keep a log scale; near the cap the channel resolves
+        the missing energy, so a contained shower's narrow peak below E_in becomes wide, and E_cap is the edge
+        u = 1. Zero stays 0 (the overflow sentinel's condition)."""
+        if not self.edep_wall:
+            return self.norm_edep(edep)
+        e, cap = edep.double(), self._edep_cap(e_in.double(), pid)
+        lo, hi = self._edep_wall_range(cap)
+        z = torch.log(e.clamp_min(1e-300)) - torch.log((cap - e).clamp_min(1e-300))
+        u = ((z - lo) / (hi - lo)).clamp(0.0, 1.0)
+        return torch.where(e > 0, u, torch.zeros_like(u)).to(edep.dtype)
+
+    def denorm_edep_row(self, u: Tensor, e_in: Tensor, pid: Tensor) -> Tensor:
+        """Inverse of ``norm_edep_row``: E_cap * sigmoid(z); non-positive u (the sentinel) -> 0, u > 1 -> the cap."""
+        if not self.edep_wall:
+            return self.denorm_edep(u)
+        cap = self._edep_cap(e_in.double(), pid)
+        lo, hi = self._edep_wall_range(cap)
+        E = cap * torch.sigmoid(lo + u.double().clamp(0.0, 1.0) * (hi - lo))
+        return torch.where(u > 0, E, torch.zeros_like(E)).to(u.dtype)
 
     def denorm_edep(self, edep: Tensor) -> Tensor:
         """Model scale -> MeV, the inverse of ``norm_edep`` on ``[0, 1]``. Every

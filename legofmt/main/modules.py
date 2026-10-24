@@ -19,6 +19,7 @@ from legofmt.base_dist.base_nn import (
 from legofmt.base_dist.gen_base import GenerateBase
 
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
+from legofmt.cfm.edep_ae import build_edep_ae
 from legofmt.cfm.project_model import ProjectModel, uncompiled
 from legofmt.cfm.solvers import Solvers
 
@@ -87,6 +88,11 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         self.ps          = ProductPathSampler(self.rc.manifold)
 
         self._base_head_loss = None
+        # frozen per-layer E_dep autoencoder: its K latents are flown as one token of the field (model_args.lat_dim);
+        # solve leaves the generated latents in _edep_latents
+        self.edep_ae = build_edep_ae(self.rc.edep_ae) if self.rc.edep_ae else None
+        self._edep_dp = DataPrep(self.rc.config) if self.rc.edep_ae else None  # the layers' E_dep scale -> MeV
+        self._edep_latents = None
         params = list(self.model.parameters())
         head = build_base_head(self.rc, self.gen_base)
         if head is not None:
@@ -94,7 +100,7 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
             params += [p for p in self.base_head.parameters() if p.requires_grad]
 
         if self.rc.learned_loss_weights:
-            self.lv = nn.Parameter(torch.zeros(3 + int(self.rc.edep_cell)))  # one cell per channel
+            self.lv = nn.Parameter(torch.zeros(3 + int(self.rc.edep_cell) + int(self.rc.n_lat > 0)))  # one per channel
             params += [self.lv]
             floor = torch.full_like(self.lv, self.rc.max_loss_weight).detach()
             if self.rc.edep_cell:
@@ -109,6 +115,9 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         self._opt_is_sf = opt_is_schedulefree(self.opt)  # read by lego_eval
 
         if self.rc.state_dict is not None:
+            if self.rc.n_lat and self.rc.state_dict and "lat_in.weight" not in self.rc.state_dict:  # strict=False
+                raise ValueError("model_conf.edep_ae checkpoint without the latent token (lat_in): the 16-row "
+                                 "prototype (feat/edep-latents) is not supported.")
             self.model.vf.load_state_dict(self.rc.state_dict, strict=False)
 
         teacher = None

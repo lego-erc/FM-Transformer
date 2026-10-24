@@ -41,7 +41,10 @@ class ProjectModel(nn.Module):
         types: Tensor,
         pdgids: Tensor | None = None,
         d: Tensor | None = None,
+        z: Tensor | None = None,
     ) -> Tensor:
+        """With the field's latent token (``model_args.lat_dim``) pass the latent ``z`` (B, K) and get
+        ``(v, v_z)``; ``z`` is Euclidean and not projected."""
         x_proj, x_att = self._prep_x(x, attn_mask)
         t = torch.atleast_2d(t)
         if getattr(self.vf, "step_cond", False):
@@ -52,9 +55,10 @@ class ProjectModel(nn.Module):
             t = torch.where(mask == 1, t.expand_as(attn_mask), 1.0)  # conditions get t=1
             if d is not None:
                 d = torch.where(mask == 1, d.expand_as(attn_mask), 0.0)  # and are not transported
-        v = self.vf(x_att, mask, attn_mask, types, pdgids, t=t, d=d)
-        v_proj = self.manifold.proju(x_proj, v)
-        return torch.where(attn_mask.unsqueeze(-1), v_proj, v)
+        v = self.vf(x_att, mask, attn_mask, types, pdgids, t=t, d=d, **({} if z is None else {"z": z}))  # z only when set
+        v, v_z = v if z is not None else (v, None)
+        v_proj = torch.where(attn_mask.unsqueeze(-1), self.manifold.proju(x_proj, v), v)
+        return v_proj if z is None else (v_proj, v_z)
 
 
 def uncompiled(module: nn.Module) -> nn.Module:

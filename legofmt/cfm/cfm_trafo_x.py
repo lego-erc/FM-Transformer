@@ -77,6 +77,7 @@ class CFMTrafo_x(nn.Module):
         step_cond: bool = False,
         grad_ckpt: bool = False,
         geom_encoder: dict | None = None,
+        lat_dim: int = 0,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -98,6 +99,7 @@ class CFMTrafo_x(nn.Module):
         self.npdgids = npdgids
         self.time_cond = time_cond
         self.step_cond = step_cond
+        self.lat_dim = lat_dim
 
         self.vf = ContinuousTransformerWrapper(
             dim_in=dim_in_out,
@@ -136,6 +138,12 @@ class CFMTrafo_x(nn.Module):
         self.cond_bo_pdgids = nn.Parameter(torch.empty(npdgids, in_dim))
 
         self._register_load_state_dict_pre_hook(legacy_param_rename)
+
+        if lat_dim:  # model_conf.edep_ae: an event-level latent z (B, lat_dim), flown as one extra generated token
+            self.lat_in  = nn.Linear(lat_dim, h_dim)
+            self.lat_out = nn.Linear(h_dim, lat_dim)
+            nn.init.zeros_(self.lat_out.weight)
+            nn.init.zeros_(self.lat_out.bias)
 
         w_std = xavier_gain * 3 ** 0.5 * (2.0 / (in_dim + h_dim)) ** 0.5
         for p in (self.cond_w_mask, self.cond_w_types, self.cond_w_pdgids):
@@ -201,13 +209,17 @@ class CFMTrafo_x(nn.Module):
         pdgids: Tensor | None,
         t: Tensor | None = None,
         d: Tensor | None = None,
+        z: Tensor | None = None,
     ) -> Tensor:
         """``t`` / ``d`` per token ``(B, L)`` are used as given. Per event ``(B or 1, 1)``
         they condition the generated (``mask == 1``) tokens, and the conditioning tokens
-        get ``t = 1, d = 0`` -- the values ``ProjectModel`` pins them to."""
+        get ``t = 1, d = 0`` -- the values ``ProjectModel`` pins them to. With ``lat_dim`` the
+        latent ``z`` (B, lat_dim) is one more generated token, prepended, and ``(v, v_z)`` is returned."""
         B, L = x.shape[:2]
         K = 0 if self.geom is None else self.geom.K
-        cond_attn = c_con = None
+        n_lat = int(self.lat_dim > 0)
+        n_pre = n_lat + K          # prepended tokens: [latent, geometry x K], then the sequence
+        cond_attn = c_con = c_gen = None
         if not self.time_cond:
             cond = self.global_cond.expand(B, -1)
         elif t.shape[-1] == 1 and (d is None or d.shape[-1] == 1):
@@ -215,9 +227,13 @@ class CFMTrafo_x(nn.Module):
             c_gen = self._time_emb(t, d).expand(B, 1, -1)
             c_con = self._time_emb(t.new_ones(1, 1), None if d is None else d.new_zeros(1, 1)).expand(B, 1, -1)
             cond  = torch.where(gen, c_gen, c_con)
-            if self._packed_cond and 3 != L + K <= self.h_dim:
-                # the selector spans the whole sequence; the K geometry tokens are conditioning tokens
-                sel = F.pad(gen.squeeze(-1).to(cond.dtype), (K, self.h_dim - L - K)).unsqueeze(1)
+            if self._packed_cond and 3 != L + n_pre <= self.h_dim:
+                # the selector spans the whole sequence: the latent token is generated, the K geometry tokens are
+                # conditioning tokens
+                sel = F.pad(gen.squeeze(-1).to(cond.dtype), (n_pre, self.h_dim - L - n_pre))
+                if n_lat:
+                    sel[:, 0] = 1.0
+                sel = sel.unsqueeze(1)
                 cond_attn = torch.cat((c_con, c_gen, sel), dim=1)
         else:
             cond = self._time_emb(t, d)
@@ -239,9 +255,22 @@ class CFMTrafo_x(nn.Module):
                 attn_mask = attn_mask.clone()
                 attn_mask[:, self.geom_scalar_rows] = False
             attn_mask = torch.cat((attn_mask.new_ones(B, K), attn_mask), dim=1)
+        if n_lat:
+            tok = self.lat_in(z.to(embd.dtype)).unsqueeze(1)
+            if self.time_cond:
+                if c_gen is None:  # per-token t: the event's t is that of its generated tokens
+                    gen_any = (mask == 1).any(-1, keepdim=True)
+                    pick = lambda a, fill: torch.where(gen_any, a.masked_fill(mask != 1, -torch.inf).amax(-1, keepdim=True), fill)
+                    c_gen = self._time_emb(pick(t, 1.0), None if d is None else pick(d, 0.0))   # (B, 1, D)
+                c_lat = c_gen.expand(B, 1, -1)
+                tok = tok + c_lat
+                cond = torch.cat((c_lat, cond.expand(B, -1, -1)), dim=1)
+            embd = torch.cat((tok, embd), dim=1)
+            attn_mask = torch.cat((attn_mask.new_ones(B, 1), attn_mask), dim=1)
 
         # project_in / project_out are identities unless dim_in_out was set.
         embd = self.vf.emb_dropout(self.vf.project_in(embd))
         h = self.vf.project_out(self.vf.attn_layers(
             embd, mask=attn_mask, condition=cond if cond_attn is None else cond_attn))
-        return self._project_out(h[:, K:], mask, oh)
+        v = self._project_out(h[:, n_pre:], mask, oh)
+        return (v, self.lat_out(h[:, 0])) if n_lat else v

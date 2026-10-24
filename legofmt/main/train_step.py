@@ -39,9 +39,11 @@ class TrainStep:
         edep.masked_fill_(edep == 0, -delta)
         return DataStruct(f, ds_t.m.full, ds_t.am.full)
 
-    def reduce_loss(self, sq: Tensor, ds_t: DataStruct) -> tuple[Tensor, dict]:
-        """The weighted training loss, and the scalars the caller should log."""
+    def reduce_loss(self, sq: Tensor, ds_t: DataStruct, sq_lat: Tensor | None = None) -> tuple[Tensor, dict]:
+        """The weighted training loss, and the scalars the caller should log. ``sq_lat`` is the squared error of
+        the ``model_conf.edep_ae`` latent's velocity, its own cell."""
         g        = ((ds_t.m.full == 1) & (ds_t.am.full == 1)).unsqueeze(-1)
+        loss_lat = None if sq_lat is None else sq_lat.mean()
         denom    = g.sum().clamp(min=1)
         out      = sq * g
         loss_e   = out[..., 0:1].sum() / denom
@@ -54,18 +56,20 @@ class TrainStep:
         loss_x   = out[..., 4:7].sum() / (denom * 3)
         logs     = {}
         if not self.rc.learned_loss_weights:
-            total = loss_e + loss_dir + loss_x + (loss_ed if loss_ed is not None else 0.0)
+            total = (loss_e + loss_dir + loss_x + (loss_ed if loss_ed is not None else 0.0)
+                     + (loss_lat if loss_lat is not None else 0.0))
         else:
             # clamp in place: below the floor clamp() has zero gradient, so a cell
             # that overshoots would latch there and stop responding to its loss
             lo = self.lv_floor
             with torch.no_grad():
                 self.lv.clamp_(min=lo)
-            lv  = self.lv  # (3,) or (4,), one per channel
+            lv  = self.lv  # (3,) to (5,), one per channel: energy, dir, pos[, edep][, lat]
             w   = torch.exp(-lv)
             total = (
                 w[0] * loss_e + w[1] * loss_dir + w[2] * loss_x
                 + (w[3] * loss_ed if loss_ed is not None else 0.0)
+                + (w[-1] * loss_lat if loss_lat is not None else 0.0)
                 + lv.sum()  # the +log(sigma^2) barrier; zero at init
             )
             v = lv.detach().exp()
@@ -73,12 +77,15 @@ class TrainStep:
                     "loss_weight/var_pos": v[2]}
             if loss_ed is not None:
                 logs["loss_weight/var_edep"] = v[3]
+            if loss_lat is not None:
+                logs["loss_weight/var_lat"] = v[-1]
         out_logs = {}
         if self.training:
             out_logs = {
                 # unweighted, so these stay comparable across loss-weight settings
                 "loss/energy": loss_e.detach(),
                 **({"loss/edep": loss_ed.detach()} if loss_ed is not None else {}),
+                **({"loss/lat": loss_lat.detach()} if loss_lat is not None else {}),
                 "loss/out_dir": loss_dir.detach(),
                 "loss/out_pos": loss_x.detach(),
                 "loss/raw": (loss_e + loss_dir + loss_x).detach(),
@@ -147,7 +154,7 @@ class TrainStep:
         return run
 
     def _flow_map_loss(
-        self, loss: Tensor, base: Tensor, ds_t: DataStruct, pdgid_idx: Tensor, model=None,
+        self, loss: Tensor, base: Tensor, ds_t: DataStruct, pdgid_idx: Tensor, model=None, z=None,
     ) -> Tensor:
         """Add ``fac * (lv_flow + every * exp(-lv_flow) * one_step_euler)`` on firing
         steps and the barrier alone otherwise, so the per-step expectation equals
@@ -167,7 +174,7 @@ class TrainStep:
         if self.training and self.global_step % every != 0:
             return loss
 
-        sc = one_step_euler_loss(self, base, ds_t, pdgid_idx, model)
+        sc = one_step_euler_loss(self, base, ds_t, pdgid_idx, model, z=z)
         w = fac * (every if self.training else 1)
         if lvf is not None:
             w = w * torch.exp(-lvf)
@@ -180,6 +187,7 @@ class TrainStep:
 
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
         model, pieces = self.model, None
+        layers = ds_t.edep_layers
         if self.rc.len_buckets is not None:
             ds_t, pieces = self._len_pieces(ds_t)
             if len(pieces) > 1:
@@ -200,6 +208,12 @@ class TrainStep:
             base      = self.gen_base_wrapper(
                 ds_t, all_forward=not self.rc.mask_conf or self.rc.mask_conf.get("p_forward", 0.5) >= 1,
             )
+            z0 = z1 = None
+            if self.edep_ae is not None:  # the latent token's target (the AE's encoding of the true layers) and base
+                if layers is None:
+                    raise ValueError("model_conf.edep_ae needs a dataset with per-layer E_dep (E_dep_layers).")
+                z1 = self.edep_ae.encode(self._edep_dp.denorm_edep(layers).to(base.dtype))
+                z0 = torch.randn_like(z1)
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
             t = self._sample_t(ds_t)
             if (
@@ -211,6 +225,7 @@ class TrainStep:
                     torch.cat((tgt, ds_t.f.pdgids), dim=-1), ds_t.m.full, ds_t.am.full,
                 )
             ps_ = self.ps.sample(base, ds_t.f.model_in, t)
+            lat = {} if z0 is None else {"z": z0 + ps_.t * (z1 - z0)}
         # an explicit zero d, not None: the flow-map calls pass a tensor, and a None is a
         # separate dynamo guard (tests/test_compile_guards.py)
         step_extras = ({"d": torch.zeros_like(ps_.t)}
@@ -218,14 +233,18 @@ class TrainStep:
         v_out = model(
             ps_.x_t, ps_.t,
             mask=ds_t.m.full, attn_mask=ds_t.am.full,
-            types=self.types_embd[:, :ds_t.am.full.shape[1]], pdgids=pdgid_idx, **step_extras,
+            types=self.types_embd[:, :ds_t.am.full.shape[1]], pdgids=pdgid_idx, **step_extras, **lat,
         )
+        sq_lat = None
+        if lat:
+            v_out, v_z = v_out
+            sq_lat = (v_z - (z1 - z0)) ** 2
         sq = (v_out - ps_.dx_t) ** 2
-        loss, logs = self.reduce_loss(sq, ds_t)
+        loss, logs = self.reduce_loss(sq, ds_t, sq_lat)
         if logs:
             self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
 
-        loss = self._flow_map_loss(loss, base, ds_t, pdgid_idx, model)
+        loss = self._flow_map_loss(loss, base, ds_t, pdgid_idx, model, z=None if z0 is None else (z0, z1))
 
         return loss
 

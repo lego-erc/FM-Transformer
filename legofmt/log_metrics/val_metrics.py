@@ -128,6 +128,20 @@ def edep_by_primary(edep_real, edep_fake, pdgid_in, n_out) -> dict:
     return out
 
 
+def edep_layer_metrics(real: torch.Tensor, fake: torch.Tensor) -> dict:
+    """Per-layer E_dep in MeV, ``(B, n_layers)``, from the ``model_conf.edep_ae`` decoder against the truth:
+    medians over the layers that saw a deposit of the generated / true mean and spread, and the ratio of the
+    mean energy-weighted depth (in layers)."""
+    live = real.mean(0) > 0
+    l = torch.arange(real.shape[1], device=real.device, dtype=real.dtype)
+    depth = lambda E: ((E * l).sum(1) / E.sum(1).clamp(min=1e-12))[E.sum(1) > 0].mean()
+    return {
+        "val/layers/mean_ratio": (fake.mean(0) / real.mean(0))[live].median(),
+        "val/layers/sd_ratio": (fake.std(0) / real.std(0).clamp(min=1e-12))[live].median(),
+        "val/layers/depth_ratio": depth(fake) / depth(real),
+    }
+
+
 class ShowerValMetrics:
 
     def __call__(self, lego, ds_t) -> dict:
@@ -162,6 +176,12 @@ class ShowerValMetrics:
             ds_t.f.edep, _F(gen).edep, ds_t.f.in_p[..., 0, -1].long(),
             ds_t.am.out_p.sum(-1),
         ))
+        if getattr(lego, "edep_ae", None) is not None and ds_t.edep_layers is not None:
+            dp = lego._edep_dp
+            e_in = dp.pen.from_scalar(ds_t.f.in_cc[:, 0, 1:4], ds_t.f.in_cc[:, 0, 0:1]).norm(dim=-1)
+            fake = lego.edep_ae.sample(lego._edep_latents, dp.denorm_edep_row(_F(gen).edep.float(), e_in.float(),
+                                                                             ds_t.f.in_p[:, 0, -1]))
+            out.update(edep_layer_metrics(dp.denorm_edep(ds_t.edep_layers.float()), fake))
         return out
 
     @staticmethod

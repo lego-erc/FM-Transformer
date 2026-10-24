@@ -100,6 +100,19 @@ class ResolvedLEGOConfig:
     reflow_every: int
     reflow_start_epoch: int
 
+    edep_ae: dict | None   # {"config", "state_dict"} of the frozen per-layer E_dep autoencoder
+    n_lat: int             # its latent width K, flown as one extra token of the field (0 = off)
+
+
+def _edep_ae_spec(model_conf: dict) -> dict | None:
+    """``model_conf.edep_ae``: ``{path: <scripts/train_edep_ae.py output>}`` is loaded once and replaced by its
+    ``{"config", "state_dict"}`` (the path kept), so the saved flow config carries the autoencoder."""
+    spec = model_conf.get("edep_ae")
+    if spec is not None and "state_dict" not in spec:
+        spec = {**torch.load(spec["path"], map_location="cpu", weights_only=False), "path": spec["path"]}
+        model_conf["edep_ae"] = spec
+    return spec
+
 
 def _amp_dtype(precision) -> "torch.dtype | None":
     if isinstance(precision, torch.dtype):
@@ -213,7 +226,7 @@ def migrate_loss_weight_keys(model_conf: dict) -> dict:
             model_conf.setdefault(new, model_conf.pop(old))
     model_conf.pop("uncert_bins", None)
     lv = (model_conf.get("loss_weights") or {}).get("lv")
-    n_cells = 3 + int(model_conf.get("edep_cell", False))
+    n_cells = 3 + int(model_conf.get("edep_cell", False)) + int(model_conf.get("edep_ae") is not None)  # + lat
     if lv is not None and lv.numel() > n_cells:
         model_conf["loss_weights"]["lv"] = lv.view(-1, n_cells).exp().mean(0).log()
     return model_conf
@@ -288,6 +301,13 @@ def _build_resolved(
             raise ValueError(f"dl_conf.len_mode must be 'split' or 'group', got {len_mode!r}.")
         if len_mode == "split" and dl_conf["bs"] % len_split:
             raise ValueError(f"dl_conf.len_split={len_split} must divide dl_conf.bs={dl_conf['bs']}.")
+    edep_ae = _edep_ae_spec(model_conf)
+    if edep_ae is not None:
+        if (len_buckets is not None or model_conf.get("reflow_path") or model_conf.get("reflow_start_epoch", 0) > 0
+                or (model_conf.get("mask_conf") or {}).get("p_forward", 1.0) < 1):
+            raise ValueError("model_conf.edep_ae does not support training len_buckets, reflow or inverse-mask "
+                             "events (mask_conf.p_forward < 1) yet.")
+        model_args.setdefault("lat_dim", edep_ae["config"]["K"])   # the field's latent token (CFMTrafo_x)
 
     return ResolvedLEGOConfig(
         max_seq_l=max_seq_l,
@@ -338,6 +358,8 @@ def _build_resolved(
         reflow_kwargs=model_conf.get("reflow_kwargs", {}),
         reflow_every=model_conf.get("reflow_every", 1),
         reflow_start_epoch=model_conf.get("reflow_start_epoch", 0),
+        edep_ae=edep_ae,
+        n_lat=edep_ae["config"]["K"] if edep_ae else 0,
     )
 
 
