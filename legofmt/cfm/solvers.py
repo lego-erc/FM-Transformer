@@ -79,6 +79,8 @@ class Solvers:
     ) -> Tensor:
         if self.rc.n_lat:
             raise NotImplementedError("log_likelihood does not cover the model_conf.edep_ae latent token.")
+        if self.rc.edep_whiten:
+            raise NotImplementedError("log_likelihood under model_conf.edep_whiten would miss the whitening's Jacobian")
         ds_t, pdgids_idx = self._prep_solve(ds_t)
         am = ds_t.am.full.unsqueeze(-1)
         cc = ds_t.f.model_in.where(am, ds_t.f.in_cc)
@@ -121,6 +123,8 @@ class Solvers:
             x_init = self.gen_base_wrapper(ds_t)
         if x_init.shape == ds_t.f.model_in.shape:
             x_init = x_init.where(am, _F(x_init).in_p)
+        if self.rc.edep_whiten:
+            x_init = self._edep_whiten(x_init, ds_t)
         # model_conf.edep_ae: the latent z (B, K) starts from N(0, 1) and is integrated with the event; it travels
         # through chunked / bucketed packed into R extra rows of the output and is split off below
         K, C = self.rc.n_lat, x_init.shape[-1]
@@ -167,7 +171,7 @@ class Solvers:
             L = ds_t.am.full.shape[1]
             sols, z = sols[..., :L, :], sols[..., L:, :].flatten(-2)[..., :K]
             self._edep_latents = z if z.dim() == 2 else z[-1]  # the final state's, with return_intermediates
-        return sols
+        return self._edep_whiten(sols, ds_t, inverse=True) if self.rc.edep_whiten else sols
 
     def _field(self, x: Tensor, t, z: Tensor | None, **kw) -> tuple[Tensor, Tensor | None]:
         """The velocity, and that of the ``model_conf.edep_ae`` latent ``z`` (``None`` without it)."""

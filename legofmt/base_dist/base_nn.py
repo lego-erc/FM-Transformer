@@ -137,6 +137,39 @@ class BaseDist:
                 out[..., 3:3 + n_ang].exp().clamp_min(1e-3),  # kap: divisor in sample()
                 out[..., 3 + n_ang:].exp().clamp(0.1, 10.0) if out.shape[-1] > 3 + n_ang else None)
 
+    def _edep_whiten(self, f: Tensor, ds_t: DataStruct, inverse: bool = False) -> Tensor:
+        """``model_conf.edep_whiten``: the generated E_dep row in units of the event's base prior (``inverse``: back).
+
+            y = (logit(u / e_dep_max) - mu) / sig      a draw of the prior becomes N(0, 1)
+
+        No deposit (u <= 0) sits 6 prior sigmas below mu and decodes back to 0 from below 4.5; a real deposit is held
+        at 4.4, so it never turns into a pass-through. (mu, sig) come from the frozen head on ``ds_t``, so any
+        sub-batch is consistent. Options: ``edep_whiten_global`` (c, s) is one map for every event,
+        ``edep_whiten_max_sig`` caps the unit, ``edep_whiten_feed`` writes (mu, unit) on the row's direction spheres.
+        Returns a copy; ``f`` may carry a leading time axis."""
+        _, mu, sig, _, _ = self.base_head_params(ds_t)
+        mu, sig = mu.reshape(-1), sig.reshape(-1)
+        if self.rc.edep_whiten_global is not None:
+            c, s = self.rc.edep_whiten_global
+            mu, sig = torch.full_like(mu, c), torch.full_like(sig, s)
+        unit = sig if self.rc.edep_whiten_max_sig is None else sig.clamp(max=self.rc.edep_whiten_max_sig)
+        sd = sig / unit                            # one prior sigma in whitened units
+        emax, e = self.gen_base.e_dep_max, _F(f).edep
+        if inverse:
+            new = torch.where(e > -4.5 * sd, emax * torch.sigmoid(mu + unit * e), torch.zeros_like(e))
+        else:
+            y = (torch.logit((e / emax).clamp(1e-6, 1 - 1e-6)) - mu) / unit
+            new = torch.where(e > 0, torch.maximum(y, -4.4 * sd), -6.0 * sd)
+        gen = ds_t.m.full[:, 1] == 1               # only generated E_dep rows change
+        f = f.clone()                              # e still reads the caller's tensor
+        _F(f).edep.copy_(torch.where(gen, new, e))
+        if self.rc.edep_whiten_feed:
+            ones, row = torch.ones_like(mu), f[..., 1, 1:7]
+            code = torch.cat([nn.functional.normalize(torch.stack((a, ones, 0 * ones), -1), dim=-1)
+                              for a in (mu, unit.log())], -1)
+            row.copy_(torch.where(gen.unsqueeze(-1), torch.ones_like(row) if inverse else code, row))
+        return f
+
     def _out_set_feats(self, ds_t: DataStruct) -> list[Tensor]:
         """Outgoing multiplicity and per-pdgid composition, both fixed before the
         flow runs. E_dep is bimodal in them, which one logit-normal cannot hold."""

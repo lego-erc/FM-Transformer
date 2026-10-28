@@ -63,6 +63,10 @@ class ResolvedLEGOConfig:
     one_step_euler_every: int
     learned_loss_weights: bool
     edep_cell: bool
+    edep_whiten: bool            # the E_dep row in units of the base head's per-event prior (BaseDist._edep_whiten)
+    edep_whiten_max_sig: float | None  # cap on that unit (logit), so a broad prior keeps a fine MeV grid; None = no cap
+    edep_whiten_feed: bool       # hand each event's (mu, unit) to the network on the E_dep row's direction factors
+    edep_whiten_global: tuple[float, float] | None  # (c, s): one logit map y = (logit u - c) / s for every event
     dir_zoom: float | None       # theta_s of the outgoing-direction polar zoom (rad); None = off
     dir_zoom_mix: float          # linear share of that zoom; 0 = pure log
     dir_zoom_nucleons_max: int | None  # events with more outgoing nucleons (nuclear interactions) are not zoomed
@@ -326,6 +330,11 @@ def _build_resolved(
         one_step_euler_every=model_conf.get("one_step_euler_every", 1),
         learned_loss_weights=model_conf.get("learned_loss_weights", False),
         edep_cell=model_conf.get("edep_cell", False),
+        edep_whiten=model_conf.get("edep_whiten", False),
+        edep_whiten_max_sig=model_conf.get("edep_whiten_max_sig"),
+        edep_whiten_feed=model_conf.get("edep_whiten_feed", False),
+        edep_whiten_global=(tuple(model_conf["edep_whiten_global"]) if model_conf.get("edep_whiten_global") is not None
+                            else None),
         dir_zoom=dir_zoom,
         dir_zoom_mix=dir_zoom_mix,
         dir_zoom_nucleons_max=dir_zoom_nucleons_max,

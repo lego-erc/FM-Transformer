@@ -98,6 +98,9 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         if head is not None:
             self.base_head = head
             params += [p for p in self.base_head.parameters() if p.requires_grad]
+        elif self.rc.edep_whiten:
+            raise ValueError("model_conf.edep_whiten needs the base head's per-event E_dep prior (base_pretrain_batches "
+                             "> 0 or a saved base_conf.base_head, scale_dist sm_norm, Z/A/Size conditioning).")
 
         if self.rc.learned_loss_weights:
             self.lv = nn.Parameter(torch.zeros(3 + int(self.rc.edep_cell) + int(self.rc.n_lat > 0)))  # one per channel
