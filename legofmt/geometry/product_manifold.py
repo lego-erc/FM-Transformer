@@ -19,6 +19,17 @@ def sphere_logmap(x, y):
     return u * (th / su.clamp_min(torch.finfo(su.dtype).tiny))
 
 
+def sphere_expmap(x, u):
+    """``Sphere.expmap`` with its arithmetic (bit-identical), differentiable at ``u = 0`` (every conditioning row of a
+    solve): the division sees 1 where the velocity is below EPS, so the unused branch of the ``where`` carries no
+    ``0/0`` (``norm``'s backward is 0 at a zero norm)."""
+    n = u.norm(dim=-1, keepdim=True)
+    big = n > Sphere.EPS[n.dtype]
+    nu = torch.where(big, n, torch.ones_like(n))
+    retr = x + u
+    return torch.where(big, x * torch.cos(nu) + u * torch.sin(nu) / nu, retr / retr.norm(dim=-1, keepdim=True))
+
+
 class ProductManifold(Manifold):
     def __init__(self, manifolds: list, ambient_dims: tuple):
         if len(manifolds) != len(ambient_dims):
@@ -37,7 +48,10 @@ class ProductManifold(Manifold):
         return torch.cat(results, dim=-1)
 
     def expmap(self, x, u):
-        return self._batch_map("expmap", x, u)
+        return torch.cat([
+            sphere_expmap(a, b) if isinstance(man, Sphere) else man.expmap(a, b)
+            for man, a, b in zip(self.manifolds, x.split(self.ambient_dims, -1), u.split(self.ambient_dims, -1))
+        ], dim=-1)
 
     def logmap(self, x, y):
         return torch.cat([

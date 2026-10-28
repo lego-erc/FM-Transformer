@@ -263,7 +263,8 @@ class MultModel(LightningModule):
             g    = torch.randint(8, face.shape, device=face.device) if self.rc.sym_aug else None
             dirs = self.sym.canonicalize(torch.stack((x[..., -6:-3], x[..., -3:]), dim=-2), face, g)
             x[..., -6:-3], x[..., -3:] = dirs[..., 0, :], dirs[..., 1, :]
-        x[..., -6:] = self.geom_trafos.to_cube(x[..., -6:], d=self.rc.pos_scale)
+        # out of place: an in-place write over to_cube's split views breaks the gradient log_prob needs
+        x = torch.cat((x[..., :-6], self.geom_trafos.to_cube(x[..., -6:], d=self.rc.pos_scale)), dim=-1)
         return self.proj_in_(x)
 
     def _opt_train(self):
@@ -286,16 +287,39 @@ class MultModel(LightningModule):
     def on_fit_end(self):
         self._opt_eval()
 
-    def training_step(self, batch, batch_idx):
-        in_tok, counts, pdgid_in_idx = batch[:3]
-
+    def _teacher_logits(self, in_tok, counts, pdgid_in_idx):
+        """The teacher-forced pass over the count slots: ``(logits (B, S, P), out_f, in_embd)``."""
         in_embd = self.proj_in(in_tok) + self.embd_pp_(pdgid_in_idx)
         in_seq = torch.cat(
             (in_embd.unsqueeze(1), self.embd_in_(counts[:, : self.rc.max_seq_len - 1] + self._in_offsets)),
             dim=1,
         )
         out_f = self.model(in_seq, mask=None, condition=in_embd)
-        logits_f = torch.einsum("bsh,shp->bsp", out_f, self.proj_out_w) + self.proj_out_b
+        return torch.einsum("bsh,shp->bsp", out_f, self.proj_out_w) + self.proj_out_b, out_f, in_embd
+
+    def log_prob(self, in_tok, counts, pdgid_in_idx, pt_mask=None):
+        """log P of a ``forward`` draw, ``(B,)``: the count slots' log-probabilities (teacher-forced) unless the
+        pass-through token fired, plus the head's Bernoulli term for the species it covers (``pt_mask`` as
+        ``sample_passthrough`` drew it). Differentiable in ``in_tok``: the score-function term of legofmt.design's
+        gradient."""
+        if self.rc.sym_aug:
+            raise NotImplementedError("log_prob under sym_aug: proj_in draws a new cube transform per call, so the "
+                                      "counts would be scored under another one than they were sampled with")
+        self._opt_eval()
+        self.eval()
+        logits, out_f, in_embd = self._teacher_logits(in_tok, counts, pdgid_in_idx)
+        lp = logits.log_softmax(-1).gather(-1, counts.unsqueeze(-1)).squeeze(-1).sum(-1)
+        if self.pt_head is None:
+            return lp
+        pt = torch.zeros_like(lp, dtype=torch.bool) if pt_mask is None else pt_mask
+        logit = self.pt_head(out_f[:, 0] if self.pt_on_trunk else in_embd).squeeze(-1)
+        bern = torch.where(pt, F.logsigmoid(logit), F.logsigmoid(-logit)) * self._pt_pdgid_allowed[pdgid_in_idx]
+        return torch.where(pt, bern, lp + bern)
+
+    def training_step(self, batch, batch_idx):
+        in_tok, counts, pdgid_in_idx = batch[:3]
+
+        logits_f, out_f, in_embd = self._teacher_logits(in_tok, counts, pdgid_in_idx)
         ce = F.cross_entropy(
             logits_f.reshape(-1, self.rc.max_particles), counts.reshape(-1), reduction="none",
         ).view(counts.shape).mean(-1)

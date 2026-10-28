@@ -39,7 +39,6 @@ class GenerateBase:
             return self.iso_dirs(shape, incoming_rt=incoming_rt)
         return self.poles(shape, incoming_rt=incoming_rt, iso_pos=(self.base_dist == "iso_pos"))
 
-    @torch.no_grad()
     def rd_scale(self, shape, e_in):
         """Energy prior for the outgoing slots per scale_dist; returns (B, n_out, 1)."""
         if self.scale_dist == "trunc_norm":
@@ -56,7 +55,6 @@ class GenerateBase:
             raise ValueError("Unknown scale_dist")
         return e_in.view(-1, 1, 1) * u
 
-    @torch.no_grad()
     def poles(self, shape, incoming_rt, iso_pos=False, **kwargs):
         p_cc = F.normalize(incoming_rt[..., 1:4], dim=-1)
         loc_cc = incoming_rt[..., -3:]
@@ -70,7 +68,6 @@ class GenerateBase:
         base = torch.cat((e_sc, p_, x), dim=-1)
         return torch.cat((incoming_rt, base), dim=1)
 
-    @torch.no_grad()
     def iso_dirs(self, shape, incoming_rt, **kwargs):
         # naive base: isotropic momentum/position directions; energy scale from
         # rd_scale (per scale_dist), E_dep row from insert_add.
@@ -89,7 +86,6 @@ class GenerateBase:
         x = self.geom_trafos.sample_iso(shape, 1, device=device)
         return torch.cat((e, p, x), dim=-1)
 
-    @torch.no_grad()
     def insert_add(self, base):
         """Fills the E_dep row's energy cell from the (learned) sigmoid-normal
         edep_mu/edep_sig, in place."""
