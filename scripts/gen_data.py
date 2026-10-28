@@ -106,6 +106,7 @@ meta_dict = {
     "energy_kin": True,
     "cuboid_dim": cuboid_dim,
     "n_edep_layers": None if d.edep_layers is None else d.edep_layers.shape[1],
+    "edep_excess_max_mev": DataPrep.edep_excess_max(d.f.full),   # per incoming pdgid: the E_dep cap's margin
 }
 
 with open(f"{out_dir}/meta.json", "w") as f:

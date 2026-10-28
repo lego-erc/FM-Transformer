@@ -160,9 +160,7 @@ class GenerateOut(torch.nn.Module):
             sols, mask, attn_mask = self.model((cond_fm, mask, attn_mask))
         sols[..., -1] = torch.cat([sols.new_zeros(1), self.pdgids.to(sols.dtype)])[sols[..., -1].long()]
         edep = _F(sols).edep
-        for pid, excess in (() if self.dp.edep_wall else _EDEP_EXCESS_MEV.items()):   # the wall row is capped already
-            hit = pid_in == pid
-            edep[..., hit] = torch.minimum(edep[..., hit], self.dp.norm_edep(e_in[hit] + excess).to(edep))
+        edep.copy_(self._clamp_edep(edep, e_in, pid_in))
         if self.model.rc.odeint_conf.get("energy_balance", False):
             _balance_energy(sols, e_in, pid_in, self.pen, self.dp)
         if self.model.rc.odeint_conf.get("exit_consistency", False):
@@ -176,6 +174,16 @@ class GenerateOut(torch.nn.Module):
                 self.edep_layers[run] = ae.sample(self.model._edep_latents, self.dp.denorm_edep_row(
                     _F(sols).edep[run].float(), e_in[run].float(), pid_in[run]))
         return sols, mask, attn_mask
+
+    def _clamp_edep(self, edep: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor) -> torch.Tensor:
+        """The E_dep row capped at E_in + the species' excess on the log row (a wall row is capped by
+        construction): the training data's largest excess (model_conf.edep_excess_mev), or for checkpoints from
+        before it the hand-set _EDEP_EXCESS_MEV; out of place, so legofmt.design can differentiate through it."""
+        log_row = ~self.dp.edep_wall_mask(pid_in)
+        for pid, excess in (self.dp.edep_excess_mev or _EDEP_EXCESS_MEV).items():
+            hit = (pid_in == pid) & log_row
+            edep = torch.where(hit, torch.minimum(edep, self.dp.norm_edep(e_in + excess).to(edep)), edep)
+        return edep
 
     def _model_cond(self, cond: torch.Tensor, prepped: bool) -> torch.Tensor:
         cond_model = cond.clone()
@@ -199,10 +207,16 @@ class GenerateOut(torch.nn.Module):
     def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None, passthrough=True):
         """Geant4-shaped entry point: broadcast the per-gun arguments to ``B * n`` events
         and return ``{per_event, per_particle, per_voxel}`` in *model* normalisation
-        (``per_event["E_dep"]`` is the normalised scalar, not MeV)."""
+        (``per_event["E_dep"]`` is the normalised scalar, not MeV, always on the log/linear ``norm_edep`` scale that
+        callers decode with ``edep_log_min``: a ``model_conf.edep_wall`` row is re-encoded on it here)."""
         sols, _, _ = self(self._g4_cond(n, pos, mom, energy, density, size, pdgids, Z, A), passthrough=passthrough)
         s = _F(sols)
-        per_event = {"E_dep": s.edep}
+        edep = s.edep
+        if self.dp.edep_wall:
+            e_in = self.dp.pen.from_scalar(s.in_cc[:, 0, 1:4], s.in_cc[:, 0, 0:1]).norm(dim=-1)
+            edep = self.dp.norm_edep(self.dp.denorm_edep_row(edep.double(), e_in.double(),
+                                                             s.in_p[:, 0, -1])).to(edep.dtype)
+        per_event = {"E_dep": edep}
         per_event.update({k: s.cond(k) for k in self.cond_names})
         out = {
             "per_event": per_event,
