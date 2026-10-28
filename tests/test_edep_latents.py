@@ -282,3 +282,49 @@ def test_latent_token_with_the_geometry_encoder() -> None:
     m.eval()
     sols = m.solve(ds, step_size=0.5, method="euler")
     assert sols.shape == x.shape and m._edep_latents.shape == (2, K)
+
+
+def _whitened(train: bool = False) -> LEGOLtng:
+    """model_conf.edep_whiten (needs the base head) together with the latent token: both live in solve / _step."""
+    from test_helpers import _head_config
+    cfg = _head_config(True)
+    cfg["config"]["model_conf"].update(edep_whiten=True, edep_ae=_ae_spec())
+    cfg["config"]["model_conf"]["model_args"]["ntypes"] = 7   # len(cond_scalars) + 3; _tiny_config's 4 fits one scalar
+    torch.manual_seed(0)
+    m = LEGOLtng(cfg)
+    m.on_fit_start()
+    m.train(train)
+    return m
+
+
+def _whitened_batch(B: int = 8) -> DataStruct:
+    from test_helpers import _head_batch
+    ds = _head_batch(torch.full((B,), 0.5), torch.tensor([1, 2] * (B // 2)))
+    ds.edep_layers = torch.rand(B, N_LAYERS, generator=torch.Generator().manual_seed(1)) * 0.01
+    return ds
+
+
+def test_whitened_solve_returns_u_scale_rows_and_latents() -> None:
+    # a field pushing the whitened E_dep cell by +1 (one prior sigma) keeps u inside the channel once solve undoes the
+    # whitening -- after splitting the latent rows off, which must not reach the E_dep row or the layout
+    m = _whitened()
+    ds = _whitened_batch()
+
+    def push(x, t, *a, z=None, **k):
+        v = torch.zeros_like(x)
+        v[:, 1, 0] = 1.0
+        return v if z is None else (v, torch.ones_like(z))
+    m.model.forward = push
+    sols = m.solve(ds, method="euler", step_size=0.25)
+    assert sols.shape == ds.f.model_in.shape
+    e = sols[:, 1, 0]
+    assert ((e > 0) & (e < m.gen_base.e_dep_max)).all(), e
+    assert m._edep_latents.shape == (len(ds), K) and torch.isfinite(m._edep_latents).all()
+
+
+def test_whitened_training_step_reaches_the_latent_token() -> None:
+    m = _whitened(train=True)
+    loss = m._step(_whitened_batch(), 0)
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert m.model.vf.lat_out.weight.grad.abs().sum() > 0

@@ -224,6 +224,9 @@ class TrainStep:
                 ds_t = DataStruct(
                     torch.cat((tgt, ds_t.f.pdgids), dim=-1), ds_t.m.full, ds_t.am.full,
                 )
+            if self.rc.edep_whiten:  # from here to the loss (flow map included) the E_dep row is whitened
+                base = self._edep_whiten(base, ds_t)
+                ds_t = DataStruct(self._edep_whiten(ds_t.f.full, ds_t), ds_t.m.full, ds_t.am.full)
             ps_ = self.ps.sample(base, ds_t.f.model_in, t)
             lat = {} if z0 is None else {"z": z0 + ps_.t * (z1 - z0)}
         # an explicit zero d, not None: the flow-map calls pass a tensor, and a None is a
