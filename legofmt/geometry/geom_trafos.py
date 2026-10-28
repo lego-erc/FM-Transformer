@@ -52,6 +52,10 @@ class GeomTrafos:
             return self._batched(cc, 3, "to_sph")
         cc = F.normalize(cc, dim=-1)
         x, y, z = cc.movedim(-1, 0)
+        if cc.requires_grad:   # on (or subnormally close to) the z axis, where a gun along z sits, hypot / atan2 have
+            # no usable gradient: detach the inputs there (values unchanged; sampling keeps CPU's strided-input path)
+            pole = x * x + y * y < torch.finfo(x.dtype).tiny
+            x, y = torch.where(pole, x.detach(), x), torch.where(pole, y.detach(), y)
         theta = torch.atan2(torch.hypot(x, y), z)
         phi = torch.atan2(y, x)
         return torch.stack((theta, phi), dim=-1)
@@ -71,8 +75,12 @@ class GeomTrafos:
         st, ct = sph[..., 0:1].sin(), sph[..., 0:1].cos()
         sp, cp = sph[..., 1:2].sin(), sph[..., 1:2].cos()
         sa, ca = alpha.sin(), alpha.cos()
-        theta = torch.acos((st * sp * sa + ct * ca).clamp(-1 + 1e-8, 1 - 1e-8))
-        phi = torch.atan2(st * sp * ca - ct * sa, st * cp) + beta
+        c = (st * sp * sa + ct * ca).clamp(-1 + 1e-8, 1 - 1e-8)   # in fp32 the bound rounds to exactly +-1
+        theta = torch.acos(torch.where(c.abs() >= 1, c.detach(), c))   # acos has an infinite slope at +-1
+        y, x = st * sp * ca - ct * sa, st * cp
+        # within ~1e-19 of the pole x^2 + y^2 is subnormal and atan2's backward overflows: no gradient there
+        pole = x * x + y * y < torch.finfo(x.dtype).tiny
+        phi = torch.atan2(torch.where(pole, y.detach(), y), torch.where(pole, x.detach(), x)) + beta
         return torch.cat((theta, phi), dim=-1)
 
     def sample(
@@ -92,7 +100,10 @@ class GeomTrafos:
         loc_theta, loc_phi = loc.split(1, -1)
         if tanh_theta:
             t = (torch.randn(n, device=loc_cc.device) / kappa).tanh().abs()
-            samples_theta = torch.pi * (t if ang_pow is None else t.pow(ang_pow))
+            if ang_pow is not None:   # a CUDA normal draw is exactly 0 about once in 2**24: t^p has an infinite slope there
+                pos = t > 0
+                t = torch.where(pos, torch.where(pos, t, torch.ones_like(t)).pow(ang_pow), torch.zeros_like(t))
+            samples_theta = torch.pi * t
         else:
             samples_theta = ((
                 2 / kappa * torch.randn(n, device=loc_cc.device) + torch.pi

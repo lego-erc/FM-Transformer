@@ -99,8 +99,7 @@ class LEGOLtngDirect(LEGOLtng):
             self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
         return loss
 
-    @torch.no_grad()
-    def solve(
+    def _solve(   # the inherited no_grad ``solve`` and ``_solve_by_length`` both dispatch here
         self,
         ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]",
         x_init: Tensor | None = None,

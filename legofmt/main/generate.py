@@ -277,11 +277,19 @@ class GenerateOut(torch.nn.Module):
     def gen_batch(self, cond: torch.Tensor, passthrough: bool = True):
         """Sample per-pdgid counts, truncate to ``max_seq_l``, and build the padded
         ``(cond_fm, mask, attn_mask)`` triple the flow consumes."""
+        return self.build_batch(cond, *self.sample_counts(cond, passthrough))
+
+    def sample_counts(self, cond: torch.Tensor, passthrough: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
+        """The multiplicity model's draw for ``cond`` (model layout): pass-through flags and raw per-slot counts (as
+        ``MultModel.forward`` returns them; ``MultModel.log_prob`` scores them)."""
         mult_in, pdgid_in_idx = self._mult_in(cond)
         pt_mask = (self.gen_mult.sample_passthrough(mult_in, pdgid_in_idx) if passthrough
                    else torch.zeros(len(cond), dtype=torch.bool, device=cond.device))
-        mult = self.gen_mult((mult_in, None, pdgid_in_idx), pt_mask=pt_mask)
-        mult = mult[:, self.ptype_idx] * self.ptype_in_mask
+        return pt_mask, self.gen_mult((mult_in, None, pdgid_in_idx), pt_mask=pt_mask)
+
+    def build_batch(self, cond: torch.Tensor, pt_mask: torch.Tensor, counts: torch.Tensor):
+        """The padded ``(cond_fm, mask, attn_mask)`` triple for a draw, truncated to ``max_seq_l``."""
+        mult = counts[:, self.ptype_idx] * self.ptype_in_mask
 
         max_particles = self.max_seq_l - (self.n_prefix + 1)
         total = mult.sum(-1, keepdim=True)

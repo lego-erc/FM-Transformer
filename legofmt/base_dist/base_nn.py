@@ -112,8 +112,9 @@ class BaseDist:
         d       = self.cuboid_unit.to(u)
         p       = pos / pos.abs().amax(-1, keepdim=True).clamp_min(1e-8) * d  # pos is dir(x / d)
         ok_u    = u.abs() > 1e-6
-        tf      = torch.where(ok_u, (u.sign() * d - p) / u, torch.full_like(u, 4.0))
-        tb      = torch.where(ok_u, (p + u.sign() * d) / u, torch.full_like(u, 4.0))
+        u_safe  = torch.where(ok_u, u, torch.ones_like(u))   # the discarded branch must not divide by 0 (backward)
+        tf      = torch.where(ok_u, (u.sign() * d - p) / u_safe, torch.full_like(u, 4.0))
+        tb      = torch.where(ok_u, (p + u.sign() * d) / u_safe, torch.full_like(u, 4.0))
         chord   = ((tf.amin(-1) + tb.amin(-1)).clamp(0.0, 3.5) / 2).unsqueeze(-1)
         x       = torch.cat((ds_t.f.in_cc[..., 0], species, chord, t.log().unsqueeze(-1)), dim=-1)
         if (self.rc.config.get("base_conf") or {}).get("base_head_nout", False):
@@ -196,9 +197,11 @@ class BaseDist:
 
     def _fit_base_head(self, ds_t, fwd) -> None:
         """Run the head, hand its outputs to the sampler, and cache the moment loss
-        while the head is trainable."""
+        while the head is trainable. With grad mode on (legofmt.design) the frozen head keeps its graph to the
+        inputs, so the draw is reparameterized in them; only a head being fitted hands the sampler detached values."""
         learn = self.model.training and self.base_head[-1].weight.requires_grad
-        with torch.set_grad_enabled(learn):
+        keep = (lambda v: v.detach()) if learn else (lambda v: v)
+        with torch.set_grad_enabled(learn or torch.is_grad_enabled()):
             s, mu, sig, kap, pw = self.base_head_params(ds_t)
             if kap.shape[-1] > 1:   # ang_species: one column per species -> one value per slot
                 pid = ds_t.f.out_p[..., -1]
@@ -208,11 +211,11 @@ class BaseDist:
                 pw  = None if pw is None else pw.gather(1, idx)
             if learn:
                 self._base_head_loss = self._base_moment_loss(ds_t, fwd, s, mu, sig, kap, pw)
-        self.gen_base.sm_scale = s.detach().unsqueeze(-1)
-        self.gen_base.edep_mu  = mu.detach()
-        self.gen_base.edep_sig = sig.detach()
-        self.gen_base.kappa    = kap.detach()
-        self.gen_base.ang_pow  = None if pw is None else pw.detach()
+        self.gen_base.sm_scale = keep(s).unsqueeze(-1)
+        self.gen_base.edep_mu  = keep(mu)
+        self.gen_base.edep_sig = keep(sig)
+        self.gen_base.kappa    = keep(kap)
+        self.gen_base.ang_pow  = None if pw is None else keep(pw)
 
     def _ot_couple(self, base: Tensor, ds_t, data: Tensor) -> Tensor:
         """Per-event Hungarian assignment of base slots to data slots, blocked across

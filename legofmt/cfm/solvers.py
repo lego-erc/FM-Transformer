@@ -20,7 +20,7 @@ from flow_matching.solver import ODESolver
 
 from legofmt.data.struct import DataStruct, _F
 
-from legofmt.cfm.project_model import is_compiled
+from legofmt.cfm.project_model import is_compiled, uncompiled
 from legofmt.compat import dynamic_shape_attention
 
 from legofmt.mod_comps.config import _amp_dtype, resolve_len_buckets
@@ -103,7 +103,11 @@ class Solvers:
         return log_ll
 
     @torch.no_grad()
-    def solve(
+    def solve(self, *args, **kwargs) -> Tensor:
+        """``_solve`` under ``torch.no_grad``: every sampling caller; ``_solve`` keeps the graph (legofmt.design)."""
+        return self._solve(*args, **kwargs)
+
+    def _solve(
         self,
         ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]",
         x_init: Tensor | None = None,
@@ -159,10 +163,15 @@ class Solvers:
                 return_intermediates=return_intermediates, **extras,
             )
 
-        sols = self.chunked(
-            _sample, x_init, ds_t.m.full, ds_t.am.full, pdgids_idx, *z_init,
-            split_size=split_size, cat_dim=-3, buckets=buckets,
-        )
+        pm = uncompiled(self.model)
+        old, pm.no_detach = pm.no_detach, True   # the field sees x with its graph (inert under solve's no_grad)
+        try:
+            sols = self.chunked(
+                _sample, x_init, ds_t.m.full, ds_t.am.full, pdgids_idx, *z_init,
+                split_size=split_size, cat_dim=-3, buckets=buckets,
+            )
+        finally:
+            pm.no_detach = old
         if K:
             L = ds_t.am.full.shape[1]
             sols, z = sols[..., :L, :], sols[..., L:, :].flatten(-2)[..., :K]
@@ -257,7 +266,7 @@ class Solvers:
         # odeint_conf may gain len_buckets after construction (lego_eval's per-model odeint override)
         buckets = self.rc.gen_len_buckets or resolve_len_buckets(self.rc.odeint_conf.get("len_buckets"), L_max)
         if buckets is None:
-            return self.solve(ds_t, x_init=base, **kw)
+            return self._solve(ds_t, x_init=base, **kw)
         buckets = [min(b, L_max) for b in buckets]
         lengths, order = ds_t.am.full.sum(1).sort()
         counts = torch.bincount(lengths, minlength=L_max + 1).cumsum(0)[buckets].tolist()
@@ -265,7 +274,7 @@ class Solvers:
         sols, lats, a = [], [], 0
         for L, b in zip(buckets, counts):
             if b > a:
-                sol = self.solve(ds_t[a:b].trim(L), x_init=base[a:b, :L], **kw)
+                sol = self._solve(ds_t[a:b].trim(L), x_init=base[a:b, :L], **kw)
                 sols.append(F.pad(sol, (0, 0, 0, L_max - L)))
                 lats.append(self._edep_latents)
             a = b
@@ -275,6 +284,10 @@ class Solvers:
 
     @torch.no_grad()
     def forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None) -> tuple:
+        return self._forward(batch, _batch_idx)
+
+    def _forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None) -> tuple:
+        """``forward`` without ``torch.no_grad`` (legofmt.design differentiates through it)."""
         self._to_eval()
 
         cfg = self.rc.odeint_conf
