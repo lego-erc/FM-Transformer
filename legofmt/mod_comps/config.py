@@ -179,6 +179,14 @@ def _resolve_fresh(config: dict) -> ResolvedLEGOConfig:
         model_conf.setdefault("energy_kin", bool(meta["energy_kin"]))
     if "cuboid_dim" in meta:
         model_conf.setdefault("cuboid_dim", meta["cuboid_dim"])
+    if "edep_excess_max_mev" in meta:   # per incoming pdgid, the data's largest E_dep - E_in: the E_dep cap's margin
+        model_conf.setdefault("edep_excess_mev",
+                              {int(float(p)): float(m) for p, m in meta["edep_excess_max_mev"].items()})
+    elif model_conf.get("edep_wall") and "edep_excess_mev" not in model_conf:   # a dataset older than the key
+        from legofmt.data.prep import DataPrep
+        set_layout(model_conf["cond_scalars"])
+        f = torch.load(config["dl_conf"]["data_path"], map_location="cpu", mmap=True)[0]
+        model_conf["edep_excess_mev"] = DataPrep.edep_excess_max(f)
     model_args.setdefault("ntypes", len(model_conf["cond_scalars"]) + 3)
     # ``pdgids`` lives at model_conf scope (one level above model_args) so
     # it is preserved by the manual torch.save round-trip in scripts/train.py.
