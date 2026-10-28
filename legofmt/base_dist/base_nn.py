@@ -15,6 +15,7 @@ Members resolved through ``self`` and owned by ``LEGOLtng``: ``rc``, ``model``,
 """
 
 from dataclasses import replace
+from itertools import chain, repeat
 
 import torch
 from torch import Tensor, nn
@@ -70,7 +71,10 @@ def build_base_head(rc, gen_base) -> nn.Sequential | None:
         n_in += len(rc.pdgids_template) + 2
     n_ang = len(rc.pdgids_template) + 1 if bc.get("ang_species", False) else 1
     n_out = 3 + n_ang * (1 + int(bc.get("ang_shape", False)))
-    head = nn.Sequential(nn.Linear(n_in, 16), nn.Mish(), nn.Linear(16, n_out))
+    dims = [n_in, *bc.get("base_head_hidden", [16])]  # hidden widths; 16 under-fits E_dep's prior
+    head = nn.Sequential(*(m for a, b in zip(dims, dims[1:]) for m in (nn.Linear(a, b), nn.Mish())),
+                         nn.Linear(dims[-1], n_out))
+    last = f"{len(head) - 1}.weight"
     with torch.no_grad():
         head[-1].weight.zero_()
         head[-1].bias.copy_(torch.tensor(
@@ -78,11 +82,11 @@ def build_base_head(rc, gen_base) -> nn.Sequential | None:
             + [float(gen_base.kappa)] * n_ang + [1.0] * (n_out - 3 - n_ang)).log())
         if hs is None or hs.keys() != head.state_dict().keys():
             return head  # fresh head: zero-init output layer, priors in the bias
-        if hs["0.weight"].shape != head[0].weight.shape:
-            return head   # base_head_nout toggled: re-pretrain, do not mis-load
-        if hs["2.weight"].shape[0] < head[-1].weight.shape[0]:
+        if any(hs[k].shape != v.shape for k, v in head[:-1].state_dict().items()):
+            return head   # base_head_nout / base_head_hidden toggled: re-pretrain, do not mis-load
+        if hs[last].shape[0] < head[-1].weight.shape[0]:
             return head   # ang_shape / ang_species toggled on: re-pretrain, do not freeze at pow=1
-        if hs["2.weight"].shape == head[-1].weight.shape:
+        if hs[last].shape == head[-1].weight.shape:
             head.load_state_dict(hs)
         else:
             load_legacy_base_head(head, hs)
@@ -263,10 +267,12 @@ class BaseDist:
         noise = base if noise is None else torch.where(fwd.view(-1, 1, 1), base, noise)
         return torch.where((m == 1).unsqueeze(-1), noise, data)
 
-    def pretrain_base(self, batches, lr: float = 1e-2) -> float:
+    def pretrain_base(self, batches, lr: float = 1e-2, steps: int | None = None) -> float:
         """Fit the base head alone on ``batches`` with Adam, then freeze it: the head
-        is never trained alongside the flow. Returns the final moment loss."""
+        is never trained alongside the flow. ``steps`` cosine-anneals the lr to lr/100
+        over that many steps. Returns the final moment loss."""
         opt          = torch.optim.Adam(self.base_head.parameters(), lr=lr)
+        sched        = None if steps is None else torch.optim.lr_scheduler.CosineAnnealingLR(opt, steps, lr / 100)
         was_training = self.model.training
         rc           = self.rc
         self.rc      = replace(rc, ot_coupling=False)
@@ -284,6 +290,8 @@ class BaseDist:
                     continue
                 self._base_head_loss.backward()
                 opt.step()
+                if sched is not None:
+                    sched.step()
                 ot = self._base_head_loss.item()
         finally:
             self.model.train(was_training)
@@ -303,8 +311,9 @@ class BaseDist:
                 loader = self._make_loader(
                     self._train_ds, shuffle=True, bs=self.rc.base_pretrain_bs
                 )
-                final = self.pretrain_base(b.to(dev) for _, b in zip(
-                    range(self.rc.base_pretrain_batches), loader))
+                final = self.pretrain_base((b.to(dev) for _, b in zip(  # one reshuffled epoch after another
+                    range(self.rc.base_pretrain_batches), chain.from_iterable(repeat(loader)))),
+                    steps=self.rc.base_pretrain_batches)
                 self.base_head.cpu()
                 print(f"base_head: pretrained on {self.rc.base_pretrain_batches} "
                       f"batches (final moment loss {final:.4f}), frozen")
