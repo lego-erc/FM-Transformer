@@ -83,6 +83,39 @@ def test_saved_head_is_rebuilt_and_always_frozen() -> None:
     assert not model.base_head[-1].weight.requires_grad
 
 
+def test_base_head_hidden_sets_the_layer_widths() -> None:
+    # the 16-unit default under-fits E_dep's prior (sig 7.8x the Geant4 sd on the
+    # 1 GeV proton survivors), so the hidden layers are configurable
+    cfg = _config(FULL_SCALARS)
+    cfg["config"]["base_conf"]["base_head_hidden"] = [32, 8]
+    head = LEGOLtng(cfg).base_head
+    assert [m.out_features for m in head if isinstance(m, torch.nn.Linear)] == [32, 8, 4]
+    assert not head[-1].weight.any()   # zero-init output layer, priors in the bias
+
+
+def test_saved_deep_head_is_reloaded_frozen() -> None:
+    cfg = _config(FULL_SCALARS)
+    cfg["config"]["base_conf"]["base_head_hidden"] = [32, 8]
+    hs = {k: torch.randn_like(v) for k, v in LEGOLtng(cfg).base_head.state_dict().items()}
+    cfg = _config(FULL_SCALARS, base_pretrain_batches=0, base_head=hs)
+    cfg["config"]["base_conf"]["base_head_hidden"] = [32, 8]
+    head = LEGOLtng(cfg).base_head
+    assert torch.equal(head[-1].weight, hs["4.weight"])
+    assert not head[-1].weight.requires_grad
+
+
+def test_saved_head_of_other_hidden_widths_is_rebuilt_fresh() -> None:
+    # same depth and first layer, another inner width: the keys match, but the head must not be loaded
+    cfg = _config(FULL_SCALARS)
+    cfg["config"]["base_conf"]["base_head_hidden"] = [32, 8]
+    hs = {k: torch.randn_like(v) for k, v in LEGOLtng(cfg).base_head.state_dict().items()}
+    cfg = _config(FULL_SCALARS, base_pretrain_batches=0, base_head=hs)
+    cfg["config"]["base_conf"]["base_head_hidden"] = [32, 16]
+    head = LEGOLtng(cfg).base_head
+    assert [m.out_features for m in head if isinstance(m, torch.nn.Linear)] == [32, 16, 4]
+    assert not head[-1].weight.any()
+
+
 def test_no_head_without_sm_norm() -> None:
     assert not hasattr(
         LEGOLtng(_config(FULL_SCALARS, scale_dist="uniform")),
