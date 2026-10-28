@@ -121,6 +121,35 @@ def test_hadron_survivor_loses_exactly_its_deposit(codec) -> None:
     assert float(e[1]) == pytest.approx(0.5, rel=1e-4)
 
 
+def test_em_only_survivor_closes_at_any_share(codec) -> None:
+    """A 1 GeV proton crossing the 108.8 mm W/Si stack keeps 75-79% of E_in; when everything else out is a gamma /
+    e+- Geant4's balance is exact (residual 0.00 MeV up to q90, 37.8% of events) -- the 90% rule never fired there."""
+    pen, dp = codec
+    f = _event(pen, dp, 1000.0, 230.0, [(2212, 700.0), (22, 2.0)])
+    _run(pen, dp, f, 1000.0, 2212)
+    _, e = _decode(pen, dp, f, 1000.0)
+    assert float(e[0]) == pytest.approx(768.0, abs=1e-2)
+    assert float(e[1]) == pytest.approx(2.0, rel=1e-4)
+
+
+def test_nuclear_survivor_below_the_share_is_left_alone(codec) -> None:
+    """A neutron out marks a nuclear interaction, whose balance is open (Geant4 residual median 100 MeV)."""
+    pen, dp = codec
+    f = _event(pen, dp, 1000.0, 180.0, [(2212, 700.0), (2112, 50.0)])
+    before = f.clone()
+    _run(pen, dp, f, 1000.0, 2212)
+    assert torch.equal(before.nan_to_num(), f.nan_to_num())
+
+
+def test_survivor_with_too_large_a_deposit_leaves_at_the_cutoff(codec) -> None:
+    """E_dep + others > E_in leaves the leader a negative budget: it leaves at the cutoff (to_scalar_e's clamp)."""
+    pen, dp = codec
+    f = _event(pen, dp, 1000.0, 990.0, [(2212, 760.0), (22, 20.0)])
+    _run(pen, dp, f, 1000.0, 2212)
+    _, e = _decode(pen, dp, f, 1000.0)
+    assert e.isfinite().all() and float(e[0]) == pytest.approx(CUT, rel=1e-3)
+
+
 def test_nuclear_interaction_is_left_alone(codec) -> None:
     """No outgoing proton keeps > 90% of E_in: Geant4's balance is not closed there (fragments, binding)."""
     pen, dp = codec

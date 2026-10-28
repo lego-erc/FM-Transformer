@@ -28,9 +28,11 @@ _EDEP_EXCESS_MEV = {11: 0.0, -11: 1.022, 22: 0.0, 2212: 0.0, 2112: 10.0, 211: 15
 def _balance_energy(sols: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor, pen, dp) -> None:
     """Close the kinetic balance E_in = E_dep + sum E_out + 2 m_e (n_e+ out - n_e+ in) per event in place, keeping
     the generated E_dep. e+-/gamma in: every outgoing energy is scaled to that budget, and an absorbed one (nothing
-    leaves) deposits the budget. Hadron in: only a survivor (the leading outgoing particle is the incoming species
-    with > 90% of E_in) changes, to the budget minus the others; a nuclear interaction, whose Geant4 balance is
-    open (fragments, binding), is left alone. Only valid where the data's own balance closes (the 0.1 MeV-cutoff
+    leaves) deposits the budget. Hadron in: only a survivor (the leading outgoing particle is the incoming species,
+    with > 90% of E_in or with nothing but gammas / e+- beside it) changes, to the budget minus the others; a nuclear
+    interaction, whose Geant4 balance is open (fragments, binding), is left alone. The second rule is what a thick
+    block needs: a 1 GeV p / pi+ crossing the 108.8 mm W/Si stack keeps 72-81%, and Geant4 closes those events
+    exactly (residual 0.00 MeV to q90). Only valid where the data's own balance closes (the 0.1 MeV-cutoff
     plates, not a 10 MeV cutoff), hence opt-in."""
     s = _F(sols)
     e, pid = s.out_p[..., 0], s.out_p[..., -1]                        # (B, K) slots; per event (B, 1)
@@ -43,8 +45,10 @@ def _balance_energy(sols: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor
     budget = (e_in - dp.denorm_edep_row(s.edep.double(), e_in[:, 0], pid_in[:, 0])[:, None] - pair).clamp_min(0.0)
     em = ((pid_in.abs() == 11) | (pid_in == 22)) & (e_in_n > 1e-6)  # at the cutoff the log ratio is 0/0
     lead_e, lead = E.max(-1, keepdim=True)
-    surv = ~em & (e_in_n > 1e-6) & (lead_e > 0.9 * e_in) & (pid.gather(-1, lead) == pid_in)
-    w = torch.where(em, E / tot, surv * F.one_hot(lead[:, 0], E.shape[-1]))  # who takes the residual budget - tot
+    is_lead = F.one_hot(lead[:, 0], E.shape[-1]).bool()
+    em_rest = ~(live & ~is_lead & (pid.abs() != 11) & (pid != 22)).any(-1, keepdim=True)  # no other hadron / ion out
+    surv = ~em & (e_in_n > 1e-6) & (pid.gather(-1, lead) == pid_in) & ((lead_e > 0.9 * e_in) | em_rest)
+    w = torch.where(em, E / tot, surv * is_lead)                    # who takes the residual budget - tot
     absorbed = (em & (tot == 0))[:, 0]                              # nothing leaves: the deposit is the budget
     s.edep[absorbed] = dp.norm_edep_row((e_in - pair)[:, 0], e_in[:, 0], pid_in[:, 0])[absorbed].to(s.edep.dtype)
     e.copy_(torch.where(w > 0, 1 - pen.to_scalar_e(E + w * (budget - tot)) / e_in_n, e.double()))
