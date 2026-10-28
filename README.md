@@ -119,7 +119,9 @@ and the constructor pulls both keys out. `MultModel` follows the same pattern.
 `scripts/train.py <config>` is the reference entry point: devices, precision,
 compile, seeds and logging (Comet or CSV) come from the YAML's `run` / `logging`
 sections, and `warmup_cosine`'s `total_steps` is the trainer's exact step count
-(`run.dataset_size` only seeds a construction placeholder).
+(`run.dataset_size` only seeds a construction placeholder). An optional
+`run.max_steps` ends training after that many optimizer steps if `run.epochs`
+has not ended it first, and the schedule then spans exactly those steps.
 
 ### Generation — lower-level API
 

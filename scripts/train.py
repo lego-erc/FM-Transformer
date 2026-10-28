@@ -108,6 +108,7 @@ if log_conf["comet"]:
 
 trainer = ltng.Trainer(
     max_epochs=epochs,
+    max_steps=run.get("max_steps") or -1,  # optimizer steps; whichever of the two ends first (and sets the LR schedule)
     accelerator="gpu",
     devices=devices,
     num_nodes=nodes,

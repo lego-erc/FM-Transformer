@@ -303,10 +303,13 @@ def _build_resolved(
             raise ValueError(f"dl_conf.len_split={len_split} must divide dl_conf.bs={dl_conf['bs']}.")
     edep_ae = _edep_ae_spec(model_conf)
     if edep_ae is not None:
-        if (len_buckets is not None or model_conf.get("reflow_path") or model_conf.get("reflow_start_epoch", 0) > 0
+        # len_mode group keeps a batch whole and in order (the per-layer targets stay with their events); split
+        # reorders and runs pieces, which do not carry the latent token
+        if ((len_buckets is not None and len_mode != "group") or model_conf.get("reflow_path")
+                or model_conf.get("reflow_start_epoch", 0) > 0
                 or (model_conf.get("mask_conf") or {}).get("p_forward", 1.0) < 1):
-            raise ValueError("model_conf.edep_ae does not support training len_buckets, reflow or inverse-mask "
-                             "events (mask_conf.p_forward < 1) yet.")
+            raise ValueError("model_conf.edep_ae does not support training len_buckets in split mode, reflow or "
+                             "inverse-mask events (mask_conf.p_forward < 1) yet.")
         model_args.setdefault("lat_dim", edep_ae["config"]["K"])   # the field's latent token (CFMTrafo_x)
 
     return ResolvedLEGOConfig(

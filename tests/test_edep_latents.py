@@ -220,6 +220,25 @@ def test_unsupported_combinations_are_refused(bad: dict) -> None:
         resolve_legoltng_config(cfg)
 
 
+def test_group_buckets_train_with_the_latent_token() -> None:
+    # len_mode group never reorders or splits a batch (the loader groups lengths, the step trims to one bucket), so
+    # the per-layer targets stay aligned with their events and the plain field carries z
+    cfg = _config()
+    cfg["config"]["dl_conf"].update(len_buckets=[4, 5], len_mode="group")
+    torch.manual_seed(0)
+    m = LEGOLtng(cfg)
+    m.on_fit_start()
+    m.train()
+    ds = _batch()
+    ds.m.full[:, 4], ds.am.full[:, 4] = 0, False   # every event one slot shorter: the batch is trimmed to bucket 4
+    ds = m.on_before_batch_transfer(ds, 0)
+    assert ds.f.full.shape[1] == 4 and ds.edep_layers.shape == (2, N_LAYERS)
+    loss = m._step(ds, 0)
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert m.model.vf.lat_out.weight.grad.abs().sum() > 0
+
+
 def test_without_the_autoencoder_nothing_changes() -> None:
     m = _model(with_ae=False)
     assert m.edep_ae is None and m.rc.n_lat == 0 and not hasattr(m.model.vf, "lat_in")
