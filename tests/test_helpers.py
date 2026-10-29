@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import torch
 
 from legofmt.data.dataloaders import LEGODataset
+from legofmt.data.packed import PackedData
 from legofmt.data.prep import DataPrep
 from legofmt.data.struct import DataStruct, _F
 from legofmt.distill.reflow import LEGOLtngDirect
@@ -205,3 +207,31 @@ def prepped_padded(cond=("Density",), layers=False, n=6, k=4) -> tuple:
     n_prefix = len(cond) + 1
     assert (d.am.full[:, n_prefix + 1:].sum(1) == 0).any(), "no zero-outgoing event survived prep"
     return (d.f.full, d.m.full, d.am.full) + ((d.edep_layers,) if layers else ())
+
+
+PACKED_COND = ("Density", "Z", "A", "Size")
+
+
+def packed_prep(**kw) -> DataPrep:
+    """The DataPrep the packed-dataset tests load ``write_two_dirs`` with."""
+    return DataPrep({"cutoff_mev": 10.0, "manifold": MANIFOLD, "proj_ray": False, "cond_scalars": list(PACKED_COND),
+                     "energy_kin": True, "max_energy": 300.0, **kw})
+
+
+def write_two_dirs(tmp_path: Path, cond=PACKED_COND, layers=True) -> tuple[Path, Path, Path]:
+    """The same ``prepped_padded`` events as ``pad/`` (only ``data_prepped.pt``), ``pk/`` (only
+    ``data_packed.pt``) and ``both/`` (both files), each with a ``meta.json``."""
+    t = prepped_padded(cond, layers)
+    packed = PackedData.from_padded(*t[:3], n_prefix=len(cond) + 1, edep_layers=t[3] if layers else None)
+    meta = {"ntokens": t[0].shape[1], "particles": [22.0, 2212.0], "particles_in": [2212.0],
+            "cutoff_mev": 10.0, "cond_scalars": list(cond), "energy_kin": True, "max_energy": 300.0}
+    pad, pk, both = dirs = tuple(tmp_path / n for n in ("pad", "pk", "both"))
+    for d in dirs:
+        d.mkdir()
+        fmt = {} if d == pad else {"format": "packed", "n_events": len(packed)}   # as the converter writes
+        (d / "meta.json").write_text(json.dumps({**meta, **fmt}))
+        if d != pk:
+            torch.save(t, d / "data_prepped.pt")
+        if d != pad:
+            torch.save(packed.to_dict(), d / "data_packed.pt")
+    return dirs
