@@ -37,10 +37,8 @@ class GetLEGOData:
 
     def dataset_compact(self, data):
         """Concatenate the incoming and outgoing per-particle tensors into one padded row axis."""
-        data_pp = data.get("per_particle")
-        data_add = data.get("per_event")
-        data_pp = torch.cat((data_pp["Incoming"], data_pp["Outgoing"]), dim=-2)
-        return data_pp.to(self.dtype), data_add
+        pp = data.get("per_particle")
+        return torch.cat((pp["Incoming"], pp["Outgoing"]), dim=-2).to(self.dtype), data.get("per_event")
 
     def dataset_cutoff(
         self,
@@ -66,8 +64,7 @@ class GetLEGOData:
             rd_idx = torch.randperm(data_pp.shape[0], generator=torch.Generator().manual_seed(0))[:n_events]
             data_pp = data_pp[rd_idx]
             data_add = {k: v[rd_idx] for k, v in data_add.items()}
-        particle_nan = ~data_pp.isnan().any(dim=-1)
-        attn_mask = particle_nan.to(torch.int64)
+        attn_mask = (~data_pp.isnan().any(dim=-1)).to(torch.int64)
         mask = attn_mask.clone()
         mask[:, 0] = 0
         data_add = {k: v.to(self.dev) for k, v in data_add.items()}
@@ -167,10 +164,5 @@ def make_loader(dataset, *, bs, shuffle, num_workers=4, batched_sampler=False, b
             sampler = (RandomSampler(dataset, generator=torch.Generator().manual_seed(seed)) if shuffle
                        else SequentialSampler(dataset))
             batch_sampler = BatchSampler(sampler, bs, drop_last=False)
-        return DataLoader(
-            dataset,
-            sampler=batch_sampler,
-            batch_size=None,
-            **common,
-        )
+        return DataLoader(dataset, sampler=batch_sampler, batch_size=None, **common)
     return DataLoader(dataset, batch_size=bs, shuffle=shuffle, **common)

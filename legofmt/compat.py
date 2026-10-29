@@ -59,23 +59,13 @@ def migrate_legacy_mult_heads(
     if not (has_legacy_proj or has_legacy_embd):
         return state_dict
 
-    out = {
-        k: v for k, v in state_dict.items()
-        if not (k.startswith("proj_out_.") or k.startswith("embd_in_."))
-    }
-
+    out = {k: v for k, v in state_dict.items() if not k.startswith(("proj_out_.", "embd_in_."))}
     if has_legacy_proj:
-        weights = [state_dict[f"proj_out_.{i}.weight"] for i in range(max_seq_len)]
-        biases = [state_dict[f"proj_out_.{i}.bias"] for i in range(max_seq_len)]
-        out["proj_out_w"] = torch.stack([w.t().contiguous() for w in weights], dim=0)
-        out["proj_out_b"] = torch.stack(biases, dim=0)
-
+        rows = range(max_seq_len)
+        out["proj_out_w"] = torch.stack([state_dict[f"proj_out_.{i}.weight"].t().contiguous() for i in rows])
+        out["proj_out_b"] = torch.stack([state_dict[f"proj_out_.{i}.bias"] for i in rows])
     if has_legacy_embd:
-        embd_weights = [
-            state_dict[f"embd_in_.{i}.weight"] for i in range(max_seq_len - 1)
-        ]
-        out["embd_in_.weight"] = torch.cat(embd_weights, dim=0)
-
+        out["embd_in_.weight"] = torch.cat([state_dict[f"embd_in_.{i}.weight"] for i in range(max_seq_len - 1)])
     return out
 
 
