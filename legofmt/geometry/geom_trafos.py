@@ -41,10 +41,7 @@ class GeomTrafos:
         if sph.shape[-1] != 2:
             return self._batched(sph, 2, "to_cc")
         theta, phi = sph.movedim(-1, 0)
-        x = phi.cos() * theta.sin()
-        y = phi.sin() * theta.sin()
-        z = theta.cos()
-        return torch.stack((x, y, z), dim=-1)
+        return torch.stack((phi.cos() * theta.sin(), phi.sin() * theta.sin(), theta.cos()), dim=-1)
 
     def to_sph(self, cc):
         """Cartesian unit vector -> spherical (theta, phi), batched over trailing triples."""
@@ -95,27 +92,23 @@ class GeomTrafos:
         loc = self.to_sph(loc_cc).expand((*n, -1))
         if bs_frac > 0.0:
             loc = loc.clone()
-            k = round(bs_frac * n[0])
-            loc[:k, ..., 0] += torch.pi
+            loc[:round(bs_frac * n[0]), ..., 0] += torch.pi
         loc_theta, loc_phi = loc.split(1, -1)
         if tanh_theta:
             t = (torch.randn(n, device=loc_cc.device) / kappa).tanh().abs()
-            if ang_pow is not None:   # a CUDA normal draw is exactly 0 about once in 2**24: t^p has an infinite slope there
+            if ang_pow is not None:   # a CUDA normal draw is exactly 0 ~once in 2**24, where t^p has an infinite slope
                 pos = t > 0
                 t = torch.where(pos, torch.where(pos, t, torch.ones_like(t)).pow(ang_pow), torch.zeros_like(t))
             samples_theta = torch.pi * t
         else:
-            samples_theta = ((
-                2 / kappa * torch.randn(n, device=loc_cc.device) + torch.pi
-            ) % (2 * torch.pi) - torch.pi).abs()
+            z = 2 / kappa * torch.randn(n, device=loc_cc.device)
+            samples_theta = ((z + torch.pi) % (2 * torch.pi) - torch.pi).abs()   # wrapped normal
         samples_phi = 2 * torch.pi * torch.rand_like(samples_theta)
         sph = torch.stack((samples_theta, samples_phi), dim=-1)
         return self.to_cc(self.rotate(sph, loc_theta, loc_phi + torch.pi / 2))
 
-    def sample_iso(self, n: tuple, mpct, device=None, **kwargs):
+    def sample_iso(self, n: tuple, mpct, device=None):
         """mpct isotropic unit directions per event."""
-        samples_phi = 2 * torch.pi * torch.rand((*n, mpct), device=device)
-        samples_cos_theta = 2 * torch.rand((*n, mpct), device=device) - 1
-        samples_theta = torch.acos(samples_cos_theta)
-        angles = torch.stack((samples_theta, samples_phi), dim=-1)
-        return self.to_cc(angles).flatten(-2)
+        phi = 2 * torch.pi * torch.rand((*n, mpct), device=device)
+        theta = torch.acos(2 * torch.rand((*n, mpct), device=device) - 1)
+        return self.to_cc(torch.stack((theta, phi), dim=-1)).flatten(-2)

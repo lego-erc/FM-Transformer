@@ -30,6 +30,9 @@ def sphere_expmap(x, u):
     return torch.where(big, x * torch.cos(nu) + u * torch.sin(nu) / nu, retr / retr.norm(dim=-1, keepdim=True))
 
 
+_SPHERE_MAPS = {"expmap": sphere_expmap, "logmap": sphere_logmap}   # used in place of flow_matching's Sphere methods
+
+
 class ProductManifold(Manifold):
     def __init__(self, manifolds: list, ambient_dims: tuple):
         if len(manifolds) != len(ambient_dims):
@@ -39,25 +42,17 @@ class ProductManifold(Manifold):
         self.manifolds = manifolds
         self.ambient_dims = ambient_dims
 
-    def _batch_map(self, fn_name, *tensors, **kwargs):
-        parts = [t.split(self.ambient_dims, dim=-1) for t in tensors]
-        results = [
-            getattr(man, fn_name)(*[p[i] for p in parts], **kwargs)
-            for i, man in enumerate(self.manifolds)
-        ]
-        return torch.cat(results, dim=-1)
+    def _batch_map(self, fn_name, *tensors):
+        fns = [_SPHERE_MAPS[fn_name] if isinstance(man, Sphere) and fn_name in _SPHERE_MAPS else getattr(man, fn_name)
+               for man in self.manifolds]
+        parts = zip(*(t.split(self.ambient_dims, dim=-1) for t in tensors))
+        return torch.cat([fn(*p) for fn, p in zip(fns, parts)], dim=-1)
 
     def expmap(self, x, u):
-        return torch.cat([
-            sphere_expmap(a, b) if isinstance(man, Sphere) else man.expmap(a, b)
-            for man, a, b in zip(self.manifolds, x.split(self.ambient_dims, -1), u.split(self.ambient_dims, -1))
-        ], dim=-1)
+        return self._batch_map("expmap", x, u)
 
     def logmap(self, x, y):
-        return torch.cat([
-            sphere_logmap(a, b) if isinstance(man, Sphere) else man.logmap(a, b)
-            for man, a, b in zip(self.manifolds, x.split(self.ambient_dims, -1), y.split(self.ambient_dims, -1))
-        ], dim=-1)
+        return self._batch_map("logmap", x, y)
 
     def projx(self, x):
         return self._batch_map("projx", x)
