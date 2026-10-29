@@ -224,7 +224,7 @@ class BaseDist:
 
     def _fit_base_head(self, ds_t, fwd) -> None:
         """Run the head, hand its outputs to the sampler, and cache the moment loss
-        while the head is trainable. With grad mode on (legofmt.design) the frozen head keeps its graph to the
+        while the head is trainable. With grad mode on (density design) the frozen head keeps its graph to the
         inputs, so the draw is reparameterized in them; only a head being fitted hands the sampler detached values."""
         learn = self.model.training and self.base_head[-1].weight.requires_grad
         keep = (lambda v: v.detach()) if learn else (lambda v: v)

@@ -100,7 +100,7 @@ class Solvers:
 
     @torch.no_grad()
     def solve(self, *args, **kwargs) -> Tensor:
-        """``_solve`` under ``torch.no_grad``: every sampling caller; ``_solve`` keeps the graph (legofmt.design)."""
+        """``_solve`` under ``torch.no_grad``: every sampling caller; ``_solve`` keeps the graph (density design)."""
         return self._solve(*args, **kwargs)
 
     def _solve(
@@ -243,7 +243,7 @@ class Solvers:
         return self._forward(batch, _batch_idx)
 
     def _forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None) -> tuple:
-        """``forward`` without ``torch.no_grad`` (legofmt.design differentiates through it)."""
+        """``forward`` without ``torch.no_grad`` (the density design differentiates through it)."""
         self._to_eval()
 
         cfg = self.rc.odeint_conf

@@ -283,7 +283,7 @@ class MultModel(LightningModule):
     def log_prob(self, in_tok, counts, pdgid_in_idx, pt_mask=None):
         """log P of a ``forward`` draw, ``(B,)``: the count slots' log-probabilities (teacher-forced) unless the
         pass-through token fired, plus the head's Bernoulli term for the species it covers (``pt_mask`` as
-        ``sample_passthrough`` drew it). Differentiable in ``in_tok``: the score-function term of legofmt.design's
+        ``sample_passthrough`` drew it). Differentiable in ``in_tok``: the score-function term of density design's
         gradient."""
         if self.rc.sym_aug:
             raise NotImplementedError("log_prob under sym_aug: proj_in draws a new cube transform per call, so the "

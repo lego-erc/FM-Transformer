@@ -171,7 +171,8 @@ class GenerateOut(torch.nn.Module):
     def _clamp_edep(self, edep: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor) -> torch.Tensor:
         """The E_dep row capped at E_in + the species' excess on the log row (a wall row is capped by
         construction): the training data's largest excess (model_conf.edep_excess_mev), or for checkpoints from
-        before it the hand-set _EDEP_EXCESS_MEV; out of place, so legofmt.design can differentiate through it."""
+        before it the hand-set _EDEP_EXCESS_MEV; out of place, so the density-design study (lego_studies
+        density_design) can differentiate through it."""
         log_row = ~self.dp.edep_wall_mask(pid_in)
         for pid, excess in (self.dp.edep_excess_mev or _EDEP_EXCESS_MEV).items():
             hit = (pid_in == pid) & log_row

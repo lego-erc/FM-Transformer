@@ -1,8 +1,8 @@
 """Reflow, and the one-step ``Direct`` variants.
 
-Reflow re-couples the base to a frozen teacher's transport of it; with no
-``reflow_path`` the student snapshots itself as its own teacher each epoch.
-It is gated solely by ``reflow_start_epoch > 0`` -- there is no on/off flag.
+Reflow re-couples the base to a frozen teacher's transport of it. A ``reflow_path`` teacher is used from step 0;
+``reflow_start_epoch > 0`` makes the student's end-of-epoch snapshot the teacher from that epoch on (self-reflow
+without a path, a refresh with one). Neither set: no reflow.
 ``LEGOLtngDirect`` / ``GenerateOutDirect`` drop time conditioning and predict
 the residual ``target - base`` in a single forward.
 """

@@ -49,9 +49,7 @@ def apply_legacy_projection_in_out(model_args: dict, state_dict: dict) -> None:
         model_args["dim_in_out"] = model_args["h_dim"]
 
 
-def migrate_legacy_mult_heads(
-    state_dict: dict, max_seq_len: int, max_particles: int
-) -> dict:
+def migrate_legacy_mult_heads(state_dict: dict, max_seq_len: int) -> dict:
     """Pre-fusion checkpoints stored per-position ModuleLists (``embd_in_.{i}``,
     ``proj_out_.{i}``); remap them onto the fused single-table layout."""
     has_legacy_proj = "proj_out_.0.weight" in state_dict

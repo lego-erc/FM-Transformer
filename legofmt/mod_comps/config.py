@@ -411,7 +411,7 @@ def _resolve_from_checkpoint_mult(config: dict, state_dict: dict) -> ResolvedMul
     ptypes = mm_conf.get("ptypes")
     max_count = mm_conf.get("max_count")
     if ptypes is not None and max_count is not None and len(state_dict) > 0:
-        state_dict = migrate_legacy_mult_heads(state_dict, max_seq_len=len(ptypes), max_particles=max_count)
+        state_dict = migrate_legacy_mult_heads(state_dict, max_seq_len=len(ptypes))
     return _build_resolved_mult(config, state_dict=state_dict)
 
 
