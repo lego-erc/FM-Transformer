@@ -1,17 +1,9 @@
-"""The flow's training step: mask sampling, target shifting, loss reduction.
+"""The flow's training step, a ``LEGOLtng`` mixin: mask sampling, target shifting, loss reduction, flow-map term.
 
-Split out of ``main/modules.py``. A mixin like ``Solvers`` / ``BaseDist``,
-though here by choice rather than necessity: nothing outside this repo touches
-these members. In-repo consumers are ``LEGOLtngDirect`` (``distill/reflow.py``,
-which overrides ``_step`` and calls ``_sample_mask`` / ``reduce_loss``) and the
-tests, which drive ``_step`` directly.
-
-``reduce_loss`` returns ``(total, logs)`` and leaves the ``log_dict`` call to
-its caller, so the reduction can be exercised without a Trainer attached.
-
-Members resolved through ``self`` and owned by ``LEGOLtng``: ``rc``, ``model``,
-``ps``, ``sym``, ``lv``, ``lv_flow``, ``gen_base``, ``val_metrics``,
-``reflow_teacher``, ``convert_pdgids``, ``_canon_dirs``, ``gen_base_wrapper``.
+``reduce_loss`` returns ``(total, logs)`` and leaves the ``log_dict`` call to its caller, so the reduction runs without
+a Trainer. ``LEGOLtngDirect`` (``distill/reflow.py``) overrides ``_step`` and reuses ``_sample_mask`` /
+``reduce_loss``; the tests drive ``_step`` directly. Everything read through ``self`` beyond these methods (``rc``,
+``model``, ``ps``, ``sym``, ``lv``, ``lv_flow``, ``gen_base_wrapper``, ...) is owned by ``LEGOLtng``.
 """
 
 import torch
@@ -46,52 +38,35 @@ class TrainStep:
         loss_lat = None if sq_lat is None else sq_lat.mean()
         denom    = g.sum().clamp(min=1)
         out      = sq * g
-        loss_e   = out[..., 0:1].sum() / denom
         loss_ed  = None
-        if self.rc.edep_cell:
+        if self.rc.edep_cell:  # the E_dep row is a cell of its own
             n_ed    = g[:, 1].sum().clamp(min=1)
             loss_ed = out[:, 1, 0].sum() / n_ed
             loss_e  = (out[..., 0:1].sum() - out[:, 1, 0].sum()) / (denom - n_ed).clamp(min=1)
-        loss_dir = out[..., 1:4].sum() / (denom * 3)
-        loss_x   = out[..., 4:7].sum() / (denom * 3)
-        logs     = {}
-        if not self.rc.learned_loss_weights:
-            total = (loss_e + loss_dir + loss_x + (loss_ed if loss_ed is not None else 0.0)
-                     + (loss_lat if loss_lat is not None else 0.0))
         else:
+            loss_e  = out[..., 0:1].sum() / denom
+        # one cell per channel, in lv's order: energy, dir, pos[, edep][, lat]
+        cells = {"energy": loss_e, "out_dir": out[..., 1:4].sum() / (denom * 3),
+                 "out_pos": out[..., 4:7].sum() / (denom * 3)}
+        cells.update({k: v for k, v in (("edep", loss_ed), ("lat", loss_lat)) if v is not None})
+        if self.rc.learned_loss_weights:
             # clamp in place: below the floor clamp() has zero gradient, so a cell
             # that overshoots would latch there and stop responding to its loss
-            lo = self.lv_floor
             with torch.no_grad():
-                self.lv.clamp_(min=lo)
-            lv  = self.lv  # (3,) to (5,), one per channel: energy, dir, pos[, edep][, lat]
-            w   = torch.exp(-lv)
-            total = (
-                w[0] * loss_e + w[1] * loss_dir + w[2] * loss_x
-                + (w[3] * loss_ed if loss_ed is not None else 0.0)
-                + (w[-1] * loss_lat if loss_lat is not None else 0.0)
-                + lv.sum()  # the +log(sigma^2) barrier; zero at init
-            )
-            v = lv.detach().exp()
-            logs = {"loss_weight/var_energy": v[0], "loss_weight/var_dir": v[1],
-                    "loss_weight/var_pos": v[2]}
-            if loss_ed is not None:
-                logs["loss_weight/var_edep"] = v[3]
-            if loss_lat is not None:
-                logs["loss_weight/var_lat"] = v[-1]
-        out_logs = {}
-        if self.training:
-            out_logs = {
-                # unweighted, so these stay comparable across loss-weight settings
-                "loss/energy": loss_e.detach(),
-                **({"loss/edep": loss_ed.detach()} if loss_ed is not None else {}),
-                **({"loss/lat": loss_lat.detach()} if loss_lat is not None else {}),
-                "loss/out_dir": loss_dir.detach(),
-                "loss/out_pos": loss_x.detach(),
-                "loss/raw": (loss_e + loss_dir + loss_x).detach(),
-                **logs,
-            }
-        return total, out_logs
+                self.lv.clamp_(min=self.lv_floor)
+            w = torch.exp(-self.lv)
+            total = sum(w[i] * v for i, v in enumerate(cells.values())) + self.lv.sum()  # + the log(sigma^2) barrier
+        else:
+            total = sum(cells.values())
+        if not self.training:
+            return total, {}
+        # unweighted, so these stay comparable across loss-weight settings
+        logs = {f"loss/{k}": v.detach() for k, v in cells.items()}
+        logs["loss/raw"] = (loss_e + cells["out_dir"] + cells["out_pos"]).detach()
+        if self.rc.learned_loss_weights:
+            var = self.lv.detach().exp()
+            logs.update({f"loss_weight/var_{k.removeprefix('out_')}": var[i] for i, k in enumerate(cells)})
+        return total, logs
 
     @torch.no_grad()
     def _sample_mask(self, ds_t: DataStruct) -> Tensor:
@@ -136,12 +111,13 @@ class TrainStep:
             cpu = lengths.cpu()
         n = len(cpu)
         k = self.rc.len_split if self.rc.len_mode == "split" and n % self.rc.len_split == 0 else 1
-        if k > 1:
-            ds_t = ds_t[lengths.sort(stable=True).indices]
-            cpu = cpu.sort().values
         size = n // k
-        longest = (cpu[size - 1::size] if k > 1 else cpu.max().view(1)).tolist()
-        Ls = [next(b for b in self.rc.len_buckets if b >= x) for x in longest]
+        if k > 1:  # sorted by length, so each piece's longest event is its last
+            ds_t = ds_t[lengths.sort(stable=True).indices]
+            longest = cpu.sort().values[size - 1::size]
+        else:
+            longest = cpu.max().view(1)
+        Ls = [next(b for b in self.rc.len_buckets if b >= x) for x in longest.tolist()]
         return ds_t.trim(Ls[-1]), [(slice(j * size, (j + 1) * size), L) for j, L in enumerate(Ls)]
 
     def _piecewise(self, pieces: list[tuple[slice, int]]):
@@ -186,28 +162,25 @@ class TrainStep:
         return loss + w * sc
 
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
-        model, pieces = self.model, None
-        layers = ds_t.edep_layers
+        model, layers = self.model, ds_t.edep_layers
         if self.rc.len_buckets is not None:
             ds_t, pieces = self._len_pieces(ds_t)
             if len(pieces) > 1:
                 model = self._piecewise(pieces)
         with torch.no_grad():
-            ds_t = DataStruct(ds_t.f.full, self._sample_mask(ds_t), ds_t.am.full)
+            m, am = self._sample_mask(ds_t), ds_t.am.full  # fixed from here on; only the features change
+            ds_t = DataStruct(ds_t.f.full, m, am)
             if self.rc.overflow_delta > 0:
                 ds_t = self._shift_overflow_targets(ds_t)
+            fwd = m[:, self.rc.n_prefix] == 0  # forward events: the incoming slot conditions
             if self.sym is not None:
-                fwd  = ds_t.m.full[:, self.rc.n_prefix] == 0
                 face = self.sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
                 g    = torch.randint(8, face.shape, device=face.device) if self.rc.sym_aug else None
-                ds_t = DataStruct(self._canon_dirs(ds_t.f.full, face, fwd, g=g), ds_t.m.full, ds_t.am.full)
+                ds_t = DataStruct(self._canon_dirs(ds_t.f.full, face, fwd, g=g), m, am)
             if self.rc.dir_zoom:
-                fwd_z = ds_t.m.full[:, self.rc.n_prefix] == 0
-                ds_t = DataStruct(self._zoom_dirs(ds_t.f.full, ds_t.am.full, fwd_z, pdgids=ds_t.f.pdgids),
-                                  ds_t.m.full, ds_t.am.full)
-            base      = self.gen_base_wrapper(
-                ds_t, all_forward=not self.rc.mask_conf or self.rc.mask_conf.get("p_forward", 0.5) >= 1,
-            )
+                ds_t = DataStruct(self._zoom_dirs(ds_t.f.full, am, fwd, pdgids=ds_t.f.pdgids), m, am)
+            base = self.gen_base_wrapper(
+                ds_t, all_forward=not self.rc.mask_conf or self.rc.mask_conf.get("p_forward", 0.5) >= 1)
             z0 = z1 = None
             if self.edep_ae is not None:  # the latent token's target (the AE's encoding of the true layers) and base
                 if layers is None:
@@ -216,40 +189,28 @@ class TrainStep:
                 z0 = torch.randn_like(z1)
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
             t = self._sample_t(ds_t)
-            if (
-                self.reflow_teacher is not None and self.training
-                and self.global_step % self.rc.reflow_every == 0
-            ):  # reflow: couple base to the teacher's transport of it
-                tgt = self._teacher_transport(ds_t, base, **self.rc.reflow_kwargs)
-                ds_t = DataStruct(
-                    torch.cat((tgt, ds_t.f.pdgids), dim=-1), ds_t.m.full, ds_t.am.full,
-                )
+            if self.reflow_teacher is not None and self.training and self.global_step % self.rc.reflow_every == 0:
+                # reflow: couple base to the teacher's transport of it
+                tgt  = self._teacher_transport(ds_t, base, **self.rc.reflow_kwargs)
+                ds_t = DataStruct(torch.cat((tgt, ds_t.f.pdgids), dim=-1), m, am)
             if self.rc.edep_whiten:  # from here to the loss (flow map included) the E_dep row is whitened
                 base = self._edep_whiten(base, ds_t)
-                ds_t = DataStruct(self._edep_whiten(ds_t.f.full, ds_t), ds_t.m.full, ds_t.am.full)
+                ds_t = DataStruct(self._edep_whiten(ds_t.f.full, ds_t), m, am)
             ps_ = self.ps.sample(base, ds_t.f.model_in, t)
             lat = {} if z0 is None else {"z": z0 + ps_.t * (z1 - z0)}
         # an explicit zero d, not None: the flow-map calls pass a tensor, and a None is a
         # separate dynamo guard (tests/test_compile_guards.py)
-        step_extras = ({"d": torch.zeros_like(ps_.t)}
-                       if getattr(self.model.vf, "step_cond", False) else {})
-        v_out = model(
-            ps_.x_t, ps_.t,
-            mask=ds_t.m.full, attn_mask=ds_t.am.full,
-            types=self.types_embd[:, :ds_t.am.full.shape[1]], pdgids=pdgid_idx, **step_extras, **lat,
-        )
+        step_extras = {"d": torch.zeros_like(ps_.t)} if getattr(self.model.vf, "step_cond", False) else {}
+        v_out = model(ps_.x_t, ps_.t, mask=m, attn_mask=am, types=self.types_embd[:, :am.shape[1]],
+                      pdgids=pdgid_idx, **step_extras, **lat)
         sq_lat = None
         if lat:
             v_out, v_z = v_out
             sq_lat = (v_z - (z1 - z0)) ** 2
-        sq = (v_out - ps_.dx_t) ** 2
-        loss, logs = self.reduce_loss(sq, ds_t, sq_lat)
+        loss, logs = self.reduce_loss((v_out - ps_.dx_t) ** 2, ds_t, sq_lat)
         if logs:
             self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
-
-        loss = self._flow_map_loss(loss, base, ds_t, pdgid_idx, model, z=None if z0 is None else (z0, z1))
-
-        return loss
+        return self._flow_map_loss(loss, base, ds_t, pdgid_idx, model, z=None if z0 is None else (z0, z1))
 
     def training_step(self, batch: tuple, _batch_idx: int | Tensor) -> Tensor:
         return self._step(batch, _batch_idx)
@@ -260,10 +221,7 @@ class TrainStep:
         loss = self._step(batch, _batch_idx)
         self.log("Validation Loss", loss, on_step=True, on_epoch=True, sync_dist=True, batch_size=bs)
         for name, val in self.val_metrics(self, batch).items():
-            # population-dependent keys carry no collective: a rank whose shard holds no
-            # events of a species emits no key for it, and syncing those would leave the
-            # ranks issuing different numbers of collectives and deadlock NCCL
-            sync = not name.startswith(UNSYNCED_PREFIXES)
-            self.log(name, val, on_epoch=True, sync_dist=sync, batch_size=bs)
+            # population-dependent keys are logged unsynced (deadlock: see UNSYNCED_PREFIXES)
+            self.log(name, val, on_epoch=True, sync_dist=not name.startswith(UNSYNCED_PREFIXES), batch_size=bs)
         return loss
 
