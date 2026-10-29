@@ -13,8 +13,6 @@ docs/superpowers/specs/2026-10-20-geometry-condition-encoder-design.md.
 
 from __future__ import annotations
 
-import math
-
 import torch
 from torch import Tensor, nn
 from x_transformers import Encoder
@@ -22,9 +20,14 @@ from x_transformers import Encoder
 N_FREQ = 8
 
 
+def x0_gcm2(Z: Tensor, A: Tensor) -> Tensor:
+    """Radiation length (Dahl's fit), in g/cm2; also the base head's (base_nn.py)."""
+    return 716.4 * A / (Z * (Z + 1) * torch.log(287.0 / Z.sqrt()))
+
+
 def x0_mm(rho: Tensor, Z: Tensor, A: Tensor) -> Tensor:
-    """Radiation length (Dahl's fit, the one base_nn.py uses), in mm."""
-    return 716.4 * A / (Z * (Z + 1) * torch.log(287.0 / Z.sqrt())) / rho * 10.0
+    """Radiation length, in mm."""
+    return x0_gcm2(Z, A) / rho * 10.0
 
 
 def lambda_mm(rho: Tensor, A: Tensor) -> Tensor:
@@ -37,8 +40,8 @@ def layer_features(layers: Tensor) -> Tensor:
     t, rho, Z, A = layers.unbind(-1)
     tx0, tlam = t / x0_mm(rho, Z, A), t / lambda_mm(rho, A)
     cx0, clam = tx0.cumsum(0) - tx0 / 2, tlam.cumsum(0) - tlam / 2
-    per = torch.logspace(math.log10(0.2), math.log10(60.0), N_FREQ, dtype=layers.dtype)
-    ph_x0, ph_lam = 2 * math.pi * cx0[:, None] / per, 2 * math.pi * clam[:, None] / (per / 10)
+    per = torch.logspace(*torch.tensor([0.2, 60.0], dtype=torch.float64).log10().tolist(), N_FREQ, dtype=layers.dtype)
+    ph_x0, ph_lam = 2 * torch.pi * cx0[:, None] / per, 2 * torch.pi * clam[:, None] / (per / 10)
     return torch.cat([torch.stack([t.log(), rho.log(), Z / 100, A.log(), tx0.log(), tlam.log(), (rho * t).log()], -1),
                       ph_x0.sin(), ph_x0.cos(), ph_lam.sin(), ph_lam.cos(), cx0[:, None] / 30, clam[:, None] / 3], -1)
 

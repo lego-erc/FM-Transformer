@@ -34,8 +34,7 @@ class Solvers:
         ``(T, B, L, C)`` intermediates stack). With ``buckets`` every chunk is padded
         to the smallest bucket that holds it, so a compiled ``fn`` only ever sees
         ``len(buckets)`` batch shapes."""
-        if cat_dim is None:
-            cat_dim = dim
+        cat_dim = dim if cat_dim is None else cat_dim
         if split_size is None or split_size >= tensors[0].shape[dim]:
             return self._bucketed(fn, tensors, dim, cat_dim, buckets)
         out = [self._bucketed(fn, chunk, dim, cat_dim, buckets)
@@ -117,11 +116,10 @@ class Solvers:
         buckets: list[int] | None = None,
     ) -> Tensor:
         ds_t, pdgids_idx = self._prep_solve(ds_t)
-        am = ds_t.am.full.unsqueeze(-1)
         if x_init is None:
             x_init = self.gen_base_wrapper(ds_t)
         if x_init.shape == ds_t.f.model_in.shape:
-            x_init = x_init.where(am, _F(x_init).in_p)
+            x_init = x_init.where(ds_t.am.full.unsqueeze(-1), _F(x_init).in_p)
         if self.rc.edep_whiten:
             x_init = self._edep_whiten(x_init, ds_t)
         # model_conf.edep_ae: the latent z (B, K) starts from N(0, 1) and is integrated with the event; it travels

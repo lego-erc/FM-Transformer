@@ -46,14 +46,11 @@ def _packed_forward(mod, orig, x, *, condition, **kwargs):
         return orig(x, condition=condition, **kwargs)
     sel = condition[:, 2, :x.shape[1], None] > 0.5
     g = mod.to_gamma(condition[:, :2])
+    pick = lambda g: torch.where(sel, g[:, 1:2], g[:, :1])
     if isinstance(mod, AdaptiveRMSNorm):  # x_transformers.AdaptiveRMSNorm.forward
-        return F.normalize(x, dim=-1) * mod.scale * (torch.where(sel, g[:, 1:2], g[:, :1]) + 1.)
-    g = g.sigmoid()  # x_transformers.AdaptiveLayerScale.forward
-    out = mod.fn(x, **kwargs)
-    if isinstance(out, Tensor):
-        return out * torch.where(sel, g[:, 1:2], g[:, :1])
-    out, *rest = out
-    return out * torch.where(sel, g[:, 1:2], g[:, :1]), *rest
+        return F.normalize(x, dim=-1) * mod.scale * (pick(g) + 1.)
+    g, out = pick(g.sigmoid()), mod.fn(x, **kwargs)  # x_transformers.AdaptiveLayerScale.forward
+    return out * g if isinstance(out, Tensor) else (out[0] * g, *out[1:])
 
 
 class CFMTrafo_x(nn.Module):
@@ -173,9 +170,9 @@ class CFMTrafo_x(nn.Module):
         ``pdgids`` arrives as ``_F.pdgids``, i.e. ``(B, L, 1)``."""
         n = mask.shape[1]
         return torch.cat((
-            nn.functional.one_hot(mask.reshape(batch, n).long(), self.nvtypes),
-            nn.functional.one_hot(types.view(-1)[:n], self.ntypes).expand(batch, -1, -1),
-            nn.functional.one_hot(pdgids.reshape(batch, n).long(), self.npdgids),
+            F.one_hot(mask.reshape(batch, n).long(), self.nvtypes),
+            F.one_hot(types.view(-1)[:n], self.ntypes).expand(batch, -1, -1),
+            F.one_hot(pdgids.reshape(batch, n).long(), self.npdgids),
         ), dim=-1).to(self.cond_w_mask.dtype)
 
     def _embed(self, x: Tensor, oh: Tensor) -> Tensor:
@@ -219,24 +216,24 @@ class CFMTrafo_x(nn.Module):
         K = 0 if self.geom is None else self.geom.K
         n_lat = int(self.lat_dim > 0)
         n_pre = n_lat + K          # prepended tokens: [latent, geometry x K], then the sequence
-        cond_attn = c_con = c_gen = None
+        cond_attn = c_gen = None
         if not self.time_cond:
             cond = self.global_cond.expand(B, -1)
-        elif t.shape[-1] == 1 and (d is None or d.shape[-1] == 1):
-            gen   = (mask == 1).unsqueeze(-1)
-            c_gen = self._time_emb(t, d).expand(B, 1, -1)
-            c_con = self._time_emb(t.new_ones(1, 1), None if d is None else d.new_zeros(1, 1)).expand(B, 1, -1)
-            cond  = torch.where(gen, c_gen, c_con)
-            if self._packed_cond and 3 != L + n_pre <= self.h_dim:
-                # the selector spans the whole sequence: the latent token is generated, the K geometry tokens are
-                # conditioning tokens
-                sel = F.pad(gen.squeeze(-1).to(cond.dtype), (n_pre, self.h_dim - L - n_pre))
-                if n_lat:
-                    sel[:, 0] = 1.0
-                sel = sel.unsqueeze(1)
-                cond_attn = torch.cat((c_con, c_gen, sel), dim=1)
         else:
-            cond = self._time_emb(t, d)
+            c_con = self._time_emb(t.new_ones(1, 1), None if d is None else d.new_zeros(1, 1)).expand(B, 1, -1)
+            if t.shape[-1] == 1 and (d is None or d.shape[-1] == 1):
+                gen   = (mask == 1).unsqueeze(-1)
+                c_gen = self._time_emb(t, d).expand(B, 1, -1)
+                cond  = torch.where(gen, c_gen, c_con)
+                if self._packed_cond and 3 != L + n_pre <= self.h_dim:
+                    # the selector spans the whole sequence: the latent token is generated, the K geometry tokens
+                    # are conditioning tokens
+                    sel = F.pad(gen.squeeze(-1).to(cond.dtype), (n_pre, self.h_dim - L - n_pre))
+                    if n_lat:
+                        sel[:, 0] = 1.0
+                    cond_attn = torch.cat((c_con, c_gen, sel.unsqueeze(1)), dim=1)
+            else:
+                cond = self._time_emb(t, d)
 
         oh   = self._one_hot(mask, types, pdgids, B)
         embd = self._embed(x, oh)
@@ -245,8 +242,6 @@ class CFMTrafo_x(nn.Module):
         if self.geom is not None:
             tok = self.geom().to(embd.dtype).expand(B, -1, -1)
             if self.time_cond:
-                if c_con is None:
-                    c_con = self._time_emb(t.new_ones(1, 1), None if d is None else d.new_zeros(1, 1)).expand(B, 1, -1)
                 c_tok = c_con.expand(B, K, -1)
                 tok = tok + c_tok
                 cond = torch.cat((c_tok, cond), dim=1)
@@ -260,7 +255,8 @@ class CFMTrafo_x(nn.Module):
             if self.time_cond:
                 if c_gen is None:  # per-token t: the event's t is that of its generated tokens
                     gen_any = (mask == 1).any(-1, keepdim=True)
-                    pick = lambda a, fill: torch.where(gen_any, a.masked_fill(mask != 1, -torch.inf).amax(-1, keepdim=True), fill)
+                    pick = lambda a, fill: torch.where(
+                        gen_any, a.masked_fill(mask != 1, -torch.inf).amax(-1, keepdim=True), fill)
                     c_gen = self._time_emb(pick(t, 1.0), None if d is None else pick(d, 0.0))   # (B, 1, D)
                 c_lat = c_gen.expand(B, 1, -1)
                 tok = tok + c_lat

@@ -1,10 +1,6 @@
-"""Manifold-projection wrapper around the flow's vector field.
+"""Manifold-projection wrapper around the flow's vector field (:class:`~legofmt.cfm.cfm_trafo_x.CFMTrafo_x`).
 
-Split out of ``main/modules.py``: a plain ``nn.Module`` with no Lightning
-contact, so it belongs beside the :class:`~legofmt.cfm.cfm_trafo_x.CFMTrafo_x`
-it wraps. ``LEGOLtng`` assigns it as ``self.model``, which is where its
-state_dict keys (``model.vf.*``) come from -- the class's module path does not
-appear in a checkpoint.
+``LEGOLtng`` assigns it as ``self.model``, which is where the state_dict keys ``model.vf.*`` come from.
 """
 
 import torch
@@ -55,10 +51,10 @@ class ProjectModel(nn.Module):
             t = torch.where(mask == 1, t.expand_as(attn_mask), 1.0)  # conditions get t=1
             if d is not None:
                 d = torch.where(mask == 1, d.expand_as(attn_mask), 0.0)  # and are not transported
-        v = self.vf(x_att, mask, attn_mask, types, pdgids, t=t, d=d, **({} if z is None else {"z": z}))  # z only when set
-        v, v_z = v if z is not None else (v, None)
-        v_proj = torch.where(attn_mask.unsqueeze(-1), self.manifold.proju(x_proj, v), v)
-        return v_proj if z is None else (v_proj, v_z)
+        out = self.vf(x_att, mask, attn_mask, types, pdgids, t=t, d=d, **({} if z is None else {"z": z}))
+        v, v_z = (out, None) if z is None else out
+        v = torch.where(attn_mask.unsqueeze(-1), self.manifold.proju(x_proj, v), v)
+        return v if z is None else (v, v_z)
 
 
 def uncompiled(module: nn.Module) -> nn.Module:

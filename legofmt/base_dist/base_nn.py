@@ -1,17 +1,12 @@
-"""The flow's base (prior) distribution: the learned per-event head and the
-wrapper that draws ``x_0``.
+"""The flow's base (prior) distribution: the learned per-event head and the wrapper that draws ``x_0``.
 
-Split out of ``main/modules.py``. Like ``cfm/solvers.py`` these are mixin
-methods rather than a standalone object, because ``lego_eval`` reaches for
-them on the LightningModule itself: ``lego.gen_base``, ``lego.gen_base_wrapper``
-and ``hasattr(lego, "base_head")``. ``base_head`` is also a state_dict key, so
-it must stay a direct attribute of ``LEGOLtng`` under that exact name -- which
-is why ``build_base_head`` returns the module for ``__init__`` to assign rather
-than owning it here.
+Mixin methods rather than a standalone object, because ``lego_eval`` reaches for them on the LightningModule itself:
+``lego.gen_base``, ``lego.gen_base_wrapper`` and ``hasattr(lego, "base_head")``. ``base_head`` is also a state_dict
+key, so it must stay a direct attribute of ``LEGOLtng`` under that exact name -- which is why ``build_base_head``
+returns the module for ``__init__`` to assign rather than owning it here.
 
-Members resolved through ``self`` and owned by ``LEGOLtng``: ``rc``, ``model``,
-``gen_base``, ``base_head``, ``pdgids_template``, ``convert_pdgids``,
-``_base_head_loss``, ``_make_loader``, ``_train_ds``.
+Members resolved through ``self`` and owned by ``LEGOLtng``: ``rc``, ``model``, ``gen_base``, ``base_head``,
+``pdgids_template``, ``convert_pdgids``, ``_base_head_loss``, ``_make_loader``, ``_train_ds``.
 """
 
 from dataclasses import replace
@@ -22,6 +17,7 @@ from torch import Tensor, nn
 
 from flow_matching.utils.manifolds import Sphere
 
+from legofmt.cfm.geom_encoder import x0_gcm2
 from legofmt.compat import load_legacy_base_head
 from legofmt.data.struct import DataStruct, _F
 
@@ -55,15 +51,12 @@ def build_base_head(rc, gen_base) -> nn.Sequential | None:
     # explicit ask (a saved head that would otherwise vanish silently) is an
     # error, the base_pretrain_batches default is not.
     asked = hs is not None
-    if not ((asked or rc.base_pretrain_batches > 0)
-            and gen_base.scale_dist == "sm_norm"):
+    if not ((asked or rc.base_pretrain_batches > 0) and gen_base.scale_dist == "sm_norm"):
         return None
     if not all(s in rc.cond_scalars for s in _BASE_HEAD_SCALARS):
         if asked:
-            raise ValueError(
-                f"base_head needs the {_BASE_HEAD_SCALARS} conditioning scalars; "
-                f"got cond_scalars={rc.cond_scalars}."
-            )
+            raise ValueError(f"base_head needs the {_BASE_HEAD_SCALARS} conditioning scalars; "
+                             f"got cond_scalars={rc.cond_scalars}.")
         return None
 
     n_in = 4 + len(rc.pdgids_template)
@@ -101,14 +94,10 @@ class BaseDist:
         """Per-event ``(sm_scale, edep_mu, edep_sig, kappa, ang_pow)`` from the head's
         inputs: incoming kinematics, species one-hot, cuboid chord,
         ``log(Size*Density/X0)``. ``ang_pow`` is None unless base_conf.ang_shape."""
-        pid     = ds_t.f.in_p[..., 0, -1]
-        idx     = pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)
-        species = nn.functional.one_hot(
-            idx.long().clamp(0, len(self.pdgids_template)),
-            len(self.pdgids_template) + 1).float()
-        Z, A    = ds_t.f.cond("Z"), ds_t.f.cond("A")
-        x0      = 716.4 * A / (Z * (Z + 1) * (287.0 / Z.sqrt()).log())
-        t       = ds_t.f.cond("Size") * ds_t.f.cond("Density") / x0
+        bc      = self.rc.config.get("base_conf") or {}
+        n_cls   = len(self.pdgids_template) + 1
+        species = nn.functional.one_hot(self._species_idx(ds_t.f.in_p[..., 0, -1], n_cls), n_cls).float()
+        t       = ds_t.f.cond("Size") * ds_t.f.cond("Density") / x0_gcm2(ds_t.f.cond("Z"), ds_t.f.cond("A"))
         # chord length: full chord through the cuboid along the incoming ray
         # (longest-edge lengths); fwd+bwd -> entry/exit-storage invariant
         inc     = ds_t.f.in_cc[..., 0, 1:7].nan_to_num(1.0)
@@ -121,7 +110,7 @@ class BaseDist:
         tb      = torch.where(ok_u, (p + u.sign() * d) / u_safe, torch.full_like(u, 4.0))
         chord   = ((tf.amin(-1) + tb.amin(-1)).clamp(0.0, 3.5) / 2).unsqueeze(-1)
         x       = torch.cat((ds_t.f.in_cc[..., 0], species, chord, t.log().unsqueeze(-1)), dim=-1)
-        if (self.rc.config.get("base_conf") or {}).get("base_head_nout", False):
+        if bc.get("base_head_nout", False):
             # Only E_dep's (mu, sig) see the outgoing set. sm_scale and kappa are
             # read from a second pass with those inputs zeroed -- a constant, so
             # the NLL fits them to the marginal over n_out, as without the flag.
@@ -131,13 +120,12 @@ class BaseDist:
             both    = torch.cat((torch.cat((x, extra), -1), torch.cat((x, torch.zeros_like(extra)), -1)))
             with torch.autocast(x.device.type, enabled=False):  # fp32 as at inference and in pretraining
                 out_e, out = self.base_head(both).chunk(2)  # one forward for both passes
-            ang     = out_e if (self.rc.config.get("base_conf") or {}).get("ang_nout", False) else out
+            ang     = out_e if bc.get("ang_nout", False) else out
             out     = torch.cat((out[..., 0:1], out_e[..., 1:3], ang[..., 3:]), dim=-1)
         else:
             with torch.autocast(x.device.type, enabled=False):
                 out = self.base_head(x)
-        bc      = self.rc.config.get("base_conf") or {}
-        n_ang   = len(self.pdgids_template) + 1 if bc.get("ang_species", False) else 1
+        n_ang   = n_cls if bc.get("ang_species", False) else 1
         return (out[..., 0:1].exp(), out[..., 1:2], out[..., 2:3].exp(),
                 out[..., 3:3 + n_ang].exp().clamp_min(1e-3),  # kap: divisor in sample()
                 out[..., 3 + n_ang:].exp().clamp(0.1, 10.0) if out.shape[-1] > 3 + n_ang else None)
@@ -175,14 +163,16 @@ class BaseDist:
             row.copy_(torch.where(gen.unsqueeze(-1), torch.ones_like(row) if inverse else code, row))
         return f
 
+    def _species_idx(self, pid: Tensor, n_cls: int) -> Tensor:
+        """Class index in ``[0, n_cls)`` of raw pdgids (of indices with ``pdgid_is_idx``)."""
+        return (pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)).long().clamp(0, n_cls - 1)
+
     def _out_set_feats(self, ds_t: DataStruct) -> list[Tensor]:
         """Outgoing multiplicity and per-pdgid composition, both fixed before the
         flow runs. E_dep is bimodal in them, which one logit-normal cannot hold."""
         valid = ds_t.am.out_p
-        pid   = ds_t.f.out_p[..., -1]
-        idx   = pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)
         n_cls = len(self.pdgids_template) + 1
-        oh    = nn.functional.one_hot(idx.long().clamp(0, n_cls - 1), n_cls)
+        oh    = nn.functional.one_hot(self._species_idx(ds_t.f.out_p[..., -1], n_cls), n_cls)
         cnt   = (oh * valid.unsqueeze(-1)).sum(-2).float()
         return [valid.sum(-1, keepdim=True).float().log1p(), cnt.log1p()]
 
@@ -241,9 +231,7 @@ class BaseDist:
         with torch.set_grad_enabled(learn or torch.is_grad_enabled()):
             s, mu, sig, kap, pw = self.base_head_params(ds_t)
             if kap.shape[-1] > 1:   # ang_species: one column per species -> one value per slot
-                pid = ds_t.f.out_p[..., -1]
-                idx = (pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid))
-                idx = idx.long().clamp(0, kap.shape[-1] - 1)
+                idx = self._species_idx(ds_t.f.out_p[..., -1], kap.shape[-1])
                 kap = kap.gather(1, idx)
                 pw  = None if pw is None else pw.gather(1, idx)
             if learn:

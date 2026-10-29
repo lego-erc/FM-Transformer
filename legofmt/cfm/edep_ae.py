@@ -22,10 +22,9 @@ _HALF_LOG_2PI = 0.9189385332046727
 
 
 def _mlp(n_in: int, n_out: int, hidden: int, depth: int) -> nn.Sequential:
-    dims, layers = [n_in] + [hidden] * depth, []
-    for a, b in zip(dims[:-1], dims[1:]):
-        layers += [nn.Linear(a, b), nn.GELU()]
-    return nn.Sequential(*layers, nn.Linear(hidden, n_out))
+    dims = [n_in] + [hidden] * depth
+    return nn.Sequential(*(m for a, b in zip(dims, dims[1:]) for m in (nn.Linear(a, b), nn.GELU())),
+                         nn.Linear(hidden, n_out))
 
 
 class EdepLayerAE(nn.Module):

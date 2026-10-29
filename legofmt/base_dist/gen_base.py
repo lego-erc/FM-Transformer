@@ -42,9 +42,7 @@ class GenerateBase:
     def rd_scale(self, shape, e_in):
         """Energy prior for the outgoing slots per scale_dist; returns (B, n_out, 1)."""
         if self.scale_dist == "trunc_norm":
-            u = torch.nn.init.trunc_normal_(
-                e_in.new_empty((*shape, 1)), std=1.0, a=-1.0, b=0.0,
-            ) + 1.0
+            u = torch.nn.init.trunc_normal_(e_in.new_empty((*shape, 1)), std=1.0, a=-1.0, b=0.0) + 1.0
         elif self.scale_dist == "uniform":
             u = torch.rand((*shape, 1), device=e_in.device)
         elif self.scale_dist == "sm_norm":
