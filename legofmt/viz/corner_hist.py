@@ -165,8 +165,8 @@ class CornerHist:
     @torch.no_grad()
     def make_cube(self, data, cube, incoming, color="#FF9D00"):
         if incoming is not None:
-            incoming = self.geom_trafos.to_cube(self.disp_man.projx(incoming)[..., 1:7])
-        return cube.plot_cube_with_points(self.geom_trafos.to_cube(data[..., 1:7]), incoming=incoming, arr_c=color,
+            incoming = self.geom_trafos.to_cuboid(self.disp_man.projx(incoming)[..., 1:7])
+        return cube.plot_cube_with_points(self.geom_trafos.to_cuboid(data[..., 1:7]), incoming=incoming, arr_c=color,
                                           arr_lr=0.0, arr_l=1.0, arr_lw=1.0)
 
     @torch.no_grad()

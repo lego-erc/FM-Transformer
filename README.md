@@ -316,7 +316,7 @@ reproduces exactly, while fresh configs use the library default of 10.
 | `h_dim` | `512` | Hidden dim of the Decoder. |
 | `n_layers`, `n_heads` | `6`, `8` | Decoder depth and heads. |
 | `dropout` | `0.1` | Shared attn / ff / emb dropout (layer dropout is not plumbed: it breaks DDP). |
-| `pos_scale` | `50.0` | Half-size `d` of the L-infinity cube `GeomTrafos.to_cube` maps the position direction onto before the input projection. |
+| `pos_scale` | `50.0` | Half-width(s) `d` of the box `GeomTrafos.to_cuboid` maps the position direction onto before the input projection: a scalar (a cube) or per axis `[dx, dy, dz]`. |
 | `sym_aug` | `False` | With `canon_sym`: random in-face symmetry per event. |
 | `passthrough_head`, `passthrough_pdgids`, `passthrough_on`, `passthrough_dim`, `passthrough_depth` | `False`, the neutrals, `"in_embd"`, `h_dim`, `0` | Pass-through token: P(the primary did not interact) for the listed incoming species, read from the input embedding or the trunk's slot 0, an MLP (`depth 0`) or `depth` residual blocks; the count CE is masked for those events. |
 | `max_out_particles` | `meta.ntokens - (n_prefix + 1)` | Counts per pdg type are clamped below this during data loading. |
@@ -408,7 +408,7 @@ default `odeint_conf.amp`) and `x_transformers_version` (the qk-norm scale above
 | `legofmt/data/dataloaders.py` | `LEGODataset` (energy cutoff, sorting, NaN handling via `GetLEGOData`; collates to `DataStruct`), the length-bucket batch sampler and `make_loader`. |
 | `legofmt/data/prep.py` | `DataPrep`: energy normalisation, `CubeTrace` ray projection, `manifold.projx`, the per-event scalar rows, `norm_e`/`norm_edep`. |
 | `legofmt/data/struct.py` | `DataStruct(f, m, am)`, the `_F` views, and the process-global `set_layout`. |
-| `legofmt/geometry/*` | `ProductManifold`, `GeomTrafos` (direction sampling, cartesian↔spherical, `to_cube`), `CubeTrace`, `EnergyProjections`, `CubeSymmetry`. |
+| `legofmt/geometry/*` | `ProductManifold`, `GeomTrafos` (direction sampling, cartesian↔spherical, `to_cuboid`), `CubeTrace`, `EnergyProjections`, `CubeSymmetry`. |
 | `legofmt/log_metrics/val_metrics.py` | `ShowerValMetrics`: MMD and per-feature W1 on particle kinematics and event summaries (vendored from `lego-eval`). |
 | `legofmt/compat.py` | Loading older checkpoints: parameter renames, qk-norm scale, fp32 attention, legacy manifold strings; the dynamic-shape attention patch. |
 | `legofmt/viz/*` | Corner plots and cube plots (not used at train time). |

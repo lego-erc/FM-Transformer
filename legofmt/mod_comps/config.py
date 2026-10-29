@@ -341,7 +341,7 @@ class ResolvedMultConfig:
     dropout: float  # layer_dropout is deliberately not plumbed through: stochastic depth breaks DDP's reducer
     use_abs_pos_emb: bool
     post_emb_norm: bool
-    pos_scale: float
+    pos_scale: torch.Tensor  # half-width(s) d of GeomTrafos.to_cuboid: 0-dim (a cube) or per axis (3,)
     canon_sym: bool
     sym_aug: bool
     model_args: dict[str, Any]
@@ -425,6 +425,7 @@ _MULT_DEFAULTS = {
 def _build_resolved_mult(config: dict, state_dict: dict | None) -> ResolvedMultConfig:
     mm_conf = config["mm_conf"]
     c = {k: mm_conf.get(k, d) for k, d in _MULT_DEFAULTS.items()}
+    c["pos_scale"] = torch.as_tensor(c["pos_scale"], dtype=torch.float32)
     ptypes, ptypes_in = torch.as_tensor(mm_conf["ptypes"]), torch.as_tensor(mm_conf["ptypes_in"])
     cond_scalars = tuple(mm_conf.get("cond_scalars", ("Density",)))
     set_layout(cond_scalars)

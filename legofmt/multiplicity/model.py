@@ -119,6 +119,7 @@ class InvModel(nn.Module):
         super().__init__()
         self.rc = rc
         self.geom_trafos = GeomTrafos()
+        self.register_buffer("pos_scale", rc.pos_scale, persistent=False)
 
         self.model = ContinuousTransformerWrapper(
             max_seq_len=rc.mm_conf.get("max_out_particles", 0) + 1,
@@ -145,7 +146,7 @@ class InvModel(nn.Module):
         self.proj_pid_ = nn.Linear(rc.inv_h_dim, rc.n_ptypes_in)
 
     def proj_in(self, x):
-        return self.proj_in_(torch.cat((x[..., :-6], self.geom_trafos.to_cube(x[..., -6:], d=self.rc.pos_scale)), -1))
+        return self.proj_in_(torch.cat((x[..., :-6], self.geom_trafos.to_cuboid(x[..., -6:], d=self.pos_scale)), -1))
 
     def forward(self, out_tok, out_pid_idx, out_mask, edep):
         """Incoming-PID logits from the outgoing set's tokens, pids, mask and E_dep."""
@@ -171,6 +172,7 @@ class MultModel(LightningModule):
         self.register_buffer("ptypes", rc.ptypes)
         self.register_buffer("ptypes_in", rc.ptypes_in)
         self.geom_trafos = GeomTrafos()
+        self.register_buffer("pos_scale", rc.pos_scale, persistent=False)
         self.sym = CubeSymmetry() if rc.canon_sym else None
 
         self.model = ContinuousTransformerWrapper(
@@ -246,8 +248,8 @@ class MultModel(LightningModule):
             g    = torch.randint(8, face.shape, device=face.device) if self.rc.sym_aug else None
             dirs = self.sym.canonicalize(torch.stack((x[..., -6:-3], x[..., -3:]), dim=-2), face, g)
             x[..., -6:-3], x[..., -3:] = dirs[..., 0, :], dirs[..., 1, :]
-        # out of place: an in-place write over to_cube's split views breaks the gradient log_prob needs
-        x = torch.cat((x[..., :-6], self.geom_trafos.to_cube(x[..., -6:], d=self.rc.pos_scale)), dim=-1)
+        # out of place: an in-place write over to_cuboid's split views breaks the gradient log_prob needs
+        x = torch.cat((x[..., :-6], self.geom_trafos.to_cuboid(x[..., -6:], d=self.pos_scale)), dim=-1)
         return self.proj_in_(x)
 
     def _opt_train(self):

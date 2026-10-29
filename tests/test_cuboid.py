@@ -17,11 +17,13 @@ import torch.nn.functional as F
 
 from legofmt.data.prep import DataPrep
 from legofmt.data.struct import _F
+from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.main.generate import GenerateOut
 from legofmt.main.modules import LEGOLtng
 from legofmt.mod_comps.config import resolve_legoltng_config
-from test_helpers import MANIFOLD, _flow_config, _save_mult_ckpt
+from legofmt.multiplicity.model import MultModel
+from test_helpers import MANIFOLD, _flow_config, _pt_mult_config, _save_mult_ckpt
 from test_helpers import _head_batch as _batch, _head_config as _config
 
 SLAB = [10.0, 100.0, 100.0]
@@ -115,3 +117,24 @@ def test_cuboid_dim_comes_from_meta(tmp_path) -> None:
     cfg["dl_conf"]["lds_args"]["data"] = str(tmp_path)
     rc = resolve_legoltng_config({"config": cfg})
     assert rc.config["model_conf"]["cuboid_dim"] == SLAB
+
+
+def test_to_cuboid_maps_stored_directions_back_onto_the_box() -> None:
+    cc, e_kin = _slab_event()
+    pos = _prep(SLAB).cc_trafo(cc, e_kin=e_kin)[..., 4:7]
+    out = GeomTrafos().to_cuboid(torch.cat((torch.zeros_like(pos), pos), -1), d=torch.tensor(SLAB) / 2)[..., 3:]
+    # the incoming is stored ray-traced to its exit (5, 30, 0)
+    assert torch.allclose(out, torch.tensor([[[5.0, 30.0, 0.0], [5.0, 40.0, 10.0]]]), atol=1e-4)
+
+
+@pytest.mark.parametrize("pos_scale", [50.0, [5.0, 50.0, 50.0]])
+def test_mult_pos_scale_is_the_box_half_width(pos_scale) -> None:
+    """mm_conf.pos_scale (a scalar or per axis) is the d of to_cuboid: a stored slab exit (1, 0.6, 0) enters the input
+    projection at its physical point; it is no state_dict key, so older checkpoints load as they are."""
+    m = MultModel({"state_dict": {}, "config": _pt_mult_config(pos_scale=pos_scale)})
+    d = torch.as_tensor(pos_scale)
+    assert torch.equal(m.rc.pos_scale, d) and torch.equal(m.pos_scale, d) and "pos_scale" not in m.state_dict()
+    x = torch.tensor([[0.5, 150.0, 1.0, 0.0, 0.0, *F.normalize(torch.tensor([1.0, 0.6, 0.0]), dim=-1)]])
+    want = x.clone()
+    want[:, -3:] = torch.tensor([1.0, 0.6, 0.0]) * d
+    assert torch.allclose(m.proj_in(x), m.proj_in_(want), atol=1e-5)

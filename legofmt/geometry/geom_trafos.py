@@ -1,7 +1,7 @@
-"""Cartesian <-> spherical conversion, direction sampling, and the cube map.
+"""Cartesian <-> spherical conversion, direction sampling, and the box map.
 
-``to_cube`` is an L-infinity normalisation (sphere -> cube surface); it rescales
-only the position half of a ``(mom, pos)`` 6-vector, and momentum passes through.
+``to_cuboid`` is an L-infinity normalisation (sphere -> unit cube surface) scaled per axis to the box of half-widths
+``d``; it rescales only the position half of a ``(mom, pos)`` 6-vector, and momentum passes through.
 """
 
 import torch
@@ -57,14 +57,11 @@ class GeomTrafos:
         phi = torch.atan2(y, x)
         return torch.stack((theta, phi), dim=-1)
 
-    def to_cube(self, p_and_x, d=1.0):
+    def to_cuboid(self, p_and_x, d=1.0):
+        """d: a scalar (a cube) or per-axis half-widths; for the box's half-edges it inverts DataPrep's stored
+        direction of x / cuboid_dim."""
         p, x_ = p_and_x.split(3, -1)
         x = x_ / x_.abs().max(-1, keepdim=True).values.clamp_min(1e-8) * d
-        return torch.cat((p, x), dim=-1)
-
-    def to_cuboid(self, p_and_x, d=1.0):
-        p, x_ = p_and_x.split(3, -1)
-        x = x_ / (x_.abs() / d).max(-1, keepdim=True).values.clamp_min(1e-8)
         return torch.cat((p, x), dim=-1)
 
     def rotate(self, sph, alpha, beta):
