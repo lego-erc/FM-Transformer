@@ -170,7 +170,7 @@ def _dataset_file(directory: str) -> str:
         with open(meta) as fh:
             if json.load(fh).get("format") != "packed":
                 raise ValueError(f"{directory}: data_packed.pt is stale (meta.json was written for data_prepped.pt); "
-                                 "delete it, re-pack with scripts/pack_dataset.py, or pass the file explicitly")
+                                 "delete it or pass the file explicitly")
     return packed
 
 

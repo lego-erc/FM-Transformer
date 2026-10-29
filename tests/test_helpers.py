@@ -228,7 +228,7 @@ def write_two_dirs(tmp_path: Path, cond=PACKED_COND, layers=True) -> tuple[Path,
     pad, pk, both = dirs = tuple(tmp_path / n for n in ("pad", "pk", "both"))
     for d in dirs:
         d.mkdir()
-        fmt = {} if d == pad else {"format": "packed", "n_events": len(packed)}   # as the converter writes
+        fmt = {} if d == pad else {"format": "packed", "n_events": len(packed)}   # as gen_data writes
         (d / "meta.json").write_text(json.dumps({**meta, **fmt}))
         if d != pk:
             torch.save(t, d / "data_prepped.pt")

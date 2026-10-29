@@ -65,7 +65,10 @@ if not dpath.is_dir():
     bad(f"data dir missing: {dpath}")
 else:
     ok(f"data dir {dpath}")
-    mp, pp = dpath / "meta.json", dpath / "data_prepped.pt"
+    mp = dpath / "meta.json"
+    pp = dpath / "data_packed.pt"           # what LEGODataset loads when the dir has both
+    if not pp.is_file():
+        pp = dpath / "data_prepped.pt"
     if not mp.is_file():
         bad(f"meta.json missing: {mp}")
     else:
@@ -73,13 +76,13 @@ else:
         ok(f"meta.json: ntokens={meta['ntokens']} species={len(meta['particles'])} "
            f"particles_in={meta.get('particles_in')} max_energy={meta.get('max_energy')}")
     if not pp.is_file():
-        bad(f"data_prepped.pt missing: {pp}")
+        bad(f"neither data_packed.pt nor data_prepped.pt in {dpath}")
     else:
         gb = pp.stat().st_size / 1e9
-        ok(f"data_prepped.pt {gb:.1f} GB")
+        ok(f"{pp.name} {gb:.1f} GB")
         nranks = len(run.get("devices", [0])) or 1
         need = gb * nranks
-        warn(f"LEGODataset torch.loads this per rank with no mmap: "
+        warn(f"LEGODataset torch.loads {pp.name} per rank with no mmap: "
              f"~{need:.0f} GB across {nranks} rank(s) -- size --mem accordingly")
 
 mc = config.get("model_conf", {})
