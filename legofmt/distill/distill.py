@@ -16,7 +16,8 @@ def one_step_euler_loss(lego, base: Tensor, ds_t, pdgid_idx: Tensor, model=None,
     the ladder runs outside autocast."""
     with torch.autocast(base.device.type, enabled=False):
         z = None if z is None else tuple(a.float() for a in z)
-        return _one_step_euler_loss_fp32(lego, base.float(), ds_t, pdgid_idx, lego.model if model is None else model, z)
+        model = lego.model if model is None else model
+        return _one_step_euler_loss_fp32(lego, base.float(), ds_t, pdgid_idx, model, z)
 
 
 def _one_step_euler_loss_fp32(lego, base: Tensor, ds_t, pdgid_idx: Tensor, model, z=None) -> Tensor:
@@ -31,14 +32,14 @@ def _one_step_euler_loss_fp32(lego, base: Tensor, ds_t, pdgid_idx: Tensor, model
 
     sections = lego.rc.one_step_euler_sections
     with torch.no_grad():
-        step = 2.0 ** -(torch.randint(1, sections + 1,
-                                      (base.shape[0], 1), device=base.device) - 1).to(base.dtype)
+        step = 2.0 ** -(torch.randint(1, sections + 1, (base.shape[0], 1), device=base.device) - 1).to(base.dtype)
         t0   = (torch.rand_like(step) * (1.0 / step).round()).floor() * step  # grid-aligned start
         x0   = lego.ps.sample(base, ds_t.f.model_in.float(), t0.squeeze(-1)).x_t
         z0   = None if z is None else z[0] + t0 * (z[1] - z[0])
         half = step / 2
         h    = half.unsqueeze(-1)
-        d_t  = torch.where(half >= 2.0 ** -(sections - 1), half, torch.zeros_like(half))  # smallest step's teacher uses d=0, anchoring the bootstrap ladder
+        # the smallest step's teacher uses d=0, anchoring the bootstrap ladder
+        d_t  = torch.where(half >= 2.0 ** -(sections - 1), half, torch.zeros_like(half))
         s1, w1 = field(x0, t0, z0, d=d_t)
         x_mid = torch.where(gen, man.expmap(x0, h * s1), x0)
         z_mid = None if z is None else z0 + half * w1

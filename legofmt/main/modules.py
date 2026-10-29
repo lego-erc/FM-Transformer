@@ -13,9 +13,7 @@ from torch.utils.data import DataLoader, Subset, random_split
 import lightning as ltng
 
 from legofmt.base_dist import base_nn
-from legofmt.base_dist.base_nn import (
-    BaseDist, build_base_head, _OT_COUPLING_REQUIRES_LAP,
-)
+from legofmt.base_dist.base_nn import BaseDist, build_base_head, _OT_COUPLING_REQUIRES_LAP
 from legofmt.base_dist.gen_base import GenerateBase
 
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
@@ -34,9 +32,7 @@ from legofmt.geometry.geom_trafos import zoom_polar
 from legofmt.geometry.symmetry_projections import CubeSymmetry
 
 from legofmt.mod_comps.config import resolve_legoltng_config
-from legofmt.mod_comps.optimizers import (
-    build_optimizer, opt_eval, opt_is_schedulefree, opt_train,
-)
+from legofmt.mod_comps.optimizers import build_optimizer, opt_eval, opt_is_schedulefree, opt_train
 
 from legofmt.log_metrics.val_metrics import ShowerValMetrics
 
@@ -99,8 +95,8 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
             self.base_head = head
             params += [p for p in self.base_head.parameters() if p.requires_grad]
         elif self.rc.edep_whiten:
-            raise ValueError("model_conf.edep_whiten needs the base head's per-event E_dep prior (base_pretrain_batches "
-                             "> 0 or a saved base_conf.base_head, scale_dist sm_norm, Z/A/Size conditioning).")
+            raise ValueError("model_conf.edep_whiten needs the base head's per-event E_dep prior (base_pretrain_"
+                             "batches > 0 or a saved base_conf.base_head, scale_dist sm_norm, Z/A/Size conditioning).")
 
         if self.rc.learned_loss_weights:
             self.lv = nn.Parameter(torch.zeros(3 + int(self.rc.edep_cell) + int(self.rc.n_lat > 0)))  # one per channel
@@ -130,10 +126,7 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         object.__setattr__(self, "reflow_teacher", teacher)  # not a submodule: no state_dict/DDP
 
     def _build_model(self, rc) -> nn.Module:
-        return ProjectModel(
-            CFMTrafo_x(**rc.model_args),
-            rc.manifold,
-        )
+        return ProjectModel(CFMTrafo_x(**rc.model_args), rc.manifold)
 
     def _opt_train(self) -> None:
         opt_train(self.opt)
@@ -169,8 +162,7 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
             teacher = _teacher_from_state(self.rc.config, vf.state_dict())
             object.__setattr__(self, "reflow_teacher", teacher.to(self.device))
         else:  # refresh: teacher = last epoch's student
-            t_m = self.reflow_teacher.model
-            uncompiled(t_m).vf.load_state_dict(vf.state_dict())
+            uncompiled(self.reflow_teacher.model).vf.load_state_dict(vf.state_dict())
 
     @torch.no_grad()
     def convert_pdgids(self, pdgids: Tensor) -> Tensor:
@@ -190,7 +182,8 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
         new  = torch.where(rows.view(1, -1, 1), new, x)
         return torch.where(fwd[:, None, None], new, x)
 
-    def _zoom_dirs(self, x: Tensor, am: Tensor, fwd: Tensor, inverse: bool = False, pdgids: Tensor | None = None) -> Tensor:
+    def _zoom_dirs(self, x: Tensor, am: Tensor, fwd: Tensor, inverse: bool = False,
+                   pdgids: Tensor | None = None) -> Tensor:
         u    = x[..., self.rc.n_prefix:self.rc.n_prefix + 1, 1:4]
         dirs = zoom_polar(x[..., 1:4], u, self.rc.dir_zoom, inverse, self.rc.dir_zoom_mix)
         new  = torch.cat((x[..., 0:1], dirs, x[..., 4:]), dim=-1)
@@ -219,22 +212,13 @@ class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
             full = _interacting_only(full)
         n_val = max(1, int(len(full) * self.rc.val_conf.get("val_frac", 0.01)))
         gen   = torch.Generator().manual_seed(self.rc.val_conf.get("seed", 0))
-        self._train_ds, self._val_ds = random_split(
-            full, [len(full) - n_val, n_val], generator=gen,
-        )
+        self._train_ds, self._val_ds = random_split(full, [len(full) - n_val, n_val], generator=gen)
         self._pretrain_base_if_needed()
 
-    def _make_loader(self, dataset, *, shuffle: bool, bs: int | None = None,
-                     batch_sampler=None) -> DataLoader:
-        return make_loader(
-            dataset,
-            bs=bs if bs is not None else self.rc.dl_conf.get("bs", 2**12),
-            shuffle=shuffle,
-            num_workers=self.rc.dl_conf.get("num_workers", 4),
-            batched_sampler=True,
-            batch_sampler=batch_sampler,
-            seed=loader_seed(self.rc.dl_conf),
-        )
+    def _make_loader(self, dataset, *, shuffle: bool, bs: int | None = None, batch_sampler=None) -> DataLoader:
+        return make_loader(dataset, bs=bs if bs is not None else self.rc.dl_conf.get("bs", 2**12), shuffle=shuffle,
+                           num_workers=self.rc.dl_conf.get("num_workers", 4), batched_sampler=True,
+                           batch_sampler=batch_sampler, seed=loader_seed(self.rc.dl_conf))
 
     def on_before_batch_transfer(self, batch, dataloader_idx: int):
         if self.rc.len_buckets is not None:

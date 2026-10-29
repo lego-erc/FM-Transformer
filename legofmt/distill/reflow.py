@@ -47,14 +47,8 @@ class ProjectModelDirect(ProjectModel):
     of :class:`ProjectModel`; only the forward differs (no time argument,
     residual instead of velocity, single Euler step + safe sphere snap)."""
 
-    def forward(
-        self,
-        x: Tensor,
-        mask: Tensor,
-        attn_mask: Tensor,
-        types: Tensor,
-        pdgids: Tensor | None = None,
-    ) -> Tensor:
+    def forward(self, x: Tensor, mask: Tensor, attn_mask: Tensor, types: Tensor,
+                pdgids: Tensor | None = None) -> Tensor:
         _, x_att = self._prep_x(x, attn_mask)
         out_raw  = x_att + self.vf(x_att, mask, attn_mask, types, pdgids)
         gen = (mask == 1).unsqueeze(-1)
@@ -71,10 +65,7 @@ class LEGOLtngDirect(LEGOLtng):
     Teacher construction/device placement is inherited from LEGOLtng."""
 
     def _build_model(self, rc) -> nn.Module:
-        return ProjectModelDirect(
-            CFMTrafo_x(**rc.model_args, time_cond=False),
-            rc.manifold,
-        )
+        return ProjectModelDirect(CFMTrafo_x(**rc.model_args, time_cond=False), rc.manifold)
 
     def _reflow_target(self, ds_t: DataStruct, base: Tensor) -> Tensor:
         """The teacher's transport of ``base``, or the data target without one."""
@@ -88,37 +79,20 @@ class LEGOLtngDirect(LEGOLtng):
             base = self.gen_base_wrapper(ds_t)
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
             target = self._reflow_target(ds_t, base)
-        pred = self.model(
-            base,
-            mask=ds_t.m.full, attn_mask=ds_t.am.full,
-            types=self.types_embd, pdgids=pdgid_idx,
-        )
-        sq = (pred - target) ** 2
-        loss, logs = self.reduce_loss(sq, ds_t)
+        pred = self.model(base, mask=ds_t.m.full, attn_mask=ds_t.am.full, types=self.types_embd, pdgids=pdgid_idx)
+        loss, logs = self.reduce_loss((pred - target) ** 2, ds_t)
         if logs:
             self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
         return loss
 
-    def _solve(   # the inherited no_grad ``solve`` and ``_solve_by_length`` both dispatch here
-        self,
-        ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]",
-        x_init: Tensor | None = None,
-        split_size: int | None = None,
-        **_kw,
-    ) -> Tensor:
+    def _solve(self, ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]", x_init: Tensor | None = None,
+               split_size: int | None = None, **_kw) -> Tensor:
+        """One forward; the inherited no_grad ``solve`` and ``_solve_by_length`` both dispatch here."""
         ds_t, pdgids_idx = self._prep_solve(ds_t)
         if x_init is None:
             x_init = self.gen_base_wrapper(ds_t)
-
-        def _fwd(x, m, a, pi):
-            return self.model(
-                x, mask=m, attn_mask=a, types=self.types_embd, pdgids=pi,
-            )
-
-        return self.chunked(
-            _fwd, x_init, ds_t.m.full, ds_t.am.full, pdgids_idx,
-            split_size=split_size,
-        )
+        fwd = lambda x, m, a, pi: self.model(x, mask=m, attn_mask=a, types=self.types_embd, pdgids=pi)
+        return self.chunked(fwd, x_init, ds_t.m.full, ds_t.am.full, pdgids_idx, split_size=split_size)
 
 
 class GenerateOutDirect(GenerateOut):

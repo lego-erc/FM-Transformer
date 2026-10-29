@@ -77,20 +77,14 @@ def _median_heuristic(X, Y, max_samples=2000):
 
 def compute_mmd(X, Y, max_samples=2000):
     # unbiased MMD, Gaussian RBF with median-heuristic bandwidth; subsampled to bound the N^2 kernels
-    if X.shape[0] > max_samples:
-        X = X[torch.randperm(X.shape[0], device=X.device)[:max_samples]]
-    if Y.shape[0] > max_samples:
-        Y = Y[torch.randperm(Y.shape[0], device=Y.device)[:max_samples]]
+    X, Y = (a[torch.randperm(a.shape[0], device=a.device)[:max_samples]] if a.shape[0] > max_samples else a
+            for a in (X, Y))
     bw = _median_heuristic(X, Y)
-    Kxx = torch.exp(-torch.cdist(X, X).square() / bw)
-    Kyy = torch.exp(-torch.cdist(Y, Y).square() / bw)
-    Kxy = torch.exp(-torch.cdist(X, Y).square() / bw)
+    k = lambda a, b: torch.exp(-torch.cdist(a, b).square() / bw)
+    Kxx, Kyy, Kxy = k(X, X), k(Y, Y), k(X, Y)
     n, m = X.shape[0], Y.shape[0]
-    mmd_sq = (
-        (Kxx.sum() - Kxx.diag().sum()) / (n * (n - 1))
-        + (Kyy.sum() - Kyy.diag().sum()) / (m * (m - 1))
-        - 2 * Kxy.mean()
-    )
+    mmd_sq = ((Kxx.sum() - Kxx.diag().sum()) / (n * (n - 1)) + (Kyy.sum() - Kyy.diag().sum()) / (m * (m - 1))
+              - 2 * Kxy.mean())
     return mmd_sq.clamp(min=0).sqrt()
 
 
@@ -99,32 +93,22 @@ def w1_per_feature(X, Y):
 
 
 def edep_by_primary(edep_real, edep_fake, pdgid_in, n_out) -> dict:
-    """E_dep accuracy split by incoming species, and again on the events with a
-    secondary.
+    """E_dep accuracy split by incoming species: W1 per primary, and the generated / true mean on the events with a
+    secondary (``n_out >= 2``; a ratio, not W1, because the error is a scale error and a ratio reads as a percentage).
 
-    Nothing else in the validation set resolves the primary: ``event_summary``
-    tags *outgoing* e-/e+/gamma and pools every gun together, so a defect that
-    lives in one primary averages away. Measured on rp_fm_had_base_180926
-    (2026-09-18): E_dep was within 1% for e-/e+/gamma at every multiplicity but
-    +15% for protons and +20% for neutrons once ``n_out >= 4``, and none of the
-    logged metrics moved. The split on ``n_out >= 2`` is where the hadronic
-    error lives -- a nuclear interaction happened, and the E_dep prior cannot
-    see that it did.
-
-    Ratios, not W1, for the multi cell: the error is a scale error and a ratio
-    reads directly as a percentage.
-    """
+    Nothing else here resolves the primary: ``event_summary`` tags *outgoing* e-/e+/gamma and pools every gun, so a
+    defect of one primary averages away. On rp_fm_had_base_180926 (2026-09-18) E_dep was within 1% for e-/e+/gamma at
+    every multiplicity but +15% for protons and +20% for neutrons once ``n_out >= 4``, and no logged metric moved: the
+    hadronic error lives where a nuclear interaction happened, which the E_dep prior cannot see."""
     out = {}
     for pid, tag in PRIMARY_TAGS.items():
         sel = pdgid_in == pid
         if not bool(sel.any()):
             continue
-        r, f = edep_real[sel], edep_fake[sel]
-        out[f"val/w1_edep/{tag}"] = (r.sort().values - f.sort().values).abs().mean()
+        out[f"val/w1_edep/{tag}"] = (edep_real[sel].sort().values - edep_fake[sel].sort().values).abs().mean()
         multi = sel & (n_out >= 2)
         if int(multi.sum()) >= 32:
-            rm, fm = edep_real[multi], edep_fake[multi]
-            out[f"val/edep_ratio_multi/{tag}"] = fm.mean() / rm.mean().clamp(min=1e-8)
+            out[f"val/edep_ratio_multi/{tag}"] = edep_fake[multi].mean() / edep_real[multi].mean().clamp(min=1e-8)
     return out
 
 
@@ -145,42 +129,29 @@ def edep_layer_metrics(real: torch.Tensor, fake: torch.Tensor) -> dict:
 class ShowerValMetrics:
 
     def __call__(self, lego, ds_t) -> dict:
-        gen = self._generate(lego, ds_t)
+        gen = _F(self._generate(lego, ds_t))
         # decode the overflow sentinel as to_mev / denorm_edep do: a generated -overflow_delta
         # is a truth zero, and compared raw it inflated val/mmd_particle 4.5x on plateSi_131026
-        _F(gen).out_p[..., 0].clamp_(0.0, 1.0)
-        _F(gen).edep.clamp_(0.0, 1.0)
-        gout = _F(gen).out_p
-        active, pdg, rcc = ds_t.am.out_p, ds_t.f.out_p[..., -1], ds_t.f.out_cc
+        gen.out_p[..., 0].clamp_(0.0, 1.0)
+        gen.edep.clamp_(0.0, 1.0)
+        active, pdg = ds_t.am.out_p, ds_t.f.out_p[..., -1]
+        sides = ((ds_t.f.out_cc, ds_t.f.edep), (gen.out_p, gen.edep))  # (outgoing, E_dep) of the truth, generated
+        split = lambda cc: (cc[..., 1:4], cc[..., 0:1], cc[..., 4:7])   # mom, e, pos
         reps = {
-            "particle": (
-                KIN_NAMES,
-                particle_kinematics(rcc[..., 1:4], rcc[..., 0:1], rcc[..., 4:7], active),
-                particle_kinematics(gout[..., 1:4], gout[..., 0:1], gout[..., 4:7], active),
-            ),
-            "summary": (
-                SUMMARY_FEATURE_NAMES,
-                event_summary(rcc[..., 1:4], rcc[..., 0:1], rcc[..., 4:7], pdg, active, ds_t.f.edep),
-                event_summary(gout[..., 1:4], gout[..., 0:1], gout[..., 4:7], pdg, active, _F(gen).edep),
-            ),
+            "particle": (KIN_NAMES, *(particle_kinematics(*split(cc), active) for cc, _ in sides)),
+            "summary": (SUMMARY_FEATURE_NAMES, *(event_summary(*split(cc), pdg, active, ed) for cc, ed in sides)),
         }
         out = {}
         for tag, (names, real, fake) in reps.items():
             real_s, fake_s = standardize(real, fake)
             out[f"val/mmd_{tag}"] = compute_mmd(fake_s, real_s)
-            out.update({
-                f"val/w1_{tag}/{n}": w1
-                for n, w1 in zip(names, w1_per_feature(fake_s, real_s))
-            })
-        out.update(edep_by_primary(
-            ds_t.f.edep, _F(gen).edep, ds_t.f.in_p[..., 0, -1].long(),
-            ds_t.am.out_p.sum(-1),
-        ))
+            out.update({f"val/w1_{tag}/{n}": w1 for n, w1 in zip(names, w1_per_feature(fake_s, real_s))})
+        out.update(edep_by_primary(ds_t.f.edep, gen.edep, ds_t.f.in_p[..., 0, -1].long(), active.sum(-1)))
         if getattr(lego, "edep_ae", None) is not None and ds_t.edep_layers is not None:
             dp = lego._edep_dp
             e_in = dp.pen.from_scalar(ds_t.f.in_cc[:, 0, 1:4], ds_t.f.in_cc[:, 0, 0:1]).norm(dim=-1)
-            fake = lego.edep_ae.sample(lego._edep_latents, dp.denorm_edep_row(_F(gen).edep.float(), e_in.float(),
-                                                                             ds_t.f.in_p[:, 0, -1]))
+            fake = lego.edep_ae.sample(lego._edep_latents,
+                                       dp.denorm_edep_row(gen.edep.float(), e_in.float(), ds_t.f.in_p[:, 0, -1]))
             out.update(edep_layer_metrics(dp.denorm_edep(ds_t.edep_layers.float()), fake))
         return out
 
@@ -194,10 +165,8 @@ class ShowerValMetrics:
             fwd  = ds_t.m.full[:, lego.rc.n_prefix] == 0
             face = sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
             ds_t = DataStruct(lego._canon_dirs(ds_t.f.full, face, fwd), ds_t.m.full, ds_t.am.full)
-        out = lego.solve(
-            ds_t, x_init=lego.gen_base_wrapper(ds_t),
-            step_size=cfg.get("step_size", 0.04), method=cfg.get("method", "midpoint"),
-        )
+        out = lego.solve(ds_t, x_init=lego.gen_base_wrapper(ds_t), step_size=cfg.get("step_size", 0.04),
+                         method=cfg.get("method", "midpoint"))
         if getattr(lego.rc, "dir_zoom", None):
             out = lego._zoom_dirs(out, ds_t.am.full, ds_t.m.full[:, lego.rc.n_prefix] == 0, inverse=True,
                                   pdgids=ds_t.f.pdgids)
