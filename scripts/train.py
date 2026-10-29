@@ -89,14 +89,10 @@ else:
     logger = False
 
 config["additional"]["epochs"] = epochs
-config["additional"]["precision"] = (
-    str(run["precision"]) + ", " + torch.get_float32_matmul_precision()
-)
+config["additional"]["precision"] = f"{run['precision']}, {torch.get_float32_matmul_precision()}"
 config["additional"]["comet_exp_key"] = getattr(logger, "_experiment_key", None) if logger else None
 try:
-    git_rev = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-    ).strip()
+    git_rev = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
 except (subprocess.CalledProcessError, FileNotFoundError):
     git_rev = None
 config["additional"]["git_rev"] = git_rev
@@ -125,10 +121,7 @@ train_model = run["train_model"]
 if run.get("init_seed") is not None:
     ltng.seed_everything(int(run["init_seed"]), workers=True)
 compile_mode = run["compile"]  # false | model
-if train_model == "fm":
-    model = LEGOLtng(config)
-else:
-    model = MultModel(config)
+model = LEGOLtng(config) if train_model == "fm" else MultModel(config)
 
 resume_from = run.get("resume_from")
 if resume_from:
@@ -151,7 +144,8 @@ if compile_mode == "model":  # fm: the ProjectModel; mult: the count Decoder wra
 
 if run.get("data_seed") is not None:
     torch.manual_seed(int(run["data_seed"]))
-trainer.fit(model=model, ckpt_path=run.get("resume_ckpt"))  # Lightning checkpoint (optimizer, scheduler, epoch) to continue from
+# resume_ckpt: a Lightning checkpoint (optimizer, scheduler, epoch) to continue from
+trainer.fit(model=model, ckpt_path=run.get("resume_ckpt"))
 if not trainer.is_global_zero:  # one writer: concurrent torch.save to one path can corrupt it
     raise SystemExit(0)
 
@@ -159,9 +153,7 @@ model.rc.config["dl_conf"]["lds_args"]["data"] = "<dataset_path>"
 model.rc.config["dl_conf"]["data_path"] = None
 model.rc.config["additional"]["comet_exp_key"] = None
 if hasattr(model, "base_head"):
-    model.rc.config["base_conf"]["base_head"] = {
-        k: v.cpu() for k, v in model.base_head.state_dict().items()
-    }
+    model.rc.config["base_conf"]["base_head"] = {k: v.cpu() for k, v in model.base_head.state_dict().items()}
 # the learned loss weights live on the LightningModule, not in vf's state_dict:
 # keep them so resume_from does not restart every Kendall cell at weight 1.
 # Guarded: the mult model has neither the cells nor a model_conf to put them in.
@@ -170,27 +162,15 @@ if any(hasattr(model, k) for k in ("lv", "lv_flow")):
         k: getattr(model, k).detach().cpu() for k in ("lv", "lv_flow") if hasattr(model, k)
     }
 
-if run.get("ckpt_dir"):
-    ckpt_dir = run["ckpt_dir"]  # explicit dir -> save directly here, no flow/mult subdir
-else:
-    ckpt_base = os.environ.get("LEGO_CKPT_DIR", "./checkpoints/")
-    ckpt_dir = os.path.join(ckpt_base, "flow" if train_model == "fm" else "mult")
-ckpt_path = os.path.join(ckpt_dir, f"{name}.pt")
+# an explicit ckpt_dir is used as is; otherwise $LEGO_CKPT_DIR (or ./checkpoints/) plus flow/ or mult/
+ckpt_dir = run.get("ckpt_dir") or os.path.join(os.environ.get("LEGO_CKPT_DIR", "./checkpoints/"),
+                                               "flow" if train_model == "fm" else "mult")
 os.makedirs(ckpt_dir, exist_ok=True)
 
 model._opt_eval()
 if train_model == "fm":
-    vf = uncompiled(model.model).vf
-    state_dict = vf.state_dict()
+    state_dict = uncompiled(model.model).vf.state_dict()
 else:
-    if compile_mode == "model":
-        model.model = uncompiled(model.model)  # keep state_dict keys free of the compile wrapper
+    model.model = uncompiled(model.model)  # keep state_dict keys free of the compile wrapper
     state_dict = model.state_dict()
-
-torch.save(
-    {
-        "state_dict": state_dict,
-        "config": model.rc.config,
-    },
-    ckpt_path,
-)
+torch.save({"state_dict": state_dict, "config": model.rc.config}, os.path.join(ckpt_dir, f"{name}.pt"))

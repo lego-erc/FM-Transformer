@@ -11,12 +11,12 @@ run:
   dtype: float32
   epochs: 10
   dataset_size: 16_000_000     # placeholder for the scheduler at construction; fit uses the exact step count
-  compile: model             # false | model (mult: ~2.8x faster training step)
+  compile: model             # false | model
   gradient_clip_val: 1.0
   val_check_interval: 0.2
   limit_val_batches: 4
   strategy: ddp
-  ckpt_dir: null             # base dir (null -> $LEGO_CKPT_DIR -> ./checkpoints/); flow|mult appended
+  ckpt_dir: null             # used as is; null -> $LEGO_CKPT_DIR (else ./checkpoints/) + flow/ or mult/
 
 logging:
   comet: true

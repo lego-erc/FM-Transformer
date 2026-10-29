@@ -6,7 +6,8 @@ run:
   name: rp_fm_v3_ddtv_220726
   devices: [1, 2, 4, 6, 7]
   nodes: 1                   # number of nodes (SLURM --nodes / Trainer num_nodes); devices are per node
-  precision: bf16-mixed      # ~20% faster than 32 at equal metrics; pre-2.25.5 (qk scale 1000) checkpoints get fp32 attention automatically
+  precision: bf16-mixed      # ~20% faster than 32 at equal metrics; pre-2.25.5 (qk scale 1000) checkpoints get
+                             # fp32 attention automatically
   matmul_precision: medium
   dtype: float32
   epochs: 10
@@ -16,7 +17,7 @@ run:
   val_check_interval: 0.2
   limit_val_batches: 4
   strategy: ddp
-  ckpt_dir: null             # base dir (null -> $LEGO_CKPT_DIR -> ./checkpoints/); flow|mult appended
+  ckpt_dir: null             # used as is; null -> $LEGO_CKPT_DIR (else ./checkpoints/) + flow/ or mult/
 
 logging:
   comet: true
@@ -57,7 +58,7 @@ config:
     t_dist_shift: 1.3       # density ~ k*t^(k-1): slight right shift toward t=1 (1.0 = off)
     one_step_euler_fac: 0.
     reflow_kwargs: {method: midpoint, step_size: 0.5}
-    reflow_start_epoch: 0    # >0 is the ONLY on-switch for (self-)reflow; every production flow runs 0
+    reflow_start_epoch: 0    # >0 is the only on-switch for self-reflow (a reflow_path teacher runs from step 0)
     reflow_every: 4
     base_pretrain_batches: 1000
     base_pretrain_bs: 16384

@@ -125,6 +125,7 @@ if target.exists():
 
 # ---- schedule / walltime -------------------------------------------------
 sched = config.get("opt_conf", {}).get("scheduler")
+ts = None
 if sched is not None and "total_steps" not in sched and isinstance(dev, list):
     bs = config["dl_conf"]["bs"]
     ts = run["epochs"] * int(run["dataset_size"] / (bs * len(dev)))
@@ -156,9 +157,8 @@ if not FAIL:
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
     try:
         config["dl_conf"]["lds_args"]["data"] = str(dpath)
-        if sched is not None and "total_steps" not in sched and isinstance(dev, list):
-            sched["total_steps"] = run["epochs"] * int(
-                run["dataset_size"] / (config["dl_conf"]["bs"] * len(dev)))
+        if ts is not None:
+            sched["total_steps"] = ts
         if train_model == "fm":
             from legofmt.mod_comps.config import resolve_legoltng_config
             rc = resolve_legoltng_config(config)

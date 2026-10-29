@@ -52,7 +52,8 @@ if "adamw_betas" in flow_conf["opt_conf"]:
     flow_conf["opt_conf"]["adamw_betas"] = tuple(flow_conf["opt_conf"]["adamw_betas"])
 if flow_conf["opt_conf"].get("scheduler"):     # the flow's optimiser is built but never stepped here
     flow_conf["opt_conf"]["scheduler"].setdefault("total_steps", 1)
-flow_conf["dl_conf"]["lds_args"]["data"] = os.environ.get("LEGO_DATA_DIR", "./data/") + flow_conf["dl_conf"]["lds_args"]["data"]
+flow_conf["dl_conf"]["lds_args"]["data"] = (os.environ.get("LEGO_DATA_DIR", "./data/")
+                                            + flow_conf["dl_conf"]["lds_args"]["data"])
 
 lego = LEGOLtng(flow_conf)
 lego.setup("fit")                               # no trainer attached: the base head is not pretrained here
