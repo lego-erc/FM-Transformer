@@ -51,7 +51,7 @@ class _F:
     def edep(self) -> Tensor: return self.full[..., 1, 0]
     def cond(self, name: str) -> Tensor: return self.full[..., cond_slot(name), 0]
     @property
-    def pdgids(self) -> Tensor: return self.full[..., -1:]  # negative index: valid on the 8-column layout only, not on a 7-column solve output
+    def pdgids(self) -> Tensor: return self.full[..., -1:]
     @property
     def non_p(self) -> Tensor: return self.full[..., :n_prefix(), :]
     @property
@@ -87,28 +87,22 @@ class DataStruct:
     def __len__(self) -> int:
         return self.f.full.shape[0]
 
-    def __getitem__(self, idx: int | Tensor) -> "DataStruct":
+    def _map(self, fn) -> "DataStruct":
         e = self.edep_layers
-        return type(self)(self.f.full[idx], self.m.full[idx], self.am.full[idx],
-                          None if e is None else e[idx])
+        return type(self)(fn(self.f.full), fn(self.m.full), fn(self.am.full), None if e is None else fn(e))
+
+    def __getitem__(self, idx: int | Tensor) -> "DataStruct":
+        return self._map(lambda t: t[idx])
 
     def trim(self, L: int) -> "DataStruct":
         return type(self)(self.f.full[:, :L], self.m.full[:, :L], self.am.full[:, :L], self.edep_layers)
 
     def pin_memory(self) -> "DataStruct":
-        e = self.edep_layers
-        return type(self)(*(t.contiguous().pin_memory() for t in (self.f.full, self.m.full, self.am.full)),
-                          None if e is None else e.contiguous().pin_memory())
+        return self._map(lambda t: t.contiguous().pin_memory())
 
     def to(self, *args, **kwargs) -> "DataStruct":
         kwargs.setdefault("non_blocking", True)
-        e = self.edep_layers
-        return type(self)(
-            self.f.full.to(*args, **kwargs),
-            self.m.full.to(*args, **kwargs),
-            self.am.full.to(*args, **kwargs),
-            None if e is None else e.to(*args, **kwargs),
-        )
+        return self._map(lambda t: t.to(*args, **kwargs))
 
     @staticmethod
     def _collate(batch, *, collate_fn_map=None) -> "DataStruct":

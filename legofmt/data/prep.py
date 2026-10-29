@@ -30,41 +30,32 @@ class DataPrep:
     def __init__(self, config):
         config = config.get("config", config)
         if "model_conf" in config:
-            model_conf = config["model_conf"]
-            self.manifold = build_manifold(model_conf["manifold"])
-            self.proj_ray = model_conf.get("proj_ray", True)
+            conf = config["model_conf"]
+            self.manifold = build_manifold(conf["manifold"])
+            self.proj_ray = conf.get("proj_ray", True)
             cutoff_mev = config["dl_conf"]["lds_args"].get("cutoff_mev")
-            max_energy = model_conf["max_energy"]
-            cond = model_conf.get("cond_scalars", ("Density",))
-            self.energy_kin = model_conf.get("energy_kin", True)
-            self.edep_log_min = model_conf.get("edep_log_min")
-            self.edep_wall = model_conf.get("edep_wall", False)
-            self.edep_wall_species = model_conf.get("edep_wall_species")
-            self.edep_excess_mev = model_conf.get("edep_excess_mev")
-            cuboid_dim = model_conf.get("cuboid_dim")
+            max_energy = conf["max_energy"]
         else:
             # manifold is only needed by cc_trafo (the dict path); norm_e-only
             # users (MultLoader) legitimately have no manifold to give.
-            m = config.get("manifold")
-            self.manifold = build_manifold(m) if m else None
-            self.proj_ray = config.get("proj_ray")
-            cutoff_mev = config.get("cutoff_mev")
-            max_energy = config.get("max_energy")
-            cond = config.get("cond_scalars", ("Density",))
-            self.energy_kin = config.get("energy_kin", True)
-            self.edep_log_min = config.get("edep_log_min")
-            self.edep_wall = config.get("edep_wall", False)
-            self.edep_wall_species = config.get("edep_wall_species")
-            self.edep_excess_mev = config.get("edep_excess_mev")
-            cuboid_dim = config.get("cuboid_dim")
+            conf = config
+            self.manifold = build_manifold(conf["manifold"]) if conf.get("manifold") else None
+            self.proj_ray = conf.get("proj_ray")
+            cutoff_mev = conf.get("cutoff_mev")
+            max_energy = conf.get("max_energy")
+        self.energy_kin = conf.get("energy_kin", True)
+        self.edep_log_min = conf.get("edep_log_min")
+        self.edep_wall = conf.get("edep_wall", False)
+        self.edep_wall_species = conf.get("edep_wall_species")
+        self.edep_excess_mev = conf.get("edep_excess_mev")
         if self.edep_wall and self.edep_excess_mev is not None:
             missing = set(self.edep_wall_species or ()) - set(self.edep_excess_mev)
             if missing:
                 raise ValueError(f"edep_wall_species {sorted(missing)} have no entry in model_conf.edep_excess_mev: "
                                  "no such incoming species in the training data, so no cap")
-        set_layout(cond)
+        set_layout(conf.get("cond_scalars", ("Density",)))
         self.pen = EnergyProjections(cutoff_mev=cutoff_mev, max_energy=max_energy)
-        self.ppa = CubeTrace(cuboid_dim)
+        self.ppa = CubeTrace(conf.get("cuboid_dim"))
 
     def __call__(self, batch: tuple) -> Tensor:
         return self.prep(batch)
@@ -145,15 +136,14 @@ class DataPrep:
         excess = _F(f).edep.reshape(e_in.shape).double() - e_in
         return {int(p): max(0.0, excess[pid == p].max().item()) for p in pid.unique().tolist()}
 
-    def _edep_cap(self, e_in: Tensor, pid: Tensor) -> Tensor:
+    def _edep_wall_range(self, e_in: Tensor, pid: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """E_cap = E_in + margin(species) and the wall's log-odds range [log(eps / E_cap), log(E_cap / eps_missing)]."""
         margins = self.edep_excess_mev or EDEP_WALL_MARGIN_MEV
         margin = torch.full_like(e_in, max(margins.values()) if self.edep_excess_mev else EDEP_WALL_DEFAULT_MARGIN_MEV)
         for p, m in margins.items():
             margin = torch.where(pid == p, torch.full_like(e_in, m), margin)
-        return e_in + margin
-
-    def _edep_wall_range(self, cap: Tensor) -> tuple[Tensor, Tensor]:
-        return torch.log((self.edep_log_min or 1e-6) / cap), torch.log(cap / EDEP_WALL_EPS_MISSING_MEV)
+        cap = e_in + margin
+        return cap, torch.log((self.edep_log_min or 1e-6) / cap), torch.log(cap / EDEP_WALL_EPS_MISSING_MEV)
 
     def edep_wall_mask(self, pid: Tensor) -> Tensor:
         """Where the E_dep row is the wall: nowhere without ``model_conf.edep_wall``, for every incoming species with
@@ -174,8 +164,7 @@ class DataPrep:
         wide, and E_cap is the edge u = 1. Zero stays 0 (the overflow sentinel's condition)."""
         if not self.edep_wall:
             return self.norm_edep(edep)
-        e, cap = edep.double(), self._edep_cap(e_in.double(), pid)
-        lo, hi = self._edep_wall_range(cap)
+        e, (cap, lo, hi) = edep.double(), self._edep_wall_range(e_in.double(), pid)
         z = torch.log(e.clamp_min(1e-300)) - torch.log((cap - e).clamp_min(1e-300))
         u = ((z - lo) / (hi - lo)).clamp(0.0, 1.0)
         u = torch.where(e > 0, u, torch.zeros_like(u)).to(edep.dtype)
@@ -185,8 +174,7 @@ class DataPrep:
         """Inverse of ``norm_edep_row``: E_cap * sigmoid(z); non-positive u (the sentinel) -> 0, u > 1 -> the cap."""
         if not self.edep_wall:
             return self.denorm_edep(u)
-        cap = self._edep_cap(e_in.double(), pid)
-        lo, hi = self._edep_wall_range(cap)
+        cap, lo, hi = self._edep_wall_range(e_in.double(), pid)
         E = cap * torch.sigmoid(lo + u.double().clamp(0.0, 1.0) * (hi - lo))
         E = torch.where(u > 0, E, torch.zeros_like(E)).to(u.dtype)
         return torch.where(self.edep_wall_mask(pid), E, self.denorm_edep(u))
@@ -208,20 +196,17 @@ class DataPrep:
         mask=1). An optional ``E_dep_layers`` (B, n_layers) entry of data_add is
         returned as a 4th tensor, in MeV like the E_dep row."""
         cc_ext, mask, attn_mask, data_add = batch
-        e_dep = torch.ones_like(cc_ext[:, :1])
-        e_dep[..., 0] = data_add["E_dep"].view_as(e_dep[..., 0])
-        cond_rows = []
-        for name in cond_scalars():
+        first, *rest = cond_scalars()
+        rows = []
+        for name in (first, "E_dep", *rest):
             row = torch.ones_like(cc_ext[:, :1])
             row[..., 0] = data_add[name].view_as(row[..., 0])
-            cond_rows.append(row)
-        target = torch.cat((cond_rows[0], e_dep, *cond_rows[1:], cc_ext), dim=1).nan_to_num()
+            rows.append(row)
+        target = torch.cat((*rows, cc_ext), dim=1).nan_to_num()
         _F(target).non_p[..., -1] = 0
         z, o = torch.zeros_like(mask[:, :1]), torch.ones_like(mask[:, :1])
-        mask = torch.cat((z, o, *([z] * (len(cond_rows) - 1)), mask), dim=1)
-        attn_mask = torch.cat(
-            (torch.ones_like(attn_mask[:, :1]).repeat(1, len(cond_rows) + 1), attn_mask), dim=1,
-        )
+        mask = torch.cat((z, o, *([z] * len(rest)), mask), dim=1)
+        attn_mask = torch.cat((torch.ones_like(attn_mask[:, :1]).repeat(1, len(rows)), attn_mask), dim=1)
         if "E_dep_layers" in data_add:
             return target, mask, attn_mask, data_add["E_dep_layers"]
         return target, mask, attn_mask

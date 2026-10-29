@@ -63,7 +63,7 @@ class GetLEGOData:
         del dataset_valid
         data_add = {k: v[keep_complete] for k, v in data_add.items()}
         if n_events is not None:
-            rd_idx = torch.randperm(data_pp.shape[0], device="cpu", generator=torch.Generator().manual_seed(0))[:n_events]
+            rd_idx = torch.randperm(data_pp.shape[0], generator=torch.Generator().manual_seed(0))[:n_events]
             data_pp = data_pp[rd_idx]
             data_add = {k: v[rd_idx] for k, v in data_add.items()}
         particle_nan = ~data_pp.isnan().any(dim=-1)
