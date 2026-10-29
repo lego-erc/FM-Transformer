@@ -6,6 +6,8 @@ from pathlib import Path
 
 import torch
 
+from legofmt.data.dataloaders import LEGODataset
+from legofmt.data.prep import DataPrep
 from legofmt.data.struct import DataStruct, _F
 from legofmt.distill.reflow import LEGOLtngDirect
 
@@ -175,3 +177,31 @@ def _head_batch(edep: torch.Tensor, n_out: torch.Tensor) -> DataStruct:
     am = torch.ones(B, 8, dtype=torch.bool)
     am[:, 7] = second
     return DataStruct(f, m, am)
+
+
+_PREPPED_E_OUT = [[50, 50, 50, 50], [50, 1, 50, 1], [1, 1, 1, 1],
+                  [50, 1, 1, 1], [50, 50, 50, 1], [1, 50, 1, 50]]
+
+
+def prepped_padded(cond=("Density",), layers=False, n=6, k=4) -> tuple:
+    """A real prepped padded dataset, ``(f, m, am)`` or ``(f, m, am, edep_layers)``, of
+    events with 4/2/0/1/3/2 outgoing particles (event 0 full length, event 2 none)."""
+    g = torch.Generator().manual_seed(0)
+    e_out = torch.tensor(_PREPPED_E_OUT, dtype=torch.float32)[:n, :k]
+    def rows(e, shape):
+        d = torch.nn.functional.normalize(torch.randn(*shape, 3, generator=g), dim=-1)
+        return torch.cat((e[..., None], e[..., None] * d, torch.randn(*shape, 3, generator=g) * 50.0), -1)
+    inc = torch.cat((rows(torch.full((n, 1), 200.0), (n, 1)), torch.full((n, 1, 1), 2212.0)), -1)
+    out = torch.cat((rows(e_out, (n, k)), torch.full((n, k, 1), 22.0)), -1)
+    per_event = {"E_dep": torch.rand(n, generator=g) * 100.0}
+    for i, name in enumerate(cond):
+        per_event[name] = torch.full((n,), 3.0 + i)
+    if layers:
+        per_event["E_dep_layers"] = torch.rand(n, 3, generator=g) * 30.0
+    cfg = {"cutoff_mev": 10.0, "manifold": MANIFOLD, "proj_ray": False,
+           "cond_scalars": list(cond), "energy_kin": True}
+    d = LEGODataset(data={"per_particle": {"Incoming": inc, "Outgoing": out}, "per_event": per_event},
+                    prep=DataPrep(cfg), cutoff_mev=10.0, min_particles=0).data
+    n_prefix = len(cond) + 1
+    assert (d.am.full[:, n_prefix + 1:].sum(1) == 0).any(), "no zero-outgoing event survived prep"
+    return (d.f.full, d.m.full, d.am.full) + ((d.edep_layers,) if layers else ())
