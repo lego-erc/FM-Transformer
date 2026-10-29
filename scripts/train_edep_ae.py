@@ -64,7 +64,7 @@ def _layers(ds):
         return _layers(ds.dataset)[torch.as_tensor(ds.indices)]
     if hasattr(ds, "keep_idx"):
         return _layers(ds.ds)[ds.keep_idx]
-    return ds.data.edep_layers
+    return ds.edep_layers()
 
 
 dev = "cuda"

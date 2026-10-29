@@ -72,33 +72,33 @@ class MultLoader(torch.utils.data.Dataset):
         ptypes_in = mm_conf.get("ptypes_in", torch.tensor([11, 22]))
         self.train_inverse = mm_conf.get("train_inverse", False)
 
-        ds = LEGODataset(**lds_conf, prep=DataPrep({
+        lds = LEGODataset(**lds_conf, prep=DataPrep({
             "max_energy": mm_conf["max_energy"],
             "cutoff_mev": lds_conf.get("cutoff_mev"),
             "cond_scalars": mm_conf.get("cond_scalars", cond_scalars()),
             "edep_log_min": mm_conf.get("edep_log_min"),
-        })).data
+        }))
         meta_cond = config.get("additional", {}).get("data_meta", {}).get("cond_scalars")
         if meta_cond and tuple(meta_cond) != tuple(mm_conf["cond_scalars"]):
             raise ValueError(
                 f"mm_conf.cond_scalars={tuple(mm_conf['cond_scalars'])} != dataset layout {tuple(meta_cond)}"
             )
-        ds_f = ds.f
         # in_dim must be len(cond_scalars) + 7
-        conds = torch.cat([ds_f.cond(n).unsqueeze(-1) for n in cond_scalars()], dim=-1)
+        conds = torch.cat([lds.cond(n).unsqueeze(-1) for n in cond_scalars()], dim=-1)
+        incoming = lds.incoming()
 
         self.pdgid_in_idx = torch.searchsorted(
-            ptypes_in, ds_f.in_p[..., 0, -1].contiguous()
+            ptypes_in, incoming[:, -1].contiguous()
         ).clamp(0, ptypes_in.shape[0] - 1)
-        self.in_tok = torch.cat((conds, ds_f.in_cc.squeeze(-2)), dim=-1)
-        pid = ds_f.out_p[..., -1]  # one species at a time: the broadcast compare made an (N, max_out, S) int64
-        self.counts = torch.stack([(pid == p).sum(1) for p in ptypes], -1).clamp_max(max_particles - 1)
+        self.in_tok = torch.cat((conds, incoming[:, :7]), dim=-1)
+        self.counts = lds.species_counts(ptypes).clamp_max(max_particles - 1)
         self.pt_target = None
         if mm_conf.get("passthrough_head", False):
-            n_out = ds.am.out_p.sum(-1)
-            self.pt_target = ((ds_f.edep.reshape(-1) <= 0) & (n_out == 1)).float()
+            self.pt_target = ((lds.edep().reshape(-1) <= 0) & (lds.n_out() == 1)).float()
 
-        if self.train_inverse:
+        if self.train_inverse:   # needs every outgoing token: the padded tensors
+            ds = lds.data
+            ds_f = ds.f
             out_cc = ds_f.out_cc.nan_to_num()
             self.out_tok = torch.cat(
                 (conds.unsqueeze(1).expand(-1, out_cc.shape[1], -1), out_cc), dim=-1
