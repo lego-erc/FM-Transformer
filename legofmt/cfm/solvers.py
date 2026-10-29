@@ -1,16 +1,13 @@
-"""ODE solving / sampling for the Riemannian FM model, and the ``forward``
-that drives it from ``odeint_conf``.
+"""ODE solving / sampling for the Riemannian FM model, and the ``forward`` that drives it from ``odeint_conf``.
 
-Split out of ``main/modules.py``. These are mixin methods rather than a
-standalone solver object on purpose: ``lego_eval`` version-probes them with
-``hasattr(ltng, "_midpoint_steps")`` / ``hasattr(lego, "log_likelihood")``, so
-they must stay bound on the LightningModule.
-
-Members resolved through ``self`` and owned by ``LEGOLtng``: ``model``,
-``types_embd``, ``rc``, ``gen_base_wrapper``, ``convert_pdgids``, ``_opt_eval``.
+Mixin methods rather than a standalone solver object: ``lego_eval`` version-probes them with
+``hasattr(ltng, "_midpoint_steps")`` / ``hasattr(lego, "log_likelihood")``, so they must stay bound on the
+LightningModule. Members resolved through ``self`` and owned by ``LEGOLtng``: ``model``, ``types_embd``, ``rc``,
+``gen_base_wrapper``, ``convert_pdgids``, ``_opt_eval``.
 """
 
 import contextlib
+from functools import partialmethod
 
 import torch
 import torch.nn.functional as F
@@ -24,6 +21,8 @@ from legofmt.cfm.project_model import is_compiled, uncompiled
 from legofmt.compat import dynamic_shape_attention
 
 from legofmt.mod_comps.config import _amp_dtype, resolve_len_buckets
+
+_STEPPED = ("euler", "midpoint", "rk4")   # hand-unrolled manifold solvers (Solvers._steps); others go to ODESolver
 
 
 class Solvers:
@@ -85,11 +84,7 @@ class Solvers:
         am = ds_t.am.full.unsqueeze(-1)
         cc = ds_t.f.model_in.where(am, ds_t.f.in_cc)
 
-        if method == "rk4":
-            def vm(*args, **kwargs):
-                return self.model(*args, **kwargs).clone()
-        else:
-            vm = self.model
+        vm = (lambda *a, **kw: self.model(*a, **kw).clone()) if method == "rk4" else self.model
         solver = ODESolver(velocity_model=vm)
 
         self.model.no_detach = True
@@ -135,12 +130,9 @@ class Solvers:
         R = -(-K // C)
         z_init = (torch.randn(x_init.shape[0], K, device=x_init.device, dtype=x_init.dtype),) if K else ()
 
-        if time_grid is None:
-            if method in ("euler", "midpoint", "rk4"):
-                n = max(round(1.0 / step_size), 1)
-                time_grid = torch.linspace(0.0, 1.0, n + 1, device=x_init.device, dtype=x_init.dtype)
-            else:
-                time_grid = x_init.new_tensor([0.0, 1.0])
+        if time_grid is None:  # adaptive ODESolver methods get the bare [0, 1]
+            n = max(round(1.0 / step_size), 1) if method in _STEPPED else 1
+            time_grid = torch.linspace(0.0, 1.0, n + 1, device=x_init.device, dtype=x_init.dtype)
             if reverse:
                 time_grid = time_grid.flip(0)
         else:  # explicit grids (e.g. a YAML list) are used as given; ``reverse`` only flips the built one
@@ -150,20 +142,17 @@ class Solvers:
             # contiguous: a dynamic graph is guarded on the strides / offsets of the bucket and chunk views
             x_init, mask, attn_mask, pdgids_idx, *z = (a.contiguous() for a in (x_init, mask, attn_mask, pdgids_idx, *z))
             extras = dict(mask=mask, attn_mask=attn_mask, types=self.types_embd[:, :mask.shape[1]].contiguous(),
-                          pdgids=pdgids_idx, z=z[0] if z else None)
-            steps = dict(midpoint=self._midpoint_steps, euler=self._euler_steps, rk4=self._rk4_steps).get(method)
-            if steps is not None:
-                out = steps(x_init, time_grid, return_intermediates=return_intermediates, **extras)
+                          pdgids=pdgids_idx)
+            if method in _STEPPED:
+                out = self._steps(method, x_init, time_grid, return_intermediates, z=z[0] if z else None, **extras)
                 if not z:
                     return out
                 x, zz = out
                 return torch.cat((x, F.pad(zz, (0, R * C - K)).unflatten(-1, (R, C))), dim=-2)
             if z:
                 raise NotImplementedError(f"method {method!r} does not integrate the model_conf.edep_ae latent.")
-            extras.pop("z")
             return ODESolver(velocity_model=self.model).sample(
-                x_init=x_init, time_grid=time_grid,
-                step_size=step_size, method=method,
+                x_init=x_init, time_grid=time_grid, step_size=step_size, method=method,
                 return_intermediates=return_intermediates, **extras,
             )
 
@@ -186,84 +175,49 @@ class Solvers:
         """The velocity, and that of the ``model_conf.edep_ae`` latent ``z`` (``None`` without it)."""
         return (self.model(x, t, **kw), None) if z is None else self.model(x, t, z=z, **kw)
 
-    @staticmethod
-    def _steps_out(x: Tensor, z: Tensor | None, xs: list, zs: list, return_intermediates: bool):
-        """The final state (or the stack of every step's), with the latent's alongside when there is one."""
-        out = torch.stack(xs) if return_intermediates else x
-        return out if z is None else (out, torch.stack(zs) if return_intermediates else z)
-
-    def _midpoint_steps(
-        self, x: Tensor, time_grid: Tensor,
-        return_intermediates: bool = False, **extras,
-    ) -> Tensor:
-        """Manifold midpoint steps on the ``mask == 1`` slots. ``v1`` is queried with
-        ``d = dt/2`` (the flow map for the half-step it takes); ``v2`` stays
-        instantaneous because it is applied as a full step from ``x``
-        (tests/test_midpoint_flow_map.py). Its ``d = 0`` is passed as a tensor, not
-        omitted: a ``None`` is a separate dynamo guard, i.e. a second compiled graph."""
-        z   = extras.pop("z", None)
+    def _steps(self, method: str, x: Tensor, time_grid: Tensor, return_intermediates: bool = False,
+               z: Tensor | None = None, **extras):
+        """Manifold ``euler`` / ``midpoint`` / ``rk4`` steps on the ``mask == 1`` slots, the ``model_conf.edep_ae``
+        latent ``z`` integrated alongside. Returns the final state (or the stack of every step's), paired with the
+        latent's when there is one."""
         xs, zs = [x], [z]
         man = self.model.manifold
         gen = (extras["mask"] == 1).unsqueeze(-1)
-        for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
-            dt     = t_b - t_a
-            v1, w1 = self._field(x, t_a, z, d=dt / 2, **extras)
-            x_half = man.expmap(x, dt / 2 * v1)
-            v2, w2 = self._field(x_half, t_a + dt / 2, None if z is None else z + dt / 2 * w1,
-                                 d=torch.zeros_like(dt), **extras)
-            x      = torch.where(gen, man.expmap(x, dt * man.proju(x, v2)), x)
-            z      = None if z is None else z + dt * w2
-            if return_intermediates:
-                xs.append(x)
-                zs.append(z)
-        return self._steps_out(x, z, xs, zs, return_intermediates)
-
-    def _euler_steps(
-        self, x: Tensor, time_grid: Tensor,
-        return_intermediates: bool = False, **extras,
-    ) -> Tensor:
-        """Manifold Euler steps with ``d = dt`` handed to the flow map; only the
-        ``mask == 1`` slots are transported."""
-        z   = extras.pop("z", None)
-        xs, zs = [x], [z]
-        gen = (extras["mask"] == 1).unsqueeze(-1)
-        for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
-            dt    = t_b - t_a
-            s, sz = self._field(x, t_a, z, d=dt, **extras)
-            x     = torch.where(gen, self.model.manifold.expmap(x, dt * s), x)
-            z     = None if z is None else z + dt * sz
-            if return_intermediates:
-                xs.append(x)
-                zs.append(z)
-        return self._steps_out(x, z, xs, zs, return_intermediates)
-
-    def _rk4_steps(
-        self, x: Tensor, time_grid: Tensor,
-        return_intermediates: bool = False, **extras,
-    ) -> Tensor:
-        """torchdiffeq's rk4 (the 3/8 rule) on the ``mask == 1`` slots as a projection
-        method: stages combine in the ambient space, every step ends on the manifold.
-        Through the Euclidean ODESolver the sphere factors drifted off it, shortening
-        every later angular step by the drifted norm. The velocity is instantaneous
-        (``d = 0``); the clones keep k1..k3 alive across CUDA-graph replays."""
-        z   = extras.pop("z", None)
-        xs, zs = [x], [z]
-        man = self.model.manifold
-        gen = (extras["mask"] == 1).unsqueeze(-1)
-        zz  = lambda dz: None if z is None else z + dz()   # z at a stage, lazily (no latent: None)
+        zz  = lambda dz: None if z is None else z + dz()   # z after an increment, lazily (no latent: None)
         cl  = lambda a: None if a is None else a.clone()
         for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
             dt = t_b - t_a
-            k1, l1 = map(cl, self._field(x, t_a, z, **extras))
-            k2, l2 = map(cl, self._field(x + dt * k1 / 3, t_a + dt / 3, zz(lambda: dt * l1 / 3), **extras))
-            k3, l3 = map(cl, self._field(x + dt * (k2 - k1 / 3), t_a + dt * 2 / 3, zz(lambda: dt * (l2 - l1 / 3)), **extras))
-            k4, l4 = self._field(x + dt * (k1 - k2 + k3), t_b, zz(lambda: dt * (l1 - l2 + l3)), **extras)
-            x  = torch.where(gen, man.projx(x + dt * (k1 + 3 * (k2 + k3) + k4) / 8), x)
-            z  = zz(lambda: dt * (l1 + 3 * (l2 + l3) + l4) / 8)
+            if method == "euler":  # d = dt: the flow map over the whole step
+                s, sz = self._field(x, t_a, z, d=dt, **extras)
+                x_b, z_b = man.expmap(x, dt * s), zz(lambda: dt * sz)
+            elif method == "midpoint":
+                # v1 gets d = dt/2, the flow map for the half-step it takes; v2 stays instantaneous because it is
+                # applied as a full step from x (tests/test_midpoint_flow_map.py). Its d = 0 is a tensor, not None:
+                # a None is a separate dynamo guard, i.e. a second compiled graph.
+                v1, w1 = self._field(x, t_a, z, d=dt / 2, **extras)
+                v2, w2 = self._field(man.expmap(x, dt / 2 * v1), t_a + dt / 2, zz(lambda: dt / 2 * w1),
+                                     d=torch.zeros_like(dt), **extras)
+                x_b, z_b = man.expmap(x, dt * man.proju(x, v2)), zz(lambda: dt * w2)
+            else:
+                # torchdiffeq's rk4 (the 3/8 rule) as a projection method: stages combine in the ambient space, every
+                # step ends on the manifold (through the Euclidean ODESolver the sphere factors drifted off it,
+                # shortening every later angular step). Instantaneous velocity (d = 0); the clones keep k1..k3 alive
+                # across CUDA-graph replays.
+                k1, l1 = map(cl, self._field(x, t_a, z, **extras))
+                k2, l2 = map(cl, self._field(x + dt * k1 / 3, t_a + dt / 3, zz(lambda: dt * l1 / 3), **extras))
+                k3, l3 = map(cl, self._field(x + dt * (k2 - k1 / 3), t_a + dt * 2 / 3,
+                                             zz(lambda: dt * (l2 - l1 / 3)), **extras))
+                k4, l4 = self._field(x + dt * (k1 - k2 + k3), t_b, zz(lambda: dt * (l1 - l2 + l3)), **extras)
+                x_b = man.projx(x + dt * (k1 + 3 * (k2 + k3) + k4) / 8)
+                z_b = zz(lambda: dt * (l1 + 3 * (l2 + l3) + l4) / 8)
+            x, z = torch.where(gen, x_b, x), z_b
             if return_intermediates:
                 xs.append(x)
                 zs.append(z)
-        return self._steps_out(x, z, xs, zs, return_intermediates)
+        out = torch.stack(xs) if return_intermediates else x
+        return out if z is None else (out, torch.stack(zs) if return_intermediates else z)
+
+    _midpoint_steps = partialmethod(_steps, "midpoint")  # lego_eval probes hasattr(ltng, "_midpoint_steps")
 
     def _solve_by_length(self, ds_t: DataStruct, base: Tensor, **kw) -> Tensor:
         L_max = ds_t.am.full.shape[1]
@@ -295,9 +249,7 @@ class Solvers:
         self._to_eval()
 
         cfg = self.rc.odeint_conf
-        if cfg.get("fwd_compile", False) and not (
-            is_compiled(self.model) or is_compiled(self.model.vf)
-        ):
+        if cfg.get("fwd_compile", False) and not (is_compiled(self.model) or is_compiled(self.model.vf)):
             dynamic = cfg.get("compile_dynamic", False)
             if dynamic:
                 dynamic_shape_attention()
@@ -307,28 +259,23 @@ class Solvers:
                                        if not dynamic or cfg.get("compile_buckets") else None)
             len_b = self.rc.gen_len_buckets or resolve_len_buckets(cfg.get("len_buckets"), self.rc.max_seq_l)
             if len_b is not None and not dynamic:
-                n = len(len_b) * max(1, len(cfg.get("compile_buckets") or ()))
-                torch._dynamo.config.recompile_limit += n
+                torch._dynamo.config.recompile_limit += len(len_b) * max(1, len(cfg.get("compile_buckets") or ()))
 
         ds_t = DataStruct(*batch) if isinstance(batch, tuple) else batch
+        fwd  = ds_t.m.full[:, self.rc.n_prefix] == 0
         if self.sym is not None:
-            fwd  = ds_t.m.full[:, self.rc.n_prefix] == 0
             face = self.sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
-            g    = (torch.randint(8, face.shape, device=face.device)
-                    if (self.rc.sym_aug or cfg.get("sym_rand", False)) else None)
+            g    = torch.randint(8, face.shape, device=face.device) if self.rc.sym_aug or cfg.get("sym_rand") else None
             ds_t = DataStruct(self._canon_dirs(ds_t.f.full, face, fwd, g=g), ds_t.m.full, ds_t.am.full)
-        base = self.gen_base_wrapper(ds_t)
-
+        base   = self.gen_base_wrapper(ds_t)
         pdgids = ds_t.f.pdgids
         am     = ds_t.am.full.unsqueeze(-1)
 
         if cfg.get("return_base", False):
             sols = base.masked_fill(~am, torch.nan)
         else:
-            amp = (_amp_dtype(cfg["amp"]) if "amp" in cfg
-                   else self.rc.amp_dtype)
-            with (contextlib.nullcontext() if amp is None
-                  else torch.autocast(base.device.type, dtype=amp)):
+            amp = _amp_dtype(cfg["amp"]) if "amp" in cfg else self.rc.amp_dtype
+            with contextlib.nullcontext() if amp is None else torch.autocast(base.device.type, dtype=amp):
                 sols = self._solve_by_length(
                     ds_t, base,
                     split_size=cfg.get("split_size"),
@@ -339,8 +286,7 @@ class Solvers:
                     # a dynamic graph still specialises on a 1-row batch: tile those to 2
                     buckets=cfg.get("compile_buckets") or ((2,) if cfg.get("compile_dynamic") else None),
                 )
-            sols = sols.float()
-            sols = sols.masked_fill_(~am, torch.nan)
+            sols = sols.float().masked_fill_(~am, torch.nan)
             filter_pdgid = cfg.get("filter_pdgid")
             if filter_pdgid is not None:
                 pdgids_idx = pdgids.int() if self.rc.pdgid_is_idx else self.convert_pdgids(pdgids)
@@ -348,17 +294,11 @@ class Solvers:
                 sols.masked_fill_(~keep, torch.nan)
                 pdgids = pdgids.masked_fill(~keep, 0)
 
+        each = lambda f, s: torch.stack([f(x) for x in s]) if s.dim() == 4 else f(s)   # every return_timesteps state
         if self.rc.dir_zoom:
-            fwd_z = ds_t.m.full[:, self.rc.n_prefix] == 0
-            zoom = lambda s: self._zoom_dirs(s, ds_t.am.full, fwd_z, inverse=True, pdgids=ds_t.f.pdgids)
-            sols = torch.stack([zoom(s) for s in sols]) if sols.dim() == 4 else zoom(sols)
-
+            sols = each(lambda s: self._zoom_dirs(s, ds_t.am.full, fwd, inverse=True, pdgids=ds_t.f.pdgids), sols)
         if self.sym is not None:
-            if sols.dim() == 4:
-                sols = torch.stack([self._canon_dirs(s, face, fwd, inverse=True, g=g) for s in sols])
-            else:
-                sols = self._canon_dirs(sols, face, fwd, inverse=True, g=g)
-
+            sols = each(lambda s: self._canon_dirs(s, face, fwd, inverse=True, g=g), sols)
         if sols.dim() == 4:
             pdgids = pdgids.unsqueeze(0).expand(sols.shape[0], -1, -1, -1)
         return torch.cat((sols, pdgids), dim=-1), ds_t.m.full, ds_t.am.full
