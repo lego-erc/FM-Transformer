@@ -33,12 +33,6 @@ from legofmt.mod_comps.optimizers import (
 _NEUTRAL_PDGIDS = (22, 2112, 130, 310, 12, -12, 14, -14, 3122)
 
 
-def _pt_pdgid_allowed(rc) -> torch.Tensor:
-    allowed = rc.mm_conf.get("passthrough_pdgids", _NEUTRAL_PDGIDS)
-    allowed = {int(p) for p in allowed}
-    return torch.tensor([int(p) in allowed for p in rc.ptypes_in], dtype=torch.bool)
-
-
 class _ResidualHead(nn.Module):
     """depth x pre-norm [Linear -> Mish -> Linear] residual blocks, then a
     linear read-out; the shape of the trunk's own slot-0 computation."""
@@ -63,10 +57,9 @@ class MultLoader(torch.utils.data.Dataset):
     the layout the file was written with.
     """
 
-    def __init__(self, config: dict, device: str = "cpu"):
-        self.device = device
+    def __init__(self, config: dict):
         mm_conf = config.get("mm_conf")
-        lds_conf = config.get("dl_conf").get("lds_args").copy()
+        lds_conf = config.get("dl_conf").get("lds_args")
         max_particles = mm_conf.get("max_out_particles")
         ptypes = mm_conf.get("ptypes", torch.tensor([11, 22]))
         ptypes_in = mm_conf.get("ptypes_in", torch.tensor([11, 22]))
@@ -111,20 +104,12 @@ class MultLoader(torch.utils.data.Dataset):
         return self.in_tok.shape[0]
 
     def __getitem__(self, idx):
-        base = (
-            self.in_tok[idx].to(self.device),
-            self.counts[idx].to(self.device),
-            self.pdgid_in_idx[idx].to(self.device),
-        )
-        pt_tgt = () if self.pt_target is None else (self.pt_target[idx].to(self.device),)
-        if not self.train_inverse:
-            return base + pt_tgt
-        return base + (
-            self.out_tok[idx].to(self.device),
-            self.out_pid_idx[idx].to(self.device),
-            self.out_mask[idx].to(self.device),
-            self.edep[idx].to(self.device),
-        ) + pt_tgt
+        ts = (self.in_tok, self.counts, self.pdgid_in_idx)
+        if self.train_inverse:
+            ts += (self.out_tok, self.out_pid_idx, self.out_mask, self.edep)
+        if self.pt_target is not None:
+            ts += (self.pt_target,)
+        return tuple(t[idx] for t in ts)
 
 
 class InvModel(nn.Module):
@@ -160,9 +145,7 @@ class InvModel(nn.Module):
         self.proj_pid_ = nn.Linear(rc.inv_h_dim, rc.n_ptypes_in)
 
     def proj_in(self, x):
-        x = x.clone()
-        x[..., -6:] = self.geom_trafos.to_cube(x[..., -6:], d=self.rc.pos_scale)
-        return self.proj_in_(x)
+        return self.proj_in_(torch.cat((x[..., :-6], self.geom_trafos.to_cube(x[..., -6:], d=self.rc.pos_scale)), -1))
 
     def forward(self, out_tok, out_pid_idx, out_mask, edep):
         """Incoming-PID logits from the outgoing set's tokens, pids, mask and E_dep."""
@@ -208,10 +191,10 @@ class MultModel(LightningModule):
         if needs_fp32_attention(rc.model_args):
             fp32_attention(self.model)
 
-        self.proj_in_ = torch.nn.Linear(rc.in_dim, rc.h_dim)
+        self.proj_in_ = nn.Linear(rc.in_dim, rc.h_dim)
 
-        self.embd_pp_ = torch.nn.Embedding(rc.n_ptypes_in, rc.h_dim)
-        self.embd_in_ = torch.nn.Embedding((rc.max_seq_len - 1) * rc.max_particles, rc.h_dim)
+        self.embd_pp_ = nn.Embedding(rc.n_ptypes_in, rc.h_dim)
+        self.embd_in_ = nn.Embedding((rc.max_seq_len - 1) * rc.max_particles, rc.h_dim)
         self.register_buffer(
             "_in_offsets",
             torch.arange(rc.max_seq_len - 1, dtype=torch.long) * rc.max_particles,
@@ -225,17 +208,17 @@ class MultModel(LightningModule):
                 nn.Linear(rc.h_dim, pt_dim), nn.Mish(), nn.Linear(pt_dim, 1),
             )
         self.pt_on_trunk = rc.mm_conf.get("passthrough_on", "in_embd") == "trunk"
-        self.register_buffer("_pt_pdgid_allowed", _pt_pdgid_allowed(rc), persistent=False)
-        self.proj_out_w = torch.nn.Parameter(torch.empty(rc.max_seq_len, rc.h_dim, rc.max_particles))
-        self.proj_out_b = torch.nn.Parameter(torch.empty(rc.max_seq_len, rc.max_particles))
-        _bound = 1.0 / (rc.h_dim ** 0.5)
-        for _i in range(rc.max_seq_len):
-            torch.nn.init.kaiming_uniform_(self.proj_out_w[_i].transpose(0, 1), a=5 ** 0.5)
-            torch.nn.init.uniform_(self.proj_out_b[_i], -_bound, _bound)
+        allowed = {int(p) for p in rc.mm_conf.get("passthrough_pdgids", _NEUTRAL_PDGIDS)}
+        allowed = torch.tensor([int(p) in allowed for p in rc.ptypes_in], dtype=torch.bool)
+        self.register_buffer("_pt_pdgid_allowed", allowed, persistent=False)
+        self.proj_out_w = nn.Parameter(torch.empty(rc.max_seq_len, rc.h_dim, rc.max_particles))
+        self.proj_out_b = nn.Parameter(torch.empty(rc.max_seq_len, rc.max_particles))
+        bound = 1.0 / rc.h_dim ** 0.5
+        for i in range(rc.max_seq_len):  # nn.Linear(h_dim, max_particles)'s init, per slot
+            nn.init.kaiming_uniform_(self.proj_out_w[i].transpose(0, 1), a=5 ** 0.5)
+            nn.init.uniform_(self.proj_out_b[i], -bound, bound)
 
-        # Optional inverse-PID co-training head (separate params, no sharing).
-        # Built at construction time and, when present, trained on every step,
-        # so DDP sees no unused parameters in either mode (plain ``ddp`` works).
+        # the inverse-PID head has its own params and trains on every step, so DDP sees no unused parameters
         self.inv = InvModel(rc) if rc.train_inverse else None
 
         if rc.state_dict:
@@ -337,22 +320,14 @@ class MultModel(LightningModule):
             total = loss_count + loss_pt
             pt_logs = {"loss/passthrough": loss_pt.detach()}
 
-        if self.inv is None:
-            self.log_dict(
-                {"train_loss": total, "loss/counts": loss_count.detach(), **pt_logs},
-                prog_bar=True, sync_dist=False,  # per-step all-reduce only for logging stalled DDP ranks
-            )
-            return total
-
-        out_tok, out_pid_idx, out_mask, edep = batch[3:7]
-        loss_inv = F.cross_entropy(self.inv(out_tok, out_pid_idx, out_mask, edep), pdgid_in_idx)
-        loss = total + loss_inv
-        self.log_dict(
-            {"train_loss": loss, "loss/counts": loss_count.detach(),
-             "loss/pid_in": loss_inv.detach(), **pt_logs},
-            prog_bar=True, sync_dist=False,  # per-step all-reduce only for logging stalled DDP ranks
-        )
-        return loss
+        logs = {"loss/counts": loss_count.detach()}
+        if self.inv is not None:
+            loss_inv = F.cross_entropy(self.inv(*batch[3:7]), pdgid_in_idx)
+            total = total + loss_inv
+            logs["loss/pid_in"] = loss_inv.detach()
+        # sync_dist=False: a per-step all-reduce only for logging stalled DDP ranks
+        self.log_dict({"train_loss": total, **logs, **pt_logs}, prog_bar=True, sync_dist=False)
+        return total
 
     @torch.no_grad()
     def passthrough_prob(self, in_tok: torch.Tensor, pdgid_in_idx: torch.Tensor) -> torch.Tensor:
@@ -360,10 +335,8 @@ class MultModel(LightningModule):
         if self.pt_head is None:
             return torch.zeros(in_tok.shape[0], device=in_tok.device)
         in_embd = self.proj_in(in_tok) + self.embd_pp_(pdgid_in_idx)
-        pt_in = in_embd
-        if self.pt_on_trunk:
-            # slot 0 is causal, so this equals training's out_f[:, 0]
-            pt_in = self.model(in_embd.unsqueeze(1), mask=None, condition=in_embd)[:, 0]
+        # slot 0 is causal, so the one-token pass equals training's out_f[:, 0]
+        pt_in = self.model(in_embd.unsqueeze(1), mask=None, condition=in_embd)[:, 0] if self.pt_on_trunk else in_embd
         return self.pt_head(pt_in).squeeze(-1).sigmoid() * self._pt_pdgid_allowed[pdgid_in_idx]
 
     def sample_passthrough(self, in_tok: torch.Tensor, pdgid_in_idx: torch.Tensor) -> torch.Tensor:
@@ -446,7 +419,7 @@ class MultModel(LightningModule):
             self.log(f"val/count_ratio/{int(self.ptypes[i])}", gen[i] / true[i], sync_dist=False)
 
     @torch.no_grad()
-    def forward(self, batch: (tuple | torch.Tensor), pt_mask: torch.Tensor | None = None):
+    def forward(self, batch: tuple, pt_mask: torch.Tensor | None = None):
         """Inference only: a 3-D batch[0] runs InvModel (outgoing set -> incoming
         PID index), a 2-D one decodes counts autoregressively with a KV cache;
         puts the module in eval mode."""
@@ -465,11 +438,9 @@ class MultModel(LightningModule):
         if pt_mask is not None and pt_mask.any():
             pid = self.ptypes_in[pdgid_in_idx[pt_mask]]
             counts[pt_mask, torch.searchsorted(self.ptypes, pid).clamp(max=self.rc.max_seq_len - 1)] = 1
-            keep_events = ~pt_mask
-            if not keep_events.any():
-                return counts
-            sub = self.forward((in_tok[keep_events], None, pdgid_in_idx[keep_events]))
-            counts[keep_events] = sub
+            keep = ~pt_mask
+            if keep.any():
+                counts[keep] = self.forward((in_tok[keep], None, pdgid_in_idx[keep]))
             return counts
 
         in_embd = self.proj_in(in_tok) + self.embd_pp_(pdgid_in_idx)
@@ -486,8 +457,7 @@ class MultModel(LightningModule):
                 input_not_include_cache=(i > 0),
             )
             logits = out[:, -1] @ self.proj_out_w[i] + self.proj_out_b[i]
-            sampled = torch.multinomial(logits.softmax(-1), 1).squeeze(-1)
-            counts[:, i] = sampled
+            counts[:, i] = torch.multinomial(logits.softmax(-1), 1).squeeze(-1)
             if i < self.rc.max_seq_len - 1:
-                x = self.embd_in_(sampled + i * self.rc.max_particles).unsqueeze(1)
+                x = self.embd_in_(counts[:, i] + self._in_offsets[i]).unsqueeze(1)
         return counts
