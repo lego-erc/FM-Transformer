@@ -71,10 +71,7 @@ class GenerateOut(torch.nn.Module):
 
     flow_cls = LEGOLtng
 
-    def __init__(
-        self, flow_conf_path: str, mult_conf_path: str,
-        device="cpu", couple_in_out_pdgids=False,
-    ):
+    def __init__(self, flow_conf_path: str, mult_conf_path: str, device="cpu", couple_in_out_pdgids=False):
         super().__init__()
         flow_conf = torch.load(flow_conf_path, map_location=device, weights_only=False)
         self.model = self.flow_cls(flow_conf).to(device)
@@ -85,53 +82,46 @@ class GenerateOut(torch.nn.Module):
 
         mult_conf = torch.load(mult_conf_path, map_location=device, weights_only=False)
         self.gen_mult = MultModel(mult_conf).to(device)
+        mm, mc = mult_conf["config"]["mm_conf"], flow_conf["config"]["model_conf"]
 
-        if mult_conf["config"]["mm_conf"].get("fwd_compile", False) and not is_compiled(
-            self.gen_mult.model
-        ):
+        if mm.get("fwd_compile", False) and not is_compiled(self.gen_mult.model):
             # dynamic: the KV-cache decode grows the cache every step, so a static graph recompiled per
             # step until the recompile limit sent it to eager -- 115 vs 68 ms per 8192 events (plateSi pair)
             dynamic_shape_attention()
             self.gen_mult.model = torch.compile(self.gen_mult.model, dynamic=True)
 
-        self.pdgid_in = mult_conf["config"]["mm_conf"]["ptypes_in"].to(device)
-        self.ptypes = mult_conf["config"]["mm_conf"]["ptypes"].to(device)
+        self.pdgid_in = mm["ptypes_in"].to(device)
+        self.ptypes = mm["ptypes"].to(device)
 
-        mm_cond = mult_conf["config"]["mm_conf"].get("cond_scalars")
+        mm_cond = mm.get("cond_scalars")
         self.n_mult_cond = len(mm_cond) if mm_cond else self.gen_mult.proj_in_.in_features - 7
         if mm_cond and tuple(mm_cond) != self.cond_names[:self.n_mult_cond]:
-            raise ValueError(
-                f"mult cond_scalars {tuple(mm_cond)} is not a prefix of the flow's "
-                f"{self.cond_names}; cond carries only the flow's scalars."
-            )
+            raise ValueError(f"mult cond_scalars {tuple(mm_cond)} is not a prefix of the flow's "
+                             f"{self.cond_names}; cond carries only the flow's scalars.")
 
         mm_cut = mult_conf["config"]["dl_conf"]["lds_args"].get("cutoff_mev")
         if mm_cut is not None and mm_cut != self.model.rc.cutoff_mev:
             warnings.warn(f"mult cutoff_mev {mm_cut} != flow {self.model.rc.cutoff_mev}: "
                           "the two energy scales disagree and mult_e_scale assumes they do not", stacklevel=2)
-        mm_max = mult_conf["config"]["mm_conf"].get("max_energy")
+        mm_max = mm.get("max_energy")
         self.mult_e_scale = 1.0
         if mm_max and mm_max != self.model.rc.max_energy:
             cut = self.model.rc.cutoff_mev
-            self.mult_e_scale = float(
-                torch.tensor(self.model.rc.max_energy / cut).log()
-                / torch.tensor(mm_max / cut).log()
-            )
+            self.mult_e_scale = float(torch.tensor(self.model.rc.max_energy / cut).log()
+                                      / torch.tensor(mm_max / cut).log())
 
         set_layout(self.cond_names)
 
         if couple_in_out_pdgids:
             self.model.rc.odeint_conf["filter_pdgid"] = self.pdgid_in
 
-        self.max_seq_l = flow_conf["config"]["model_conf"]["model_args"]["max_seq_l"]
-        self.pdgids = flow_conf["config"]["model_conf"]["pdgids"].to(device)
+        self.max_seq_l = mc["model_args"]["max_seq_l"]
+        self.pdgids = mc["pdgids"].to(device)
         self.ptype_idx = torch.searchsorted(self.ptypes, self.pdgids).clamp(max=len(self.ptypes) - 1)
         self.ptype_in_mask = self.ptypes[self.ptype_idx] == self.pdgids
-        self.proj_ray = CubeTrace(flow_conf["config"]["model_conf"].get("cuboid_dim"))
+        self.proj_ray = CubeTrace(mc.get("cuboid_dim"))
         self.cuboid_dim = self.proj_ray.cuboid_dim  # kept apart: no_raytrace models stub proj_ray
-        self.pen = EnergyProjections(
-            cutoff_mev=self.model.rc.cutoff_mev, max_energy=self.model.rc.max_energy,
-        )
+        self.pen = EnergyProjections(cutoff_mev=self.model.rc.cutoff_mev, max_energy=self.model.rc.max_energy)
         self.dp = DataPrep(flow_conf)   # the E_dep row's normalisation (edep_log_min), for the E_in ceiling
 
     def __call__(self, cond: torch.Tensor, prepped: bool = False, passthrough: bool = True):
@@ -146,8 +136,8 @@ class GenerateOut(torch.nn.Module):
         e_in = self.pen.from_scalar(cond_model[:, nc + 1:nc + 4], cond_model[:, nc:nc + 1]).norm(dim=-1)
         pid_in = cond_model[:, -1].long()
         pt_mask = mask.sum(-1) == 0
-        ae = self.model.edep_ae
-        if self.model.rc.odeint_conf.get("energy_balance", False) and ae is None:  # an edep_ae needs their latents
+        ae, balance = self.model.edep_ae, self.model.rc.odeint_conf.get("energy_balance", False)
+        if balance and ae is None:  # an edep_ae needs their latents
             # an e+-/gamma that leaves nothing deposits the balance budget, which overwrites the flow's E_dep
             em = (pid_in.abs() == 11) | (pid_in == 22)
             pt_mask = pt_mask | (em & (attn_mask[:, self.n_prefix + 1:].sum(-1) == 0)
@@ -155,17 +145,16 @@ class GenerateOut(torch.nn.Module):
         if pt_mask.all():
             sols = cond_fm.clone()
         elif pt_mask.any():
-            keep_events = ~pt_mask
-            sub, _, _ = self.model(
-                (cond_fm[keep_events], mask[keep_events], attn_mask[keep_events]))
+            keep = ~pt_mask
+            sub, _, _ = self.model((cond_fm[keep], mask[keep], attn_mask[keep]))
             sols = cond_fm.clone()
-            sols[keep_events] = sub.to(sols.dtype)
+            sols[keep] = sub.to(sols.dtype)
         else:
             sols, mask, attn_mask = self.model((cond_fm, mask, attn_mask))
         sols[..., -1] = torch.cat([sols.new_zeros(1), self.pdgids.to(sols.dtype)])[sols[..., -1].long()]
         edep = _F(sols).edep
         edep.copy_(self._clamp_edep(edep, e_in, pid_in))
-        if self.model.rc.odeint_conf.get("energy_balance", False):
+        if balance:
             _balance_energy(sols, e_in, pid_in, self.pen, self.dp)
         if self.model.rc.odeint_conf.get("exit_consistency", False):
             _exit_outward(sols)
@@ -190,18 +179,13 @@ class GenerateOut(torch.nn.Module):
         return edep
 
     def _model_cond(self, cond: torch.Tensor, prepped: bool) -> torch.Tensor:
-        cond_model = cond.clone()
-        if not prepped:
-            nc = self.n_cond
-            mom, pos = cond_model[:, nc:nc + 3], cond_model[:, nc + 3:nc + 6]
-            pos = F.normalize(
-                self.proj_ray(torch.cat((mom, pos), dim=-1))[..., 3:] / self.cuboid_dim.to(pos), dim=-1
-            )
-            dir_, e = self.pen.to_scalar(mom)
-            cond_model = torch.cat(
-                (cond_model[:, :nc], e, dir_, pos, cond_model[:, nc + 6:]), dim=-1
-            )
-        return cond_model
+        if prepped:
+            return cond.clone()
+        nc = self.n_cond
+        mom, pos = cond[:, nc:nc + 3], cond[:, nc + 3:nc + 6]
+        pos = F.normalize(self.proj_ray(torch.cat((mom, pos), dim=-1))[..., 3:] / self.cuboid_dim.to(pos), dim=-1)
+        dir_, e = self.pen.to_scalar(mom)
+        return torch.cat((cond[:, :nc], e, dir_, pos, cond[:, nc + 6:]), dim=-1)
 
     def passthrough_prob(self, cond: torch.Tensor, prepped: bool = False) -> torch.Tensor:
         """P(the incoming particle passes through unchanged): the probability the pass-through
@@ -237,11 +221,8 @@ class GenerateOut(torch.nn.Module):
 
     def _g4_cond(self, n, pos, mom, energy, density, size, pdgids, Z, A):
         device = next(self.model.parameters()).device
-        pos, mom, energy, density, size, pdgids = (
-            t.to(device) for t in (pos, mom, energy, density, size, pdgids)
-        )
-        Z = Z.to(device) if Z is not None else None
-        A = A.to(device) if A is not None else None
+        pos, mom, energy, density, size, pdgids, Z, A = (
+            None if t is None else t.to(device) for t in (pos, mom, energy, density, size, pdgids, Z, A))
 
         scalar_src = {"Density": density, "Z": Z, "A": A, "Size": size}
         missing = [k for k in self.cond_names if scalar_src.get(k) is None]
@@ -260,36 +241,22 @@ class GenerateOut(torch.nn.Module):
         B = max(shapes.values())
         err_size = {k: v for k, v in shapes.items() if v not in (1, B)}
         if err_size:
-            raise ValueError(
-                f"Each argument must have either size 1 or batch size {B}; got {err_size}"
-            )
+            raise ValueError(f"Each argument must have either size 1 or batch size {B}; got {err_size}")
 
-        mom = F.normalize(mom, dim=-1)
-
-        def _scalar_col(x):
-            return x.reshape(-1, 1).expand(B, 1).repeat_interleave(n, 0)
-
-        e = energy.view(-1, 1).expand(B, 1)
-        mom_b = mom.view(-1, 3).expand(B, 3)
-        pos_b = pos.view(-1, 3).expand(B, 3)
-        cc = torch.cat((mom_b * e, pos_b), dim=-1).repeat_interleave(n, dim=0)
-
-        conds_b = torch.cat([_scalar_col(scalar_src[k]) for k in self.cond_names], dim=-1)
-        pdgids_b = _scalar_col(pdgids).to(cc.dtype)
-        return torch.cat((conds_b, cc, pdgids_b), dim=-1)
+        col = lambda x: x.reshape(-1, 1).expand(B, 1).repeat_interleave(n, 0)
+        mom = F.normalize(mom, dim=-1).view(-1, 3).expand(B, 3) * energy.view(-1, 1).expand(B, 1)
+        cc = torch.cat((mom, pos.view(-1, 3).expand(B, 3)), dim=-1).repeat_interleave(n, dim=0)
+        conds_b = torch.cat([col(scalar_src[k]) for k in self.cond_names], dim=-1)
+        return torch.cat((conds_b, cc, col(pdgids).to(cc.dtype)), dim=-1)
 
     def _mult_in(self, cond: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         pdgid_in = cond[:, -1].long()
         pdgid_in_idx = torch.searchsorted(self.pdgid_in, pdgid_in).clamp(max=len(self.pdgid_in) - 1)
         if (self.pdgid_in[pdgid_in_idx] != pdgid_in).any():
             raise ValueError(f"incoming pdgid(s) not in the mult model's ptypes_in={self.pdgid_in.tolist()}")
-        mult_in = torch.cat(
-            (cond[:, :self.n_mult_cond], cond[:, self.n_cond:self.n_cond + 7]), dim=-1
-        )
+        mult_in = torch.cat((cond[:, :self.n_mult_cond], cond[:, self.n_cond:self.n_cond + 7]), dim=-1)
         if self.mult_e_scale != 1.0:
-            mult_in[:, self.n_mult_cond] = (
-                mult_in[:, self.n_mult_cond] * self.mult_e_scale
-            ).clamp(0.0, 1.0)
+            mult_in[:, self.n_mult_cond] = (mult_in[:, self.n_mult_cond] * self.mult_e_scale).clamp(0.0, 1.0)
         return mult_in, pdgid_in_idx
 
     def gen_batch(self, cond: torch.Tensor, passthrough: bool = True):
@@ -317,10 +284,8 @@ class GenerateOut(torch.nn.Module):
         scaled = total > max_particles
         remaining = (scaled * (max_particles - mult.sum(-1, keepdim=True))).clamp(min=0)
         dist = torch.multinomial(weights, max_particles, replacement=True)
-        valid = (torch.arange(max_particles, device=mult.device) < remaining).long()
-        mult.scatter_add_(-1, dist, valid)
-
         idx = torch.arange(max_particles, device=mult.device)
+        mult.scatter_add_(-1, dist, (idx < remaining).long())
         occupied = idx < mult.sum(-1, keepdim=True)
         # species boundaries at the cumulative counts; the extra column absorbs
         # boundaries landing on max_particles so a saturated event's last slot is
@@ -329,33 +294,23 @@ class GenerateOut(torch.nn.Module):
         bounds.scatter_add_(-1, mult.cumsum(-1)[..., :-1], torch.ones_like(bounds))
         pdgid_pad = bounds.cumsum_(-1)[:, :max_particles]
 
-        conds = cond[:, :self.n_cond]           # per-event conditioning scalars
         in_tok = cond[:, self.n_cond:].clone()  # [e, dir(3), pos(3), pdgid] (8 cols)
         in_tok[..., -1] = self.model.convert_pdgids(in_tok[..., -1])
         in_tok = in_tok[:, None, :]
         out_tok = in_tok.repeat(1, max_particles, 1)
         out_tok[..., -1] = occupied * (pdgid_pad + 1)
-        cond_fm = torch.cat(
-            (torch.zeros_like(in_tok).expand(-1, self.n_prefix, -1), in_tok, out_tok), dim=1
-        )
+        cond_fm = torch.cat((torch.zeros_like(in_tok).expand(-1, self.n_prefix, -1), in_tok, out_tok), dim=1)
 
-        attn_mask = torch.cat(
-            (torch.ones_like(occupied[:, :1]).repeat(1, self.n_prefix + 1), occupied), dim=1
-        )
-        mask = attn_mask.clone().long()
-        cond_idx = [0, *range(2, self.n_prefix), self.n_prefix]  # cond scalars + incoming; edep stays 1
-        mask[:, cond_idx] = 0
-        cond_fm[:, 0, 0] = conds[:, 0]
-        for j in range(1, self.n_cond):
-            cond_fm[:, j + 1, 0] = conds[:, j]
+        attn_mask = torch.cat((torch.ones_like(occupied[:, :1]).repeat(1, self.n_prefix + 1), occupied), dim=1)
+        mask = attn_mask.long()
+        cond_idx = [0, *range(2, self.n_prefix)]  # the cond scalars' rows; the edep row 1 stays generated
+        mask[:, cond_idx + [self.n_prefix]] = 0   # ... and the incoming conditions
+        cond_fm[:, cond_idx, 0] = cond[:, :self.n_cond]
         _F(cond_fm).non_p[..., 1:-1] = 1
-        if pt_mask.any():
-            edep = _F(cond_fm).edep
-            edep[pt_mask] = 0.0
-            out = _F(cond_fm).out_p
-            out[pt_mask, :, 0] = 0.0
-            mask = mask.clone()
-            mask[pt_mask] = 0
+        # pass-throughs: nothing generated, no deposit, every outgoing slot at the full-energy atom
+        _F(cond_fm).edep.masked_fill_(pt_mask, 0.0)
+        _F(cond_fm).out_p[..., 0].masked_fill_(pt_mask[:, None], 0.0)
+        mask.masked_fill_(pt_mask[:, None], 0)
         return cond_fm, mask, attn_mask
 
 
@@ -368,21 +323,15 @@ class GenerateIn(GenerateOut):
         m = torch.zeros_like(ds.m.full)
         m[:, self.n_prefix] = 1  # only the incoming slot is inferred
         ds = DataStruct(f, m, ds.am.full)
-        conds = torch.cat(
-            [ds.f.cond(n).view(-1, 1, 1) for n in self.cond_names], dim=-1
-        ).expand(-1, ds.f.out_cc.shape[1], -1)
-        out_tok = torch.cat((conds, ds.f.out_cc), dim=-1)
-        out_pid = torch.searchsorted(
-            self.ptypes, ds.f.out_p[..., -1].long()
-        ).clamp(max=len(self.ptypes) - 1)
+        conds = torch.cat([ds.f.cond(n).view(-1, 1, 1) for n in self.cond_names], dim=-1)
+        out_tok = torch.cat((conds.expand(-1, ds.f.out_cc.shape[1], -1), ds.f.out_cc), dim=-1)
+        out_pid = torch.searchsorted(self.ptypes, ds.f.out_p[..., -1].long()).clamp(max=len(self.ptypes) - 1)
         pid_in_idx = self.gen_mult((out_tok, out_pid, ds.am.out_p.bool(), ds.f.edep))
         # The flow runs with pdgid_is_idx=True: swap the raw ids the mult
         # model consumed above for flow-vocabulary indices.
         f[..., -1] = self.model.convert_pdgids(f[..., -1]).to(f.dtype)
         f[:, self.n_prefix, -1] = self.model.convert_pdgids(self.pdgid_in[pid_in_idx].to(f.dtype))
         sols, _, _ = self.model(ds)
-        sols[..., -1] = torch.cat(
-            [sols.new_zeros(1), self.pdgids.to(sols.dtype)]
-        )[sols[..., -1].long()]
+        sols[..., -1] = torch.cat([sols.new_zeros(1), self.pdgids.to(sols.dtype)])[sols[..., -1].long()]
         return _F(sols).in_p
 
