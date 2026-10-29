@@ -25,7 +25,6 @@ from legofmt.main.train_step import TrainStep
 
 from legofmt.data.dataloaders import LEGODataset, LengthBucketBatchSampler, loader_seed, make_loader
 from legofmt.data.prep import DataPrep
-from legofmt.data.struct import _F
 
 from legofmt.cfm.path_sampler import ProductPathSampler
 from legofmt.geometry.geom_trafos import zoom_polar
@@ -55,12 +54,11 @@ def _event_lengths(ds) -> Tensor:
         return _event_lengths(ds.dataset)[torch.as_tensor(ds.indices)]
     if isinstance(ds, _Interacting):
         return _event_lengths(ds.ds)[ds.keep_idx]
-    return ds.data.am.full.sum(1)
+    return ds.lengths()
 
 
 def _interacting_only(ds) -> _Interacting:
-    keep_idx = ((_F(ds.data.f.full).edep.reshape(-1) > 0)
-                | (ds.data.am.out_p.sum(-1) != 1)).nonzero(as_tuple=True)[0]
+    keep_idx = ((ds.edep().reshape(-1) > 0) | (ds.n_out() != 1)).nonzero(as_tuple=True)[0]
     return _Interacting(ds, keep_idx)
 
 

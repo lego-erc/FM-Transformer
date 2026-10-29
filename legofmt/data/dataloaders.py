@@ -6,7 +6,9 @@ and events left with too few survivors. ``LEGODataset`` serves an already-preppe
 tensor; ``make_loader`` is the worker plumbing both LightningModules share.
 """
 
+import json
 import os
+import warnings
 
 import torch
 from torch import Tensor
@@ -14,7 +16,8 @@ from torch.utils.data import (
     BatchSampler, DataLoader, Dataset, DistributedSampler, RandomSampler, SequentialSampler,
 )
 
-from legofmt.data.struct import DataStruct
+from legofmt.data.packed import PackedData, is_packed
+from legofmt.data.struct import DataStruct, cond_slot
 
 
 class GetLEGOData:
@@ -75,11 +78,21 @@ class LEGODataset(Dataset):
     def __init__(self, data: (str | dict | tuple), *, prep=None, **kwargs) -> None:
         super().__init__()
         self.device = kwargs.get("device", "cpu")
+        self.packed: PackedData | None = None   # a packed file: batches unpacked on demand
+        self._data: DataStruct | None = None
         loaded = isinstance(data, str)  # a fresh load nobody else holds: normalise it in place
         if loaded:
-            path = data if data.endswith(".pt") else data + "/data_prepped.pt"
+            path = data if data.endswith(".pt") else _dataset_file(data)
             data = torch.load(path, map_location="cpu", weights_only=False)
-        if isinstance(data, dict):
+        if is_packed(data):
+            if not loaded:
+                raise TypeError("a packed dataset is read from its file: pass the path")
+            if prep is not None and not hasattr(prep, "norm_e"):
+                raise TypeError("a packed dataset takes a prep with norm_e (a DataPrep) or none")
+            self.packed = PackedData.from_dict(data)
+            if prep is not None:
+                self.packed.norm_e(prep)
+        elif isinstance(data, dict):
             if prep is None:
                 raise ValueError(
                     "LEGODataset(dict, ...) requires `prep` (e.g. DataPrep(config)); "
@@ -88,20 +101,74 @@ class LEGODataset(Dataset):
             data = prep(GetLEGOData(**kwargs)(data))
         elif prep is not None:
             data = prep.norm_e(data, inplace=loaded) if hasattr(prep, "norm_e") else prep(data)
-        self.data = DataStruct(*data)
+        if self.packed is None:
+            self._data = DataStruct(*data)
 
         frac = kwargs.get("frac")
         if frac and frac < 1.0:
-            n = int(len(self.data) * frac)
-            idxs = torch.randperm(len(self.data), device=self.device,
+            n = int(len(self) * frac)
+            idxs = torch.randperm(len(self), device=self.device,
                                   generator=torch.Generator(device=self.device).manual_seed(0))[:n]
-            self.data = self.data[idxs]
+            if self.packed is None:
+                self._data = self._data[idxs]
+            else:
+                self.packed = self.packed.select(idxs.cpu())
+
+    @property
+    def data(self) -> DataStruct:
+        """The whole dataset as padded tensors; a packed file materialises them here, once."""
+        if self._data is None:
+            gb = len(self.packed) * self.packed.L * 41 / 1e9   # bytes per padded row: 8 * 4 + 8 + 1
+            warnings.warn(f"materialising the packed dataset as padded tensors (~{gb:.1f} GB); "
+                          "index it or use its accessors instead", UserWarning, stacklevel=2)
+            self._data = DataStruct(*self.packed.unpack())
+        return self._data
 
     def __len__(self) -> int:
-        return len(self.data)
+        return len(self._data) if self.packed is None else len(self.packed)
 
     def __getitem__(self, idx: int | Tensor) -> DataStruct:
-        return self.data[idx]
+        return self._data[idx] if self.packed is None else DataStruct(*self.packed.unpack(idx))
+
+    # Per-event fields, without padded tensors on a packed file.
+    def lengths(self) -> Tensor:
+        return self._data.am.full.sum(1) if self.packed is None else self.packed.lengths
+
+    def n_out(self) -> Tensor:
+        return self._data.am.out_p.sum(-1) if self.packed is None else self.packed.n_out
+
+    def edep(self) -> Tensor:
+        return self._data.f.edep if self.packed is None else self.packed.prefix[:, 1]
+
+    def cond(self, name: str) -> Tensor:
+        return self._data.f.cond(name) if self.packed is None else self.packed.prefix[:, cond_slot(name)]
+
+    def incoming(self) -> Tensor:
+        return self._data.f.in_p[..., 0, :] if self.packed is None else self.packed.incoming
+
+    def species_counts(self, ptypes: Tensor) -> Tensor:
+        if self.packed is not None:
+            return self.packed.species_counts(ptypes)
+        pid = self._data.f.out_p[..., -1]  # one species at a time: the broadcast compare made an (N, max_out, S) int64
+        return torch.stack([(pid == p).sum(1) for p in ptypes], -1)
+
+    def edep_layers(self) -> Tensor | None:
+        return self._data.edep_layers if self.packed is None else self.packed.edep_layers
+
+
+def _dataset_file(directory: str) -> str:
+    """The directory's packed file if it has one, else its padded one. A packed file next to a
+    padded one whose meta.json lacks ``"format": "packed"`` is stale (a padded writer ran since)."""
+    packed, padded = directory + "/data_packed.pt", directory + "/data_prepped.pt"
+    if not os.path.exists(packed):
+        return padded
+    meta = directory + "/meta.json"
+    if os.path.exists(padded) and os.path.exists(meta):
+        with open(meta) as fh:
+            if json.load(fh).get("format") != "packed":
+                raise ValueError(f"{directory}: data_packed.pt is stale (meta.json was written for data_prepped.pt); "
+                                 "delete it or pass the file explicitly")
+    return packed
 
 
 class LengthBucketBatchSampler(DistributedSampler):
