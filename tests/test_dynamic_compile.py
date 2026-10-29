@@ -32,7 +32,8 @@ def test_patched_where_matches_einx_and_delegates_other_patterns() -> None:
     assert xt.einx.rearrange is einx.rearrange   # everything else is einx's own
 
 
-@pytest.mark.parametrize("dynamic, buckets, mode", [(False, [2, 4, 8], "reduce-overhead"), (False, None, "reduce-overhead"),
+@pytest.mark.parametrize("dynamic, buckets, mode", [(False, [2, 4, 8], "reduce-overhead"),
+                                                   (False, None, "reduce-overhead"),
                                                    (True, [2, 4, 8], "reduce-overhead"), (True, None, None)])
 def test_forward_compiles_static_or_dynamic(monkeypatch, dynamic: bool, buckets, mode) -> None:
     """CUDA graphs only where the shapes are bounded: always for the static grid, for a dynamic graph only with

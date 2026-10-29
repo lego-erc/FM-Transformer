@@ -13,7 +13,7 @@ from legofmt.data.prep import DataPrep
 from legofmt.data.struct import _F
 from legofmt.main.generate import GenerateOut
 from legofmt.main.modules import LEGOLtng
-from test_helpers import _save_flow_ckpt, _save_mult_ckpt
+from test_helpers import _fill_edep, _gun_cond, _save_flow_ckpt, _save_mult_ckpt
 
 
 @pytest.fixture(scope="module")
@@ -22,29 +22,14 @@ def generator(tmp_path_factory: pytest.TempPathFactory) -> GenerateOut:
     return GenerateOut(str(_save_flow_ckpt(tmp, LEGOLtng)), str(_save_mult_ckpt(tmp)), device="cpu")
 
 
-def _cond(pdgid: int, e_mev: float, batch: int = 4) -> torch.Tensor:
-    """``[B, 8]``: density, E-scaled mom along +z, entry pos on the -z face, pdgid."""
-    cond = torch.zeros(batch, 8)
-    cond[:, 0] = 1.0
-    cond[:, 3] = e_mev
-    cond[:, 6] = -1.0
-    cond[:, 7] = pdgid
-    return cond
-
-
 @torch.no_grad()
 @pytest.mark.parametrize("pdgid, capped", [(22, True), (2212, True), (211, False)])
 def test_edep_is_capped_at_the_incoming_energy(generator, monkeypatch, pdgid, capped) -> None:
     # a flow that puts every event's E_dep at the channel ceiling (max_energy = 300 MeV), twice E_in
-    def overflowing(batch, *_):
-        f, m, am = batch
-        f = f.clone()
-        _F(f).edep.fill_(1.0)
-        return f, m, am
-    monkeypatch.setattr(generator.model, "forward", overflowing)
+    monkeypatch.setattr(generator.model, "forward", _fill_edep(1.0))
     dp = DataPrep(generator.model.rc.config)
     e_in = 150.0
-    sols, _, _ = generator(_cond(pdgid, e_in, batch=64))
+    sols, _, _ = generator(_gun_cond(pdgid, e_in, batch=64))
     edep = dp.denorm_edep(_F(sols).edep)
     flowed = edep > 0                         # pass-through events never reach the flow and keep E_dep = 0
     assert flowed.any()
@@ -54,11 +39,6 @@ def test_edep_is_capped_at_the_incoming_energy(generator, monkeypatch, pdgid, ca
 
 @torch.no_grad()
 def test_zero_deposit_sentinel_is_untouched(generator, monkeypatch) -> None:
-    def absorbed(batch, *_):
-        f, m, am = batch
-        f = f.clone()
-        _F(f).edep.fill_(-0.1)   # the overflow_delta sentinel: no deposit
-        return f, m, am
-    monkeypatch.setattr(generator.model, "forward", absorbed)
-    sols, _, _ = generator(_cond(22, 150.0))
+    monkeypatch.setattr(generator.model, "forward", _fill_edep(-0.1))   # the overflow_delta sentinel: no deposit
+    sols, _, _ = generator(_gun_cond(22))
     assert (_F(sols).edep <= 0).all()

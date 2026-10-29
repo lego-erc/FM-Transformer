@@ -12,7 +12,10 @@ import math
 import pytest
 import torch
 
+from legofmt.base_dist.base_nn import BaseDist, build_base_head
+from legofmt.data.struct import DataStruct
 from legofmt.geometry.geom_trafos import GeomTrafos
+from test_helpers import GEN_BASE, _base_rc
 
 
 def _theta(kappa, ang_pow, n=200000, seed=0):
@@ -63,20 +66,7 @@ def test_sampler_is_finite_and_on_the_sphere() -> None:
 
 @pytest.mark.parametrize("ang_shape", [False, True])
 def test_head_width_and_defaults(ang_shape) -> None:
-    from legofmt.base_dist.base_nn import build_base_head
-
-    class _RC:
-        pdgids_template = torch.tensor([11, 22])
-        cond_scalars = ("Density", "Z", "A", "Size")
-        base_pretrain_batches = 1
-        config = {"base_conf": {"ang_shape": ang_shape, "base_head": None}}
-
-    class _GB:
-        scale_dist = "sm_norm"
-        sm_scale = 0.5
-        kappa = 8.0
-
-    head = build_base_head(_RC(), _GB())
+    head = build_base_head(_base_rc(ang_shape=ang_shape), GEN_BASE)
     assert head[-1].out_features == (5 if ang_shape else 4)
     if ang_shape:
         assert math.isclose(float(head[-1].bias[4].exp()), 1.0, rel_tol=1e-6)
@@ -111,36 +101,16 @@ def test_two_moments_are_matchable_only_with_the_extra_parameter() -> None:
     assert abs(p2 - 0.45) < 0.15 and abs(k2 - 3.0) < 1.0
 
 
-def _rc(**bc):
-    class _RC:
-        pdgids_template = torch.tensor([11, 22])
-        cond_scalars = ("Density", "Z", "A", "Size")
-        base_pretrain_batches = 1
-        config = {"base_conf": {"base_head": None, **bc}}
-    return _RC()
-
-
-class _GB:
-    scale_dist = "sm_norm"
-    sm_scale = 0.5
-    kappa = 8.0
-    tanh_theta = True
-    e_dep_max = 1.0
-
-
 def test_ang_weight_scales_only_the_angular_term() -> None:
-    from legofmt.base_dist.base_nn import BaseDist
-
     class M(BaseDist):
         def __init__(self, w):
-            self.rc = _rc(ang_weight=w)
-            self.gen_base = _GB()
+            self.rc = _base_rc(ang_weight=w)
+            self.gen_base = GEN_BASE
 
     torch.manual_seed(0)
     n, p = 32, 4
     full = torch.randn(n, 2 + 1 + p, 8)
     full[..., 1, 0] = torch.rand(n) * 0.5 + 0.2
-    from legofmt.data.struct import DataStruct
     ds = DataStruct(full, torch.ones(n, 3 + p, dtype=torch.long), torch.ones(n, 3 + p, dtype=torch.long))
     fwd = torch.ones(n, dtype=torch.bool)
     s = torch.rand(n, 1) + 0.5
@@ -152,9 +122,7 @@ def test_ang_weight_scales_only_the_angular_term() -> None:
 
 
 def test_ang_nout_routes_the_angular_columns_through_the_outgoing_pass() -> None:
-    from legofmt.base_dist.base_nn import build_base_head
-
     for nout in (False, True):
-        head = build_base_head(_rc(ang_shape=True, base_head_nout=True, ang_nout=nout), _GB())
+        head = build_base_head(_base_rc(ang_shape=True, base_head_nout=True, ang_nout=nout), GEN_BASE)
         assert head[-1].out_features == 5
         assert head[0].in_features == 4 + 2 + (2 + 2)

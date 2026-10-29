@@ -1,12 +1,7 @@
-"""Characterisation tests for the old-artefact support paths.
+"""Characterisation tests for the old-artefact support paths (``legofmt/compat.py`` and the config migrations).
 
-These fire only when loading checkpoints/configs from earlier vintages, which
-no other test does (``test_generate.py`` is the only one that loads real
-checkpoints and it needs network access). Written before the compat code was
-moved to ``legofmt/compat.py``, so the move is verified rather than assumed.
-
-``test_xt_compat.py`` already covers the qk-norm scale path; this file covers
-the rest.
+They fire only when loading checkpoints/configs of earlier vintages, which no other offline test does.
+``test_xt_compat.py`` covers the qk-norm scale path; this file covers the rest.
 """
 
 from __future__ import annotations
@@ -15,7 +10,6 @@ import warnings
 
 import pytest
 import torch
-from torch import nn
 
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt.mod_comps.config import (

@@ -2,41 +2,47 @@
 
 The flow has no positional embedding and masks padded slots out of attention and
 the loss, so slicing the padding off a batch must not change any real token's
-output. Design: docs/superpowers/specs/2026-10-14-length-buckets-design.md.
+output.
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import torch
+from torch.utils.data import DistributedSampler
 
+from legofmt.data.dataloaders import LengthBucketBatchSampler
 from legofmt.data.struct import DataStruct
 from legofmt.main.modules import LEGOLtng
-from legofmt.mod_comps.config import resolve_legoltng_config
+from legofmt.mod_comps.config import resolve_legoltng_config, resolve_len_buckets
+from legofmt.multiplicity.model import MultModel
 
-from test_helpers import _fake_batch, _tiny_config
+from test_helpers import _fake_batch, _mult_config, _tiny_config
 
 L_MAX = 8          # n_prefix 2 (Density, E_dep) + incoming + 5 outgoing slots
 N_OUT = (1, 2, 5, 3, 1, 2)                   # event lengths 4, 5, 8, 6, 4, 5
 
 
-def _config(dl=None, odeint=None, **model_conf) -> dict:
-    cfg = _tiny_config()
-    c = cfg["config"]
-    c["model_conf"]["model_args"].update(max_seq_l=L_MAX, ntypes=L_MAX)
-    c["model_conf"].update(model_conf)
-    c["dl_conf"].update(bs=len(N_OUT), **(dl or {}))
+def _config(dl=None, odeint=None, step_cond: bool = False, **model_conf) -> dict:
+    cfg = _tiny_config({"max_seq_l": L_MAX, "ntypes": L_MAX, "step_cond": step_cond}, **model_conf)
+    cfg["config"]["dl_conf"].update(bs=len(N_OUT), **(dl or {}))
     if odeint:
-        c["odeint_conf"] = odeint
+        cfg["config"]["odeint_conf"] = odeint
     return cfg
 
 
-def _ragged_batch(n_out=N_OUT) -> DataStruct:
+def _muon_cosine() -> dict:
+    return {"opt": "muon", "lr": 1e-3, "scheduler": {"cls": "warmup_cosine", "total_steps": 1000, "warmup_frac": 0.1}}
+
+
+def _ragged_batch(n_out=N_OUT, edep_generated: bool = False) -> DataStruct:
     """``_fake_batch`` at ``L_MAX`` with event i keeping only ``n_out[i]`` outgoing
     particles: compacted to the front, the rest padding (``m = 0``, ``am = False``).
     Padding rows hold finite on-manifold filler and pdgid 0, like ``DataPrep``'s
     ``nan_to_num(1)`` rows; zeros would project to NaN, and NaN * 0 survives a mask."""
-    ds = _fake_batch(B=len(n_out), L=L_MAX)
+    ds = _fake_batch(B=len(n_out), L=L_MAX, edep_generated=edep_generated)
     f, m, am = ds.f.full.clone(), ds.m.full.clone(), ds.am.full.clone()
     for i, n in enumerate(n_out):
         f[i, 3 + n:] = f[i, 3]
@@ -77,14 +83,12 @@ def test_velocity_is_unchanged_by_trimming_the_padding() -> None:
 # ---------------------------------------------------------------- configuration
 
 def test_auto_buckets_are_powers_of_two_up_to_max_seq_l() -> None:
-    from legofmt.mod_comps.config import resolve_len_buckets
     assert resolve_len_buckets("auto", 134) == (8, 16, 32, 64, 128, 134)
     assert resolve_len_buckets("auto", 28) == (8, 16, 28)
     assert resolve_len_buckets("auto", 8) == (8,)
 
 
 def test_explicit_buckets_are_sorted_capped_and_end_at_max_seq_l() -> None:
-    from legofmt.mod_comps.config import resolve_len_buckets
     assert resolve_len_buckets([32, 8], 50) == (8, 32, 50)
     assert resolve_len_buckets([8, 64], 40) == (8, 40)
     assert resolve_len_buckets(None, 134) is None
@@ -102,14 +106,11 @@ def test_config_resolves_len_keys() -> None:
     assert rc.gen_len_buckets == (4, 6, 8)
 
 
-def test_unknown_len_mode_raises() -> None:
-    with pytest.raises(ValueError, match="len_mode"):
-        resolve_legoltng_config(_config(dl={"len_buckets": "auto", "len_mode": "pack"}))
-
-
-def test_len_split_must_divide_bs() -> None:
-    with pytest.raises(ValueError, match="len_split"):
-        resolve_legoltng_config(_config(dl={"len_buckets": "auto", "len_split": 4}))
+@pytest.mark.parametrize("dl, match", [({"len_mode": "pack"}, "len_mode"), ({"len_split": 4}, "len_split")],
+                         ids=["unknown_len_mode", "len_split_must_divide_bs"])
+def test_bad_len_keys_raise(dl, match) -> None:
+    with pytest.raises(ValueError, match=match):
+        resolve_legoltng_config(_config(dl={"len_buckets": "auto", **dl}))
 
 
 # ---------------------------------------------------------------- split pieces
@@ -120,31 +121,17 @@ def _by_length(ds: DataStruct) -> DataStruct:
     return ds[ds.am.full.sum(1).sort(stable=True).indices]
 
 
-def test_split_sorts_the_batch_and_cuts_equal_pieces_at_their_buckets() -> None:
+@pytest.mark.parametrize("n_out, width, pieces", [
+    (N_OUT, 8, [(slice(0, 3), 6), (slice(3, 6), 8)]),       # lengths 4,5,8,6,4,5 -> 4,4,5 | 5,6,8
+    ((1, 2, 1, 2), 6, [(slice(0, 2), 4), (slice(2, 4), 6)]),  # longest 5: the batch is trimmed to bucket 6
+    ((1, 2, 1), 6, [(slice(0, 3), 6)]),                       # a short final batch (< 2 x len_split): whole, unsorted
+], ids=["sorted_equal_pieces", "trimmed_to_longest_bucket", "short_final_batch_whole"])
+def test_split_sorts_and_cuts_equal_pieces_at_their_buckets(n_out, width, pieces) -> None:
     model = _model(_config(dl={"len_buckets": [4, 6], "len_split": 2}))
-    ds, pieces = model._len_pieces(_ragged_batch())       # lengths 4,5,8,6,4,5 -> 4,4,5 | 5,6,8
-    lengths = ds.am.full.sum(1)
-    assert lengths.tolist() == sorted(lengths.tolist())
-    assert pieces == [(slice(0, 3), 6), (slice(3, 6), 8)]
-    assert ds.am.full.shape[1] == 8
-
-
-def test_the_batch_is_trimmed_to_its_longest_bucket() -> None:
-    model = _model(_config(dl={"len_buckets": [4, 6], "len_split": 2}))
-    ds, pieces = model._len_pieces(_ragged_batch(n_out=(1, 2, 1, 2)))   # longest 5 -> bucket 6
-    assert ds.am.full.shape[1] == 6 and [L for _, L in pieces] == [4, 6]
-
-
-def test_short_final_batch_runs_whole_but_trimmed() -> None:
-    model = _model(_config(dl={"len_buckets": [4, 6], "len_split": 2}))
-    ds, pieces = model._len_pieces(_ragged_batch(n_out=(1, 2, 1)))      # 3 events, len_split 2
-    assert pieces == [(slice(0, 3), 6)] and ds.am.full.shape[1] == 6
-
-
-def _edep_generated(ds: DataStruct) -> DataStruct:
-    m = ds.m.full.clone()
-    m[:, 1] = 1                                # production layout: the E_dep row is generated
-    return DataStruct(ds.f.full, m, ds.am.full)
+    ds, got = model._len_pieces(_ragged_batch(n_out))
+    lengths = ds.am.full.sum(1).tolist()
+    assert got == pieces and ds.am.full.shape[1] == width
+    assert len(pieces) == 1 or lengths == sorted(lengths)     # a split batch is cut in length order
 
 
 # ---------------------------------------------------------------- split training step
@@ -163,11 +150,9 @@ def test_split_step_matches_the_unsplit_step(flow_map: bool) -> None:
     extra = dict(learned_loss_weights=True, edep_cell=True)
     if flow_map:
         extra.update(one_step_euler_fac=0.5, one_step_euler_sections=4)
-    cfg_off, cfg_on = _config(**extra), _config(dl={"len_buckets": [4, 6], "len_split": 2}, **extra)
-    for c in (cfg_off, cfg_on):
-        c["config"]["model_conf"]["model_args"]["step_cond"] = flow_map
-    plain, split = _model(cfg_off), _model(cfg_on)
-    ds = _by_length(_edep_generated(_ragged_batch()))     # lengths 4,4,5 | 5,6,8 -> pieces at 6 and 8
+    plain = _model(_config(step_cond=flow_map, **extra))
+    split = _model(_config(dl={"len_buckets": [4, 6], "len_split": 2}, step_cond=flow_map, **extra))
+    ds = _by_length(_ragged_batch(edep_generated=True))   # lengths 4,4,5 | 5,6,8 -> pieces at 6 and 8
     seen = {id(plain): set(), id(split): set()}
     for m in (plain, split):
         m.model.register_forward_pre_hook(lambda mod, args, key=id(m): seen[key].add(args[0].shape[1]))
@@ -184,7 +169,6 @@ def test_split_step_matches_the_unsplit_step(flow_map: bool) -> None:
 # ---------------------------------------------------------------- group sampler
 
 def test_group_sampler_batches_come_from_one_bucket_each_event_at_most_once() -> None:
-    from legofmt.data.dataloaders import LengthBucketBatchSampler
     lengths = torch.randint(4, 9, (103,), generator=torch.Generator().manual_seed(0))
     buckets = (4, 6, 8)
     sampler = LengthBucketBatchSampler(lengths, buckets, bs=4, seed=0)
@@ -202,7 +186,6 @@ def test_group_sampler_batches_come_from_one_bucket_each_event_at_most_once() ->
 def test_group_sampler_order_is_set_by_the_epoch() -> None:
     """DistributedSampler semantics: the order is a function of (seed, epoch), so every rank
     builds the same list and a resumed run replays it; Lightning calls set_epoch each epoch."""
-    from legofmt.data.dataloaders import LengthBucketBatchSampler
     lengths = torch.randint(4, 9, (200,), generator=torch.Generator().manual_seed(0))
     sampler = LengthBucketBatchSampler(lengths, (4, 6, 8), bs=4, seed=0)
     sampler.set_epoch(0)
@@ -215,7 +198,6 @@ def test_group_sampler_order_is_set_by_the_epoch() -> None:
 def test_group_sampler_shards_ranks_with_one_bucket_per_step() -> None:
     """Each rank gets the same number of batches, no event twice across ranks, and in every
     step all ranks hold a batch from the same bucket, so no rank waits on a longer one."""
-    from legofmt.data.dataloaders import LengthBucketBatchSampler
     lengths = torch.randint(4, 9, (403,), generator=torch.Generator().manual_seed(0))
     buckets, bs, world = (4, 6, 8), 4, 4
     samplers = [LengthBucketBatchSampler(lengths, buckets, bs=bs, seed=7, rank=r, world_size=world)
@@ -237,8 +219,6 @@ def test_group_sampler_shards_ranks_with_one_bucket_per_step() -> None:
 def test_group_sampler_is_already_distributed_for_lightning() -> None:
     """Lightning wraps any sampler that is not a DistributedSampler in its own wrapper,
     which would reshuffle the batches across ranks and undo the per-step bucket match."""
-    from torch.utils.data import DistributedSampler
-    from legofmt.data.dataloaders import LengthBucketBatchSampler
     assert isinstance(LengthBucketBatchSampler(torch.full((8,), 4), (4, 8), bs=4), DistributedSampler)
 
 
@@ -289,7 +269,6 @@ def test_compile_limit_counts_buckets_set_after_construction(monkeypatch) -> Non
 
 
 def test_group_sampler_skips_a_bucket_smaller_than_a_batch() -> None:
-    from legofmt.data.dataloaders import LengthBucketBatchSampler
     lengths = torch.tensor([4] * 9 + [8] * 3)           # bucket 8 holds fewer than bs events
     sampler = LengthBucketBatchSampler(lengths, (4, 8), bs=4, seed=0)
     batches = list(sampler)
@@ -300,7 +279,6 @@ def test_group_sampler_skips_a_bucket_smaller_than_a_batch() -> None:
 def test_group_sampler_sizes_batches_by_token_budget() -> None:
     """With max_tokens every bucket's batch is max_tokens // length events, on every rank
     alike: fewer for long buckets (8: 16 // 8 = 2), more than bs for short ones (4: 4 > bs 2)."""
-    from legofmt.data.dataloaders import LengthBucketBatchSampler
     lengths = torch.randint(4, 9, (403,), generator=torch.Generator().manual_seed(0))
     buckets, bs, world = (4, 8), 2, 2
     samplers = [LengthBucketBatchSampler(lengths, buckets, bs=bs, seed=0, rank=r, world_size=world, max_tokens=16)
@@ -336,17 +314,20 @@ def test_pinned_batch_is_contiguous_and_unchanged() -> None:
     ds = _ragged_batch().trim(5)
     ds.edep_layers = torch.rand(len(ds), 3)
     p = ds.pin_memory()
-    for a, b in ((p.f.full, ds.f.full), (p.m.full, ds.m.full), (p.am.full, ds.am.full), (p.edep_layers, ds.edep_layers)):
+    for a, b in ((p.f.full, ds.f.full), (p.m.full, ds.m.full), (p.am.full, ds.am.full),
+                 (p.edep_layers, ds.edep_layers)):
         assert a.is_pinned() and a.is_contiguous() and torch.equal(a, b)
 
 
-def test_group_mode_schedule_spans_the_real_step_count() -> None:
-    """Group mode's step count is not dataset_size / bs, so configure_optimizers rebuilds the
-    schedule over Lightning's estimate, with the warmup applied once to the base LR."""
-    from types import SimpleNamespace
-    cfg = _config(dl={"len_buckets": "auto", "len_mode": "group", "len_max_tokens": 64})
-    cfg["config"]["opt_conf"] = {"opt": "muon", "lr": 1e-3,
-                                 "scheduler": {"cls": "warmup_cosine", "total_steps": 1000, "warmup_frac": 0.1}}
+@pytest.mark.parametrize("dl", [{"len_buckets": "auto", "len_mode": "group", "len_max_tokens": 64}, None,
+                                {"len_buckets": "auto", "len_mode": "split", "len_split": 2}],
+                         ids=["group", "off", "split"])
+def test_schedule_spans_the_real_step_count_in_every_mode(dl) -> None:
+    """configure_optimizers rebuilds the schedule over Lightning's step estimate, with the warmup applied once to
+    the base LR: group mode's step count is not dataset_size / bs, and in every mode run.dataset_size is hand-written
+    (it must be the post-filter count), so a schedule shorter than the run would walk the cosine LR back up."""
+    cfg = _config(dl=dl)
+    cfg["config"]["opt_conf"] = _muon_cosine()
     model = LEGOLtng(cfg)
     model._trainer = SimpleNamespace(estimated_stepping_batches=37)
     sched = model.configure_optimizers()["lr_scheduler"]["scheduler"]
@@ -355,30 +336,13 @@ def test_group_mode_schedule_spans_the_real_step_count() -> None:
     assert model.opt.param_groups[0]["lr"] == pytest.approx(1e-3 * 1e-3)
 
 
-
-@pytest.mark.parametrize("dl", [None, {"len_buckets": "auto", "len_mode": "split", "len_split": 2}])
-def test_schedule_spans_the_real_step_count_in_every_mode(dl) -> None:
-    """Not only group mode: run.dataset_size is hand-written (it must be the post-filter count),
-    and a schedule shorter than the run walks the cosine LR back up."""
-    from types import SimpleNamespace
-    cfg = _config(dl=dl)
-    cfg["config"]["opt_conf"] = {"opt": "muon", "lr": 1e-3,
-                                 "scheduler": {"cls": "warmup_cosine", "total_steps": 1000, "warmup_frac": 0.1}}
-    model = LEGOLtng(cfg)
-    model._trainer = SimpleNamespace(estimated_stepping_batches=37)
-    assert model.configure_optimizers()["lr_scheduler"]["scheduler"]._schedulers[1].T_max == 34
-
-
 def test_mult_schedule_spans_the_real_step_count() -> None:
-    from types import SimpleNamespace
-    from legofmt.multiplicity.model import MultModel
-    from test_helpers import _mult_config
     cfg = _mult_config()
-    cfg["opt_conf"] = {"opt": "muon", "lr": 1e-3,
-                       "scheduler": {"cls": "warmup_cosine", "total_steps": 1000, "warmup_frac": 0.1}}
+    cfg["opt_conf"] = _muon_cosine()
     model = MultModel({"state_dict": {}, "config": cfg})
     model._trainer = SimpleNamespace(estimated_stepping_batches=37)
     assert model.configure_optimizers()["lr_scheduler"]["scheduler"]._schedulers[1].T_max == 34
+
 
 def test_config_resolves_len_max_tokens() -> None:
     assert resolve_legoltng_config(_config()).len_max_tokens is None
@@ -405,14 +369,13 @@ def test_training_step_has_no_host_device_sync() -> None:
         def forward(self, x, mask, attn_mask, types, pdgids, t=None, d=None):
             return self.lin(x) * (t + d).unsqueeze(-1)
 
-    cfg = _config(dl={"len_buckets": [4, 6], "len_mode": "group"}, ot_coupling=True,
-                  learned_loss_weights=True, edep_cell=True, one_step_euler_fac=0.5, one_step_euler_sections=4)
-    cfg["config"]["model_conf"]["model_args"]["step_cond"] = True
-    model = _model(cfg)
+    model = _model(_config(dl={"len_buckets": [4, 6], "len_mode": "group"}, step_cond=True, ot_coupling=True,
+                           learned_loss_weights=True, edep_cell=True, one_step_euler_fac=0.5,
+                           one_step_euler_sections=4))
     model.model.vf = _VF()
     model = model.cuda()
     model.train()
-    cpu = _edep_generated(_ragged_batch())
+    cpu = _ragged_batch(edep_generated=True)
     for sync_check in (False, True):                          # the first step does the lazy setup
         batch = model.on_before_batch_transfer(cpu, 0).to("cuda")
         torch.cuda.synchronize()

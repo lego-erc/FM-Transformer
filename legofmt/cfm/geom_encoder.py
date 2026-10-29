@@ -7,8 +7,7 @@ summary tokens are prepended, a small bidirectional x-transformers Encoder runs 
 summary outputs are projected to h_dim through a zero-initialised read-out, so an untrained encoder adds nothing.
 
 The stack is fixed per model (it comes from the config), so the layer features are a non-persistent buffer and the
-encoder runs once per vector-field call on a batch of one. Design and the standalone probe:
-docs/superpowers/specs/2026-10-20-geometry-condition-encoder-design.md.
+encoder runs once per vector-field call on a batch of one.
 """
 
 from __future__ import annotations

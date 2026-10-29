@@ -5,7 +5,7 @@ plus radiation / interaction lengths and Fourier features of the cumulative dept
 flow's sequence. They are conditioning tokens (t = 1, d = 0), never transported and dropped before the output
 projection. With ``hide_scalars`` the composite Density / Z / A / Size rows stay in the data (the base head and
 the count model read them) but are masked out of the flow's attention, so the stack reaches the flow only through
-the tokens. Design: docs/superpowers/specs/2026-10-20-geometry-condition-encoder-design.md.
+the tokens.
 """
 
 from __future__ import annotations
@@ -19,18 +19,13 @@ from legofmt.cfm.geom_encoder import GeomEncoder
 from legofmt.main.modules import LEGOLtng
 from legofmt.mod_comps.config import resolve_legoltng_config
 
-from test_helpers import _fake_batch, _tiny_config
+from test_helpers import GEOM, _fake_batch, _tiny_config, _vf_kwargs
 
-W = [1.4, 19.3, 74.0, 183.84]
-SI = [0.3, 2.33, 14.0, 28.0855]
-GEOM = {"layers": [W, SI], "repeat": 3, "tokens": 2, "dim": 16, "depth": 1, "heads": 2}
+W, SI = GEOM["layers"]
 
 
 def _config(geom=GEOM) -> dict:
-    cfg = _tiny_config()
-    if geom is not None:
-        cfg["config"]["model_conf"]["model_args"]["geom_encoder"] = copy.deepcopy(geom)
-    return cfg
+    return _tiny_config(None if geom is None else {"geom_encoder": copy.deepcopy(geom)})
 
 
 def _model(geom=GEOM, seed=0) -> LEGOLtng:
@@ -49,8 +44,7 @@ def _wake(m: LEGOLtng) -> None:
 
 
 def _velocity(m: LEGOLtng, ds, t=0.3):
-    return m.model(ds.f.model_in, torch.tensor(t), mask=ds.m.full, attn_mask=ds.am.full,
-                   types=m.types_embd[:, :ds.f.full.shape[1]], pdgids=m.convert_pdgids(ds.f.pdgids))
+    return m.model(ds.f.model_in, torch.tensor(t), **_vf_kwargs(m, ds))
 
 
 def test_config_expands_the_repeated_period_and_records_the_prefix() -> None:
@@ -112,8 +106,7 @@ def test_packed_and_per_token_conditions_agree() -> None:
     m = _model()
     _wake(m)
     ds = _fake_batch()
-    vf, ex = m.model.vf, dict(mask=ds.m.full, attn_mask=ds.am.full, types=m.types_embd[:, :5],
-                             pdgids=m.convert_pdgids(ds.f.pdgids))
+    vf, ex = m.model.vf, _vf_kwargs(m, ds)
     x = ds.f.model_in
     t_ev = torch.full((2, 1), 0.3)
     t_tok = torch.where(ds.m.full == 1, 0.3, 1.0)

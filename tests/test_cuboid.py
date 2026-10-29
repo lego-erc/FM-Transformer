@@ -25,6 +25,8 @@ from test_helpers import MANIFOLD, _flow_config, _save_mult_ckpt
 from test_helpers import _head_batch as _batch, _head_config as _config
 
 SLAB = [10.0, 100.0, 100.0]
+
+
 def test_raytrace_exits_the_cuboid() -> None:
     x = torch.tensor([[-5.0, 30.0, 0.0], [-5.0, 30.0, 0.0]])
     p = F.normalize(torch.tensor([[1.0, 0.0, 0.0], [0.1, 1.0, 0.0]]), dim=-1)

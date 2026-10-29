@@ -8,6 +8,7 @@ it to eager (~135 s per leg for ~5 s of generation).
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from legofmt.cfm.solvers import Solvers
@@ -27,31 +28,19 @@ def _recording(fn):
     return wrapped, seen
 
 
-def test_no_buckets_is_the_old_behaviour() -> None:
-    s = _solvers()
-    x, m = torch.randn(5, 3, 2), torch.ones(5, 3)
+@pytest.mark.parametrize("n, split_size, buckets, shapes", [
+    (5, None, None, [5]),          # no buckets: the old behaviour
+    (5, None, [8, 16], [8]),       # a partial chunk is padded to the smallest fitting bucket
+    (8, None, [8, 16], [8]),       # an exact bucket size is not padded
+    (20, 16, [8, 16], [16, 8]),    # split, then bucket: exactly the bucket shapes
+    (20, 16, [8], [16, 8]),        # a chunk larger than every bucket is left alone
+], ids=["no_buckets", "partial_padded", "exact_not_padded", "split_then_bucket", "larger_than_buckets"])
+def test_chunks_run_at_their_bucket_and_come_back_unpadded(n, split_size, buckets, shapes) -> None:
+    x, m = torch.randn(n, 3, 2), torch.ones(n, 3)
     fn, seen = _recording(lambda x, m: x * 2)
-    out = s.chunked(fn, x, m, split_size=None, buckets=None)
-    assert seen == [(5, 5)]
+    out = _solvers().chunked(fn, x, m, split_size=split_size, buckets=buckets)
+    assert seen == [(k, k) for k in shapes]
     assert torch.equal(out, x * 2)
-
-
-def test_partial_chunk_is_padded_to_the_smallest_fitting_bucket() -> None:
-    s = _solvers()
-    x, m = torch.randn(5, 3, 2), torch.ones(5, 3)
-    fn, seen = _recording(lambda x, m: x * 2)
-    out = s.chunked(fn, x, m, buckets=[8, 16])
-    assert seen == [(8, 8)]
-    assert out.shape[0] == 5
-    assert torch.equal(out, x * 2)
-
-
-def test_exact_bucket_size_is_not_padded() -> None:
-    s = _solvers()
-    x, m = torch.randn(8, 3, 2), torch.ones(8, 3)
-    fn, seen = _recording(lambda x, m: x)
-    s.chunked(fn, x, m, buckets=[8, 16])
-    assert seen == [(8, 8)]
 
 
 def test_padding_tiles_the_chunks_own_rows() -> None:
@@ -61,24 +50,6 @@ def test_padding_tiles_the_chunks_own_rows() -> None:
     captured = []
     s.chunked(lambda x: captured.append(x) or x, x, buckets=[8])
     assert captured[0].squeeze().tolist() == [0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 1.0]
-
-
-def test_split_then_bucket_gives_exactly_the_bucket_shapes() -> None:
-    s = _solvers()
-    x, m = torch.randn(20, 3, 2), torch.ones(20, 3)
-    fn, seen = _recording(lambda x, m: x * 3)
-    out = s.chunked(fn, x, m, split_size=16, buckets=[8, 16])
-    assert seen == [(16, 16), (8, 8)]
-    assert out.shape[0] == 20
-    assert torch.equal(out, x * 3)
-
-
-def test_chunk_larger_than_every_bucket_is_left_alone() -> None:
-    s = _solvers()
-    x = torch.randn(20, 3, 2)
-    fn, seen = _recording(lambda x: x)
-    s.chunked(fn, x, split_size=16, buckets=[8])
-    assert seen == [(16,), (8,)]
 
 
 def test_stacked_intermediates_are_sliced_on_the_batch_axis() -> None:

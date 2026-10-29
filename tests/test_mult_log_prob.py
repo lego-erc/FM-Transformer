@@ -1,5 +1,5 @@
 """MultModel.log_prob: log P(counts, pass-through) of a ``forward`` draw, differentiable in the conditioning input --
-the score-function term of legofmt.design's gradient (a sampled count cannot be backpropagated through)."""
+the score-function term of the density design's gradient (a sampled count cannot be backpropagated through)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from test_passthrough_head import _model
+from test_helpers import _pt_mult_model as _model
 
 
 def _batch(m, B: int = 8, seed: int = 5):

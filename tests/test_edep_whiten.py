@@ -22,9 +22,7 @@ from legofmt.main.modules import LEGOLtng
 
 def _model() -> LEGOLtng:
     torch.manual_seed(0)    # the rest of the head is drawn from the global RNG: some draws put 0.3 out of reach
-    cfg = _head_config(True)
-    cfg["config"]["model_conf"]["edep_whiten"] = True
-    m = LEGOLtng(cfg)
+    m = LEGOLtng(_head_config(True, edep_whiten=True))
     with torch.no_grad():   # a per-event prior: the zero-init head would give every event mu = 0, sig = 1
         m.base_head[-1].weight.copy_(0.5 * torch.randn(m.base_head[-1].weight.shape,
                                                        generator=torch.Generator().manual_seed(3)))
@@ -132,7 +130,5 @@ def test_likelihood_refuses_the_whitened_row() -> None:
 
 
 def test_whitening_needs_the_base_head() -> None:
-    cfg = _tiny_config()
-    cfg["config"]["model_conf"]["edep_whiten"] = True
     with pytest.raises(ValueError, match="edep_whiten"):
-        LEGOLtng(cfg)
+        LEGOLtng(_tiny_config(edep_whiten=True))

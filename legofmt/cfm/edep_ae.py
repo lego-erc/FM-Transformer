@@ -8,7 +8,6 @@ this: what the latents leave out is per-layer sampling noise, uncorrelated acros
 put the Si layers of stack59 at 0.8x their mean and 0.5x their spread at every K. Each draw is clamped at the
 layer's training maximum (single far-tail draws otherwise steal the total on rescaling) and an all-zero draw gives
 the total to the likeliest layer. All energies in MeV.
-Design and probe: docs/superpowers/specs/2026-10-20-edep-layer-latents-design.md.
 """
 
 from __future__ import annotations

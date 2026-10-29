@@ -1,19 +1,11 @@
-"""The compiled ``ProjectModel.forward`` must not be reached under both
-``d=None`` and ``d: Tensor``.
+"""``_step`` hands a step-conditioned field an explicit zero ``d``, never ``None``.
 
-``torch.compile`` guards ``d is None`` separately from ``d: Tensor``, and that
-axis multiplies with the ``grad_mode`` GLOBAL_STATE guard -- the CFM step and
-the flow-map student run under grad, the flow-map teacher (``distill.py``) and
-validation under ``no_grad``. Four graphs for one Python function, before the
-train / last-partial / validation batch shapes are counted, which reaches the
-default ``recompile_limit`` of 8. Exceeding it does not raise: dynamo drops the
-frame to eager for the rest of the run, silently losing ``compile: model``
-(observed 2026-09-04 on ``flow/kin_1step_040926``, rank 2, at 09:59).
-
-So ``_step`` passes an explicit zero ``d`` whenever the field is
-step-conditioned. ``ProjectModel.forward`` substitutes ``torch.zeros_like(t)``
-for ``None``, so this is bitwise identical -- asserted below, because the whole
-justification for the change is that it cannot alter the loss.
+``torch.compile`` guards ``d is None`` apart from ``d: Tensor``, and that axis multiplies with the grad-mode guard
+(the CFM step and flow-map student run under grad, the teacher and validation under ``no_grad``): four graphs for
+one function before the batch shapes are counted, which reaches dynamo's default ``recompile_limit`` of 8. Past it
+dynamo silently runs the frame eager for the rest of the run (``flow/kin_1step_040926``, 2026-09-04).
+``ProjectModel.forward`` substitutes ``zeros_like(t)`` for ``None``, so the zero is bitwise identical -- asserted
+below, because that is the change's whole justification.
 """
 
 from __future__ import annotations
@@ -25,30 +17,21 @@ from test_helpers import _fake_batch, _tiny_config
 
 
 def _model(step_cond: bool) -> LEGOLtng:
-    cfg = _tiny_config()
-    cfg["config"]["model_conf"]["model_args"]["step_cond"] = step_cond
-    cfg["config"]["model_conf"]["base_pretrain_batches"] = 0
-    return LEGOLtng(cfg)
+    return LEGOLtng(_tiny_config({"step_cond": step_cond}))
 
 
-def _args(m: LEGOLtng, B: int = 2, L: int = 5):
+def _args(B: int = 2, L: int = 5):
     torch.manual_seed(0)
     mask = torch.zeros(B, L, dtype=torch.long)
     mask[:, 3:] = 1
-    return (
-        torch.randn(B, L, 7),
-        torch.rand(B, 1),
-        mask,
-        torch.ones(B, L, dtype=torch.bool),
-        torch.zeros(B, L, dtype=torch.long),
-        torch.zeros(B, L, dtype=torch.long),
-    )
+    return (torch.randn(B, L, 7), torch.rand(B, 1), mask, torch.ones(B, L, dtype=torch.bool),
+            torch.zeros(B, L, dtype=torch.long), torch.zeros(B, L, dtype=torch.long))
 
 
 def test_zero_d_is_bitwise_identical_to_none() -> None:
     m = _model(step_cond=True)
     m.model.eval()
-    a = _args(m)
+    a = _args()
     with torch.no_grad():
         v_none = m.model(*a, d=None)
         v_zero = m.model(*a, d=torch.zeros_like(a[1]))
@@ -59,9 +42,7 @@ def test_step_passes_a_tensor_d_when_step_conditioned() -> None:
     """The guard axis is closed only if the CFM step passes a Tensor, not None."""
     m = _model(step_cond=True)
     seen: list[object] = []
-    m.model.register_forward_pre_hook(
-        lambda _mod, _a, kw: seen.append(kw.get("d", None)), with_kwargs=True,
-    )
+    m.model.register_forward_pre_hook(lambda _mod, _a, kw: seen.append(kw.get("d", None)), with_kwargs=True)
     m.train()
     m._step(_fake_batch(), 0)
     assert seen, "_step never called the model"

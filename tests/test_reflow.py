@@ -16,14 +16,11 @@ from test_helpers import _fake_batch, _tiny_config
 
 def _with_teacher(cls, monkeypatch):
     monkeypatch.setattr(torch, "compile", lambda m, **k: m)  # inductor would cost ~10 s
-    cfg = _tiny_config()
-    cfg["config"]["model_conf"]["reflow_kwargs"] = {"method": "midpoint", "step_size": 0.5}
+    cfg = _tiny_config(reflow_kwargs={"method": "midpoint", "step_size": 0.5})
     m = cls(cfg)
     teacher = _teacher_from_state(cfg["config"], LEGOLtng(_tiny_config()).model.vf.state_dict())
     object.__setattr__(m, "reflow_teacher", teacher)
-    ds = _fake_batch(B=4)
-    ds.m.full[:, 1] = 1  # production: the E_dep row is generated
-    return m, ds
+    return m, _fake_batch(B=4, edep_generated=True)
 
 
 def test_velocity_reflow_target_keeps_prefix_filler(monkeypatch) -> None:

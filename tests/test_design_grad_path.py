@@ -1,6 +1,6 @@
 """The differentiable generation path: ``_solve`` / ``_forward`` are ``solve`` / ``forward`` without their
 ``torch.no_grad`` (which stays on the public methods), so a design parameter written into a conditioning row can be
-differentiated through a sampled event (docs/superpowers/specs/2026-10-26-density-amortized-stack-gradient-design.md)."""
+differentiated through a sampled event."""
 
 import pytest
 import torch
@@ -25,19 +25,12 @@ def _wake(m: LEGOLtng) -> LEGOLtng:
 
 
 def _velocity_model() -> LEGOLtng:
-    cfg = _tiny_config()
-    cfg["config"]["model_conf"]["model_args"]["step_cond"] = True
+    cfg = _tiny_config({"step_cond": True})
     cfg["config"]["odeint_conf"] = {"method": "euler", "step_size": 0.25}
     torch.manual_seed(0)
     m = LEGOLtng(cfg)
     m.eval()
     return _wake(m)
-
-
-def _generated_edep_batch() -> DataStruct:
-    ds = _fake_batch(B=4)
-    ds.m.full[:, 1] = 1   # production: the E_dep row is generated (_fake_batch marks it conditioning)
-    return ds
 
 
 def _with_density(ds: DataStruct, dens: torch.Tensor) -> DataStruct:
@@ -47,13 +40,13 @@ def _with_density(ds: DataStruct, dens: torch.Tensor) -> DataStruct:
 
 
 def test_forward_has_no_graph() -> None:
-    m, ds = _velocity_model(), _generated_edep_batch()
+    m, ds = _velocity_model(), _fake_batch(B=4, edep_generated=True)
     dens = ds.f.full[:, 0, 0].clone().requires_grad_()
     assert m.forward(_with_density(ds, dens))[0].grad_fn is None
 
 
 def test_private_forward_matches_and_differentiates() -> None:
-    m, ds = _velocity_model(), _generated_edep_batch()
+    m, ds = _velocity_model(), _fake_batch(B=4, edep_generated=True)
     torch.manual_seed(1)
     a = m.forward(ds)[0]
     torch.manual_seed(1)
@@ -69,9 +62,7 @@ def test_private_forward_matches_and_differentiates() -> None:
 def test_head_params_gradient_finite_at_normal_incidence() -> None:
     # the chord divides by each component of the incoming direction; a gun along +z has two zero components, whose
     # discarded 0/0 branch must not reach the backward pass
-    cfg = _head_config(True)
-    cfg["config"]["model_conf"]["model_args"]["ntypes"] = 7
-    m = LEGOLtng(cfg)
+    m = LEGOLtng(_head_config(True, {"ntypes": 7}))
     ds = _head_batch(torch.full((4,), 0.5), torch.tensor([1, 2, 1, 2]))
     f = ds.f.full.clone()
     f[:, 5, 1:4] = torch.tensor([0.0, 0.0, 1.0])
@@ -139,11 +130,8 @@ def test_rotate_gradient_finite_at_the_pole(theta: float) -> None:
 
 def test_gradient_finite_with_padding() -> None:
     # events with 1 and 2 outgoing particles (a padded slot), whitened E_dep row, zero-velocity conditioning rows
-    cfg = _head_config(True)
-    cfg["config"]["model_conf"]["edep_whiten"] = True
-    cfg["config"]["model_conf"]["model_args"]["ntypes"] = 7
     torch.manual_seed(0)
-    m = _wake(LEGOLtng(cfg))
+    m = _wake(LEGOLtng(_head_config(True, {"ntypes": 7}, edep_whiten=True)))
     m.eval()
     ds = _head_batch(torch.full((6,), 0.5), torch.tensor([1, 2, 1, 2, 1, 2]))
     dens = ds.f.full[:, 0, 0].clone().requires_grad_()

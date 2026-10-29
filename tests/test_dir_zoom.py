@@ -14,7 +14,7 @@ import math
 import pytest
 import torch
 
-from legofmt.data.struct import DataStruct, _F
+from legofmt.data.struct import DataStruct
 from legofmt.geometry.geom_trafos import zoom_polar
 from legofmt.main.modules import LEGOLtng
 from legofmt.mod_comps.config import resolve_legoltng_config
@@ -27,8 +27,10 @@ THETA_S = 2e-3
 def _pairs(n: int = 4096) -> tuple[torch.Tensor, torch.Tensor]:
     g = torch.Generator().manual_seed(0)
     u = torch.nn.functional.normalize(torch.randn(n, 3, generator=g, dtype=torch.float64), dim=-1)
-    w = torch.nn.functional.normalize(torch.linalg.cross(u, torch.randn(n, 3, generator=g, dtype=torch.float64)), dim=-1)
-    theta = torch.cat((torch.logspace(-6, 0, n // 2, dtype=torch.float64), torch.rand(n - n // 2, generator=g, dtype=torch.float64) * math.pi))
+    w = torch.nn.functional.normalize(torch.linalg.cross(u, torch.randn(n, 3, generator=g, dtype=torch.float64)),
+                                      dim=-1)
+    theta = torch.cat((torch.logspace(-6, 0, n // 2, dtype=torch.float64),
+                       torch.rand(n - n // 2, generator=g, dtype=torch.float64) * math.pi))
     return u, torch.cos(theta)[:, None] * u + torch.sin(theta)[:, None] * w
 
 
@@ -51,16 +53,30 @@ def test_zoom_maps_the_polar_angle_and_keeps_the_azimuth() -> None:
     assert torch.allclose(zoom_polar(u, u, THETA_S), u)                            # the incoming direction is fixed
 
 
-def _model() -> LEGOLtng:
-    cfg = _tiny_config()
-    cfg["config"]["model_conf"]["dir_zoom"] = THETA_S
+def _model(**gate) -> LEGOLtng:
     torch.manual_seed(0)
-    return LEGOLtng(cfg)
+    return LEGOLtng(_tiny_config(dir_zoom=THETA_S, **gate))
 
 
-def test_config_resolves_dir_zoom() -> None:
-    assert resolve_legoltng_config(_tiny_config()).dir_zoom is None
-    assert _model().rc.dir_zoom == THETA_S
+GATED = {"dir_zoom_nucleons_max": 1}
+
+
+def _nucleon_batch(model: LEGOLtng) -> DataStruct:
+    """Event 0 emits two protons (a nuclear interaction), event 1 a proton and a photon (a survivor)."""
+    ds = _fake_batch()
+    f, n = ds.f.full.clone(), model.rc.n_prefix
+    f[0, n + 1:, 7] = 2212.0
+    f[1, n + 1:, 7] = torch.tensor([2212.0, 22.0])
+    return DataStruct(f, ds.m.full, ds.am.full)
+
+
+def test_config_resolves_the_dir_zoom_keys() -> None:
+    off = resolve_legoltng_config(_tiny_config())
+    assert off.dir_zoom is None and off.dir_zoom_mix == 0.0 and off.dir_zoom_nucleons_max is None
+    assert _model().rc.dir_zoom == THETA_S and _model(**GATED).rc.dir_zoom_nucleons_max == 1
+    assert resolve_legoltng_config(_tiny_config(dir_zoom=THETA_S, dir_zoom_mix=0.5)).dir_zoom_mix == 0.5
+    with pytest.raises(ValueError, match="dir_zoom_nucleons_max"):
+        resolve_legoltng_config(_tiny_config(dir_zoom=THETA_S, dir_zoom_nucleons_max=-1))
 
 
 def test_only_outgoing_rows_of_forward_events_are_zoomed() -> None:
@@ -79,26 +95,40 @@ def test_only_outgoing_rows_of_forward_events_are_zoomed() -> None:
     assert not torch.allclose(z[out_rows][:, 1:4], x[out_rows][:, 1:4])
 
 
-def test_training_step_learns_the_zoomed_targets() -> None:
+def test_events_with_more_nucleons_than_the_gate_are_not_zoomed() -> None:
+    """Nuclear secondaries are spread over the sphere; the zoom is for near-identity survivors and squeezes them. In
+    G4, >= 2 outgoing nucleons marks a nuclear interaction in 99.4-99.9% of them (1.4 mm W, 0.1-1 GeV n/p); survivors
+    and EM events have <= 1 in 99.9%+."""
+    model = _model(**GATED)
+    ds = _nucleon_batch(model)
+    x, n = ds.f.full, model.rc.n_prefix
+    z = model._zoom_dirs(x, ds.am.full, torch.ones(len(ds), dtype=torch.bool), pdgids=ds.f.pdgids)
+    assert torch.equal(z[0], x[0])
+    assert not torch.allclose(z[1, n + 1:, 1:4], x[1, n + 1:, 1:4])
+
+
+@pytest.mark.parametrize("gate", [{}, GATED], ids=["plain", "gated"])
+def test_training_step_learns_the_zoomed_targets(gate) -> None:
     """The base, the OT coupling and the flow all see the zoomed outgoing directions."""
-    model = _model()
+    model = _model(**gate)
     seen = []
     orig = model.gen_base_wrapper
     model.gen_base_wrapper = lambda ds_t, *a, **k: seen.append(ds_t.f.full.clone()) or orig(ds_t, *a, **k)
-    ds = _fake_batch()
-    expect = model._zoom_dirs(ds.f.full, ds.am.full, ds.m.full[:, model.rc.n_prefix] == 0)
+    ds = _nucleon_batch(model) if gate else _fake_batch()
+    expect = model._zoom_dirs(ds.f.full, ds.am.full, ds.m.full[:, model.rc.n_prefix] == 0, pdgids=ds.f.pdgids)
     model._step(ds, 0)
     keep = ds.am.full
     assert torch.allclose(seen[0][..., 1:4][keep], expect[..., 1:4][keep])
 
 
-def test_forward_undoes_the_zoom_on_the_generated_sample() -> None:
+@pytest.mark.parametrize("gate", [{}, GATED], ids=["plain", "gated"])
+def test_forward_undoes_the_zoom_on_the_generated_sample(gate) -> None:
     """The solver works in zoomed coordinates; forward hands back physical directions."""
-    model = _model().eval()
-    ds = _fake_batch()
+    model = _model(**gate).eval()
+    ds = _nucleon_batch(model) if gate else _fake_batch()
     target = ds.f.model_in.clone()
     fwd = ds.m.full[:, model.rc.n_prefix] == 0
-    zoomed = model._zoom_dirs(target, ds.am.full, fwd)
+    zoomed = model._zoom_dirs(target, ds.am.full, fwd, pdgids=ds.f.pdgids)
     model._solve_by_length = lambda *a, **k: zoomed.clone()
     sols, _, _ = model(ds)
     keep = ds.am.full
@@ -119,71 +149,3 @@ def test_blended_zoom_round_trips_and_keeps_the_backward_hemisphere_wide(mix) ->
     assert (zoom_polar(z, u, THETA_S, inverse=True, mix=mix) - v).abs().max() < 1e-9
     back = mix * math.pi / 2 + (1 - mix) * math.pi * math.log1p(math.pi / 2 / THETA_S) / math.log1p(math.pi / THETA_S)
     assert math.pi - back > 0.09 * math.pi + mix * 0.4
-
-
-def test_config_resolves_dir_zoom_mix() -> None:
-    assert resolve_legoltng_config(_tiny_config()).dir_zoom_mix == 0.0
-    cfg = _tiny_config()
-    cfg["config"]["model_conf"].update(dir_zoom=THETA_S, dir_zoom_mix=0.5)
-    assert resolve_legoltng_config(cfg).dir_zoom_mix == 0.5
-
-
-def _gated(nmax: int = 1) -> LEGOLtng:
-    cfg = _tiny_config()
-    cfg["config"]["model_conf"].update(dir_zoom=THETA_S, dir_zoom_nucleons_max=nmax)
-    torch.manual_seed(0)
-    return LEGOLtng(cfg)
-
-
-def _nucleon_batch(model: LEGOLtng) -> DataStruct:
-    """Event 0 emits two protons (a nuclear interaction), event 1 a proton and a photon (a survivor)."""
-    ds = _fake_batch()
-    f, n = ds.f.full.clone(), model.rc.n_prefix
-    f[0, n + 1:, 7] = 2212.0
-    f[1, n + 1:, 7] = torch.tensor([2212.0, 22.0])
-    return DataStruct(f, ds.m.full, ds.am.full)
-
-
-def test_config_resolves_dir_zoom_nucleons_max() -> None:
-    """In G4, >= 2 outgoing nucleons marks a nuclear interaction in 99.4-99.9% of them (1.4 mm W, 0.1-1 GeV n/p);
-    survivors and EM events have <= 1 in 99.9%+."""
-    assert resolve_legoltng_config(_tiny_config()).dir_zoom_nucleons_max is None
-    assert _gated().rc.dir_zoom_nucleons_max == 1
-    cfg = _tiny_config()
-    cfg["config"]["model_conf"].update(dir_zoom=THETA_S, dir_zoom_nucleons_max=-1)
-    with pytest.raises(ValueError, match="dir_zoom_nucleons_max"):
-        resolve_legoltng_config(cfg)
-
-
-def test_events_with_more_nucleons_than_the_gate_are_not_zoomed() -> None:
-    """Nuclear secondaries are spread over the sphere; the zoom is for near-identity survivors and squeezes them."""
-    model = _gated()
-    ds = _nucleon_batch(model)
-    x, n = ds.f.full, model.rc.n_prefix
-    z = model._zoom_dirs(x, ds.am.full, torch.ones(len(ds), dtype=torch.bool), pdgids=ds.f.pdgids)
-    assert torch.equal(z[0], x[0])
-    assert not torch.allclose(z[1, n + 1:, 1:4], x[1, n + 1:, 1:4])
-
-
-def test_gated_zoom_round_trips_through_forward() -> None:
-    model = _gated().eval()
-    ds = _nucleon_batch(model)
-    target = ds.f.model_in.clone()
-    fwd = ds.m.full[:, model.rc.n_prefix] == 0
-    zoomed = model._zoom_dirs(target, ds.am.full, fwd, pdgids=ds.f.pdgids)
-    model._solve_by_length = lambda *a, **k: zoomed.clone()
-    sols, _, _ = model(ds)
-    keep = ds.am.full
-    assert torch.allclose(sols[..., 1:4][keep], target[..., 1:4][keep], atol=1e-5)
-
-
-def test_gated_training_step_learns_the_gated_targets() -> None:
-    model = _gated()
-    seen = []
-    orig = model.gen_base_wrapper
-    model.gen_base_wrapper = lambda ds_t, *a, **k: seen.append(ds_t.f.full.clone()) or orig(ds_t, *a, **k)
-    ds = _nucleon_batch(model)
-    expect = model._zoom_dirs(ds.f.full, ds.am.full, ds.m.full[:, model.rc.n_prefix] == 0, pdgids=ds.f.pdgids)
-    model._step(ds, 0)
-    keep = ds.am.full
-    assert torch.allclose(seen[0][..., 1:4][keep], expect[..., 1:4][keep])

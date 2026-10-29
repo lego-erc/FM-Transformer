@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
@@ -11,11 +12,22 @@ from legofmt.distill.reflow import LEGOLtngDirect
 
 MANIFOLD = [{"name": "euclidean", "dim": 1},
             {"name": "sphere", "dim": 3}, {"name": "sphere", "dim": 3}]
+# a W/Si stack for model_args.geom_encoder: [thickness mm, density g/cm3, Z, A] per layer
+GEOM = {"layers": [[1.4, 19.3, 74.0, 183.84], [0.3, 2.33, 14.0, 28.0855]], "repeat": 3, "tokens": 2, "dim": 16,
+        "depth": 1, "heads": 2}
 
 
-def _tiny_config() -> dict:
-    pdgids = torch.tensor([22, 211, 2212], dtype=torch.int64).sort().values
-    return {
+def _prep_config(**kw) -> dict:
+    """A ``DataPrep`` config: 10 MeV cutoff, no ray projection, Density only, kinetic energy; ``kw`` overrides."""
+    return {"cutoff_mev": 10.0, "manifold": MANIFOLD, "proj_ray": False, "cond_scalars": ["Density"],
+            "energy_kin": True, **kw}
+
+
+def _tiny_config(model_args: dict | None = None, **model_conf) -> dict:
+    """A 2-layer, h_dim 16 flow checkpoint dict; ``model_conf`` keys are set, ``model_args`` is merged into
+    ``model_conf.model_args``."""
+    pdgids = torch.tensor([22, 211, 2212], dtype=torch.int64)
+    cfg = {
         "state_dict": {},
         "config": {
             "dl_conf": {
@@ -60,11 +72,15 @@ def _tiny_config() -> dict:
             "opt_conf": {"opt": "schedulefree", "lr": 1e-3},
         },
     }
+    cfg["config"]["model_conf"].update(model_conf)
+    cfg["config"]["model_conf"]["model_args"].update(model_args or {})
+    return cfg
 
 
-def _fake_batch(B: int = 2, L: int = 5) -> DataStruct:
+def _fake_batch(B: int = 2, L: int = 5, edep_generated: bool = False) -> DataStruct:
     """Synthetic batch matching the padded sequence layout: 2 conditioning
-    slots, 1 incoming-particle slot, then ``L - 3`` outgoing slots."""
+    slots, 1 incoming-particle slot, then ``L - 3`` outgoing slots. ``edep_generated``
+    marks the E_dep row generated (``m = 1``), as in production."""
     f = torch.zeros(B, L, 8)
     f[:, 0, 0] = 1.0
     f[:, 1, 0] = 0.1
@@ -84,8 +100,15 @@ def _fake_batch(B: int = 2, L: int = 5) -> DataStruct:
     f[:, 3:, 7] = 211.0
     m = torch.zeros(B, L, dtype=torch.long)
     m[:, 3:] = 1
+    m[:, 1] = int(edep_generated)
     am = torch.ones(B, L, dtype=torch.bool)
     return DataStruct(f, m, am)
+
+
+def _vf_kwargs(m, ds: DataStruct) -> dict:
+    """The keyword inputs of ``m.model`` besides x and t, for the batch ``ds``."""
+    return dict(mask=ds.m.full, attn_mask=ds.am.full, types=m.types_embd[:, :ds.f.full.shape[1]],
+                pdgids=m.convert_pdgids(ds.f.pdgids))
 
 
 def _flow_config() -> dict:
@@ -128,29 +151,46 @@ def _mult_config() -> dict:
     }
 
 
-def _save_mult_ckpt(tmp_path: Path) -> Path:
+def _pt_mult_config(**mm) -> dict:
+    """``_mult_config`` without the inverse model, ``mm`` merged into mm_conf (e.g. ``passthrough_head=True``)."""
+    cfg = _mult_config()
+    del cfg["mm_conf"]["inv_model_args"]
+    cfg["mm_conf"].update(train_inverse=False, **mm)
+    return cfg
+
+
+def _pt_mult_model(**mm):
+    """A seeded MultModel over ptypes [22, 211, 2112] and ptypes_in [22, 211, 2112, 2212]."""
     from legofmt.multiplicity.model import MultModel
 
-    cfg = _mult_config()
+    torch.manual_seed(0)
+    return MultModel({"state_dict": {}, "config": _pt_mult_config(
+        ptypes=torch.tensor([22, 211, 2112], dtype=torch.int64),
+        ptypes_in=torch.tensor([22, 211, 2112, 2212], dtype=torch.int64), **mm)})
+
+
+def _save_mult_ckpt(tmp_path: Path, cfg: dict | None = None) -> Path:
+    from legofmt.multiplicity.model import MultModel
+
+    cfg = cfg or _mult_config()
     m = MultModel({"state_dict": {}, "config": cfg})
     path = tmp_path / "mult.pt"
     torch.save({"state_dict": m.state_dict(), "config": cfg}, path)
     return path
 
 
-
-
-def _head_config(nout: bool) -> dict:
-    cfg = _tiny_config()
-    pdgids = torch.tensor([11, 22, 2212], dtype=torch.int64).sort().values
-    mc = cfg["config"]["model_conf"]
+def _head_config(nout: bool, model_args: dict | None = None, **model_conf) -> dict:
+    """``_tiny_config`` with a base head (the Z/A/Size scalars, pdgids [11, 22, 2212]); overrides as there."""
+    pdgids = torch.tensor([11, 22, 2212], dtype=torch.int64)
+    cfg = _tiny_config({"nlayers": 1, "max_seq_l": 8, "npdgids": pdgids.numel() + 1},
+                       pdgids=pdgids, cond_scalars=("Density", "Z", "A", "Size"), base_pretrain_batches=1)
     cfg["config"]["base_conf"]["base_head_nout"] = nout
-    mc.update(pdgids=pdgids, cond_scalars=("Density", "Z", "A", "Size"), base_pretrain_batches=1)
-    mc["model_args"].update(nlayers=1, max_seq_l=8, npdgids=pdgids.numel() + 1)
+    cfg["config"]["model_conf"].update(model_conf)
+    cfg["config"]["model_conf"]["model_args"].update(model_args or {})
     return cfg
 
 
-def _head_batch(edep: torch.Tensor, n_out: torch.Tensor) -> DataStruct:
+def _head_batch(edep: torch.Tensor, n_out: torch.Tensor, pid_in: float = 2212.0) -> DataStruct:
     """Rows [Density, edep, Z, A, Size, incoming, out, out]; ``n_out`` in {1, 2}."""
     B = len(edep)
     f = torch.zeros(B, 8, 8)
@@ -161,7 +201,7 @@ def _head_batch(edep: torch.Tensor, n_out: torch.Tensor) -> DataStruct:
     f[:, 5, 0] = 1.0
     f[:, 5, 1:4] = torch.tensor([1.0, 0.0, 0.0])
     f[:, 5, 4:7] = torch.tensor([-1.0, 0.0, 0.0])
-    f[:, 5, 7] = 2212.0
+    f[:, 5, 7] = pid_in
     g = torch.Generator().manual_seed(0)
     f[:, 6:, 0] = torch.rand(B, 2, generator=g)
     f[:, 6:, 1:4] = torch.nn.functional.normalize(torch.randn(B, 2, 3, generator=g), dim=-1)
@@ -175,3 +215,32 @@ def _head_batch(edep: torch.Tensor, n_out: torch.Tensor) -> DataStruct:
     am = torch.ones(B, 8, dtype=torch.bool)
     am[:, 7] = second
     return DataStruct(f, m, am)
+
+
+def _gun_cond(pdgid: int, e_mev: float = 150.0, batch: int = 4) -> torch.Tensor:
+    """``GenerateOut``'s ``[B, 8]`` input: density 1, E-scaled momentum along +z, entry on the -z face, pdgid."""
+    cond = torch.zeros(batch, 8)
+    cond[:, 0] = 1.0
+    cond[:, 3] = e_mev
+    cond[:, 6] = -1.0
+    cond[:, 7] = pdgid
+    return cond
+
+
+def _fill_edep(value: float):
+    """A stand-in for the flow's forward that writes ``value`` into every event's E_dep row."""
+    def forward(batch, *_):
+        f, m, am = batch
+        f = f.clone()
+        _F(f).edep.fill_(value)
+        return f, m, am
+    return forward
+
+
+def _base_rc(**base_conf):
+    """The resolved-config surface ``build_base_head`` / ``_base_moment_loss`` read: pdgids [11, 22], Z/A/Size."""
+    return SimpleNamespace(pdgids_template=torch.tensor([11, 22]), cond_scalars=("Density", "Z", "A", "Size"),
+                           base_pretrain_batches=1, config={"base_conf": {"base_head": None, **base_conf}})
+
+
+GEN_BASE = SimpleNamespace(scale_dist="sm_norm", sm_scale=0.5, kappa=8.0, tanh_theta=True, e_dep_max=1.0)

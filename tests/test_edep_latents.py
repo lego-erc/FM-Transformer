@@ -4,10 +4,12 @@ The K standardised latents are an event-level Euclidean state ``z`` of shape (B,
 state: the vector field embeds it as one extra token (``Linear(K -> h_dim)``) in the same attention and reads its
 velocity out of that token (``Linear(h_dim -> K)``, zero-init). The particle sequence keeps its layout and its
 length; the AE's factorised stochastic decoder turns the generated latents into the per-layer vector, rescaled to the
-event's total E_dep. Design: docs/superpowers/specs/2026-10-20-edep-layer-latents-design.md ("Token version").
+event's total E_dep.
 """
 
 from __future__ import annotations
+
+import copy
 
 import pytest
 import torch
@@ -17,7 +19,7 @@ from legofmt.data.struct import DataStruct
 from legofmt.main.modules import LEGOLtng
 from legofmt.mod_comps.config import resolve_legoltng_config
 
-from test_helpers import _fake_batch, _tiny_config
+from test_helpers import GEOM, _fake_batch, _head_batch, _head_config, _tiny_config, _vf_kwargs
 
 N_LAYERS, K = 6, 3
 
@@ -29,13 +31,9 @@ def _ae_spec(seed: int = 0) -> dict:
 
 
 def _config(with_ae: bool = True, step_cond: bool = False, **model_conf) -> dict:
-    cfg = _tiny_config()
-    mc = cfg["config"]["model_conf"]
     if with_ae:
-        mc["edep_ae"] = _ae_spec()
-    mc.update(model_conf)
-    mc["model_args"]["step_cond"] = step_cond
-    return cfg
+        model_conf["edep_ae"] = _ae_spec()
+    return _tiny_config({"step_cond": step_cond}, **model_conf)
 
 
 def _model(with_ae: bool = True, train: bool = False, **kw) -> LEGOLtng:
@@ -56,11 +54,6 @@ def _wake(m: LEGOLtng) -> None:
     """The latent read-out is zero-init (an untrained token moves nothing); give it weights so a test can see it."""
     torch.manual_seed(1)
     torch.nn.init.normal_(m.model.vf.lat_out.weight, std=0.5)
-
-
-def _vf_args(m: LEGOLtng, ds: DataStruct) -> dict:
-    return dict(mask=ds.m.full, attn_mask=ds.am.full, types=m.types_embd[:, :ds.f.full.shape[1]],
-                pdgids=m.convert_pdgids(ds.f.pdgids))
 
 
 def test_sample_sums_to_the_total_and_is_zero_without_a_deposit() -> None:
@@ -92,7 +85,7 @@ def test_one_token_leaves_the_sequence_layout_alone() -> None:
 def test_field_returns_the_latent_velocity() -> None:
     m = _model()
     ds = _batch()
-    v, vz = m.model(ds.f.model_in, torch.tensor(0.3), z=torch.randn(len(ds), K), **_vf_args(m, ds))
+    v, vz = m.model(ds.f.model_in, torch.tensor(0.3), z=torch.randn(len(ds), K), **_vf_kwargs(m, ds))
     assert v.shape == ds.f.model_in.shape and vz.shape == (len(ds), K)
     assert vz.abs().max() == 0                          # zero-init read-out
 
@@ -102,11 +95,11 @@ def test_latent_token_and_particles_see_each_other() -> None:
     _wake(m)
     ds = _batch()
     z = torch.randn(len(ds), K)
-    v, vz = m.model(ds.f.model_in, torch.tensor(0.3), z=z, **_vf_args(m, ds))
-    v2, _ = m.model(ds.f.model_in, torch.tensor(0.3), z=z + 1.0, **_vf_args(m, ds))
+    v, vz = m.model(ds.f.model_in, torch.tensor(0.3), z=z, **_vf_kwargs(m, ds))
+    v2, _ = m.model(ds.f.model_in, torch.tensor(0.3), z=z + 1.0, **_vf_kwargs(m, ds))
     x2 = ds.f.model_in.clone()
     x2[:, 3, 0] += 0.3
-    _, vz2 = m.model(x2, torch.tensor(0.3), z=z, **_vf_args(m, ds))
+    _, vz2 = m.model(x2, torch.tensor(0.3), z=z, **_vf_kwargs(m, ds))
     gen = ds.m.full == 1
     assert not torch.allclose(v[gen], v2[gen])          # particles attend to the latent token
     assert not torch.allclose(vz, vz2)                  # and it attends to them
@@ -120,8 +113,8 @@ def test_packed_and_per_token_conditions_agree() -> None:
     ds = _batch()
     vf, z = m.model.vf, torch.randn(2, K)
     x = ds.f.model_in
-    a = vf(x, t=torch.full((2, 1), 0.3), z=z, **_vf_args(m, ds))
-    b = vf(x, t=torch.where(ds.m.full == 1, 0.3, 1.0), z=z, **_vf_args(m, ds))
+    a = vf(x, t=torch.full((2, 1), 0.3), z=z, **_vf_kwargs(m, ds))
+    b = vf(x, t=torch.where(ds.m.full == 1, 0.3, 1.0), z=z, **_vf_kwargs(m, ds))
     for p, q in zip(a, b):
         torch.testing.assert_close(p, q, rtol=1e-5, atol=1e-6)
 
@@ -212,7 +205,8 @@ def test_a_path_is_loaded_and_replaced_by_its_spec(tmp_path) -> None:
     assert rc.n_lat == K and "state_dict" in rc.config["model_conf"]["edep_ae"]
 
 
-@pytest.mark.parametrize("bad", [{"dl": {"len_buckets": [5], "len_split": 2}}, {"mc": {"mask_conf": {"p_forward": 0.5}}}])
+@pytest.mark.parametrize("bad", [{"dl": {"len_buckets": [5], "len_split": 2}},
+                                 {"mc": {"mask_conf": {"p_forward": 0.5}}}])
 def test_unsupported_combinations_are_refused(bad: dict) -> None:
     cfg = _config(**bad.get("mc", {}))
     cfg["config"]["dl_conf"].update(bad.get("dl", {}))
@@ -243,18 +237,14 @@ def test_without_the_autoencoder_nothing_changes() -> None:
     m = _model(with_ae=False)
     assert m.edep_ae is None and m.rc.n_lat == 0 and not hasattr(m.model.vf, "lat_in")
     ds = _fake_batch()
-    assert isinstance(m.model(ds.f.model_in, torch.tensor(0.3), **_vf_args(m, ds)), torch.Tensor)
+    assert isinstance(m.model(ds.f.model_in, torch.tensor(0.3), **_vf_kwargs(m, ds)), torch.Tensor)
     sols = m.solve(ds, step_size=0.5, method="euler")
     assert sols.shape == ds.f.model_in.shape and m._edep_latents is None
 
 
-GEOM = {"layers": [[1.4, 19.3, 74.0, 183.84], [0.3, 2.33, 14.0, 28.0855]], "repeat": 3, "tokens": 2, "dim": 16, "depth": 1,
-        "heads": 2}
-
-
 def _with_geometry() -> LEGOLtng:
     cfg = _config()
-    cfg["config"]["model_conf"]["model_args"]["geom_encoder"] = dict(GEOM)
+    cfg["config"]["model_conf"]["model_args"]["geom_encoder"] = copy.deepcopy(GEOM)
     torch.manual_seed(0)
     m = LEGOLtng(cfg)
     m.on_fit_start()
@@ -270,8 +260,8 @@ def test_latent_token_with_the_geometry_encoder() -> None:
     m.eval()
     ds = _batch()
     vf, z, x = m.model.vf, torch.randn(2, K), ds.f.model_in
-    a = vf(x, t=torch.full((2, 1), 0.3), z=z, **_vf_args(m, ds))
-    b = vf(x, t=torch.where(ds.m.full == 1, 0.3, 1.0), z=z, **_vf_args(m, ds))
+    a = vf(x, t=torch.full((2, 1), 0.3), z=z, **_vf_kwargs(m, ds))
+    b = vf(x, t=torch.where(ds.m.full == 1, 0.3, 1.0), z=z, **_vf_kwargs(m, ds))
     for p, q in zip(a, b):
         torch.testing.assert_close(p, q, rtol=1e-5, atol=1e-6)
     assert a[0].shape == x.shape and a[1].shape == (2, K)
@@ -286,10 +276,8 @@ def test_latent_token_with_the_geometry_encoder() -> None:
 
 def _whitened(train: bool = False) -> LEGOLtng:
     """model_conf.edep_whiten (needs the base head) together with the latent token: both live in solve / _step."""
-    from test_helpers import _head_config
-    cfg = _head_config(True)
-    cfg["config"]["model_conf"].update(edep_whiten=True, edep_ae=_ae_spec())
-    cfg["config"]["model_conf"]["model_args"]["ntypes"] = 7   # len(cond_scalars) + 3; _tiny_config's 4 fits one scalar
+    # ntypes = len(cond_scalars) + 3; _tiny_config's 4 fits one scalar
+    cfg = _head_config(True, {"ntypes": 7}, edep_whiten=True, edep_ae=_ae_spec())
     torch.manual_seed(0)
     m = LEGOLtng(cfg)
     m.on_fit_start()
@@ -298,7 +286,6 @@ def _whitened(train: bool = False) -> LEGOLtng:
 
 
 def _whitened_batch(B: int = 8) -> DataStruct:
-    from test_helpers import _head_batch
     ds = _head_batch(torch.full((B,), 0.5), torch.tensor([1, 2] * (B // 2)))
     ds.edep_layers = torch.rand(B, N_LAYERS, generator=torch.Generator().manual_seed(1)) * 0.01
     return ds

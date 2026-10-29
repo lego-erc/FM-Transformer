@@ -102,15 +102,6 @@ def test_absorbed_hadron_keeps_its_deposit(codec) -> None:
     assert edep == pytest.approx(0.2, rel=1e-4)
 
 
-def test_incoming_at_the_cutoff_is_left_alone(codec) -> None:
-    """At E_in = cutoff the outgoing encoding is degenerate (log ratio 0/0): no NaN, no change."""
-    pen, dp = codec
-    f = _event(pen, dp, 1000.0, 4.0, [(11, 700.0), (22, 300.0)])
-    before = f.clone()
-    _run(pen, dp, f, CUT, 11)
-    assert torch.equal(before.nan_to_num(), f.nan_to_num())
-
-
 def test_hadron_survivor_loses_exactly_its_deposit(codec) -> None:
     """A proton the flow left at E_in (zero loss, clamped) leaves with E_in - E_dep - others."""
     pen, dp = codec
@@ -132,15 +123,6 @@ def test_em_only_survivor_closes_at_any_share(codec) -> None:
     assert float(e[1]) == pytest.approx(2.0, rel=1e-4)
 
 
-def test_nuclear_survivor_below_the_share_is_left_alone(codec) -> None:
-    """A neutron out marks a nuclear interaction, whose balance is open (Geant4 residual median 100 MeV)."""
-    pen, dp = codec
-    f = _event(pen, dp, 1000.0, 180.0, [(2212, 700.0), (2112, 50.0)])
-    before = f.clone()
-    _run(pen, dp, f, 1000.0, 2212)
-    assert torch.equal(before.nan_to_num(), f.nan_to_num())
-
-
 def test_survivor_with_too_large_a_deposit_leaves_at_the_cutoff(codec) -> None:
     """E_dep + others > E_in leaves the leader a negative budget: it leaves at the cutoff (to_scalar_e's clamp)."""
     pen, dp = codec
@@ -150,12 +132,17 @@ def test_survivor_with_too_large_a_deposit_leaves_at_the_cutoff(codec) -> None:
     assert e.isfinite().all() and float(e[0]) == pytest.approx(CUT, rel=1e-3)
 
 
-def test_nuclear_interaction_is_left_alone(codec) -> None:
-    """No outgoing proton keeps > 90% of E_in: Geant4's balance is not closed there (fragments, binding)."""
+@pytest.mark.parametrize("edep, out, e_in, pid", [
+    (4.0, [(11, 700.0), (22, 300.0)], CUT, 11),         # E_in = cutoff: the outgoing encoding is degenerate (0/0)
+    (180.0, [(2212, 700.0), (2112, 50.0)], 1000.0, 2212),  # a neutron out marks a nuclear interaction (G4 median 100)
+    (50.0, [(2112, 400.0), (211, 300.0)], 1000.0, 2212),   # no proton keeps > 90% of E_in: fragments, binding
+], ids=["incoming_at_the_cutoff", "nuclear_survivor_below_the_share", "nuclear_interaction"])
+def test_open_or_degenerate_balance_is_left_alone(codec, edep, out, e_in, pid) -> None:
+    """Where Geant4's balance is not closed, or the encoding cannot express a change: no NaN, no change."""
     pen, dp = codec
-    f = _event(pen, dp, 1000.0, 50.0, [(2112, 400.0), (211, 300.0)])
+    f = _event(pen, dp, 1000.0, edep, out)
     before = f.clone()
-    _run(pen, dp, f, 1000.0, 2212)
+    _run(pen, dp, f, e_in, pid)
     assert torch.equal(before.nan_to_num(), f.nan_to_num())
 
 

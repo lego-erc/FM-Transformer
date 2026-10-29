@@ -1,19 +1,11 @@
-"""Midpoint gives its half-step stage the flow map, and keeps v2 instantaneous.
+"""Midpoint gives its half-step stage the flow map and keeps v2 instantaneous.
 
-``_euler_steps`` passes ``d = dt`` unconditionally; ``_midpoint_steps`` now does
-the same for ``v1``, whose only role is to advance ``dt/2``. ``v2`` deliberately
-keeps ``d = 0``: it is evaluated at the midpoint but applied as a full step from
-``x``, which is where the scheme's second-order accuracy comes from. Handing it
-``d = dt`` asks for the average velocity over ``[t+dt/2, t+3dt/2]`` -- a window
-shifted by half a step -- and measured ~3x worse MMD at 4 and 8 NFE.
-
-Measured on ``flow/kin_1step_040926`` (rho=3, N=16383, 5 seeds, paired):
-4 NFE MMD 0.01850 -> 0.00822, a 22-sigma separation. At 8 NFE the gain is not
-significant (-1.1 sigma), consistent with ``emb_d`` vanishing as ``d -> 0``.
-
-No flag, matching ``_euler_steps``: a checkpoint that never trained the flow
-map has ``step_gain`` at its zero init, so ``d`` cannot change its output. That
-is asserted here, because it is the property that makes the change safe.
+Like the Euler steps (``d = dt``), the midpoint step passes ``v1``, which only advances ``dt/2``, ``d = dt/2``
+(``flow/kin_1step_040926``, rho=3, N=16383, 5 paired seeds: 4 NFE MMD 0.01850 -> 0.00822, 22 sigma; at 8 NFE
+-1.1 sigma, as ``emb_d`` vanishes for ``d -> 0``). ``v2`` keeps ``d = 0``: it is evaluated at the midpoint but applied
+as a full step from ``x``, the source of the scheme's second order; ``d = dt`` would ask for the average velocity
+over a window shifted by half a step (~3x worse MMD at 4 and 8 NFE). No flag is needed: a checkpoint that never
+trained the flow map has ``step_gain`` at its zero init, so ``d`` cannot change its output -- asserted below.
 """
 
 from __future__ import annotations
@@ -24,28 +16,23 @@ from legofmt.main.modules import LEGOLtng
 from test_helpers import _fake_batch, _tiny_config
 
 
-def _model(step_cond: bool = True) -> LEGOLtng:
-    cfg = _tiny_config()
-    cfg["config"]["model_conf"]["model_args"]["step_cond"] = step_cond
-    cfg["config"]["model_conf"]["base_pretrain_batches"] = 0
-    return LEGOLtng(cfg)
+def _model() -> LEGOLtng:
+    return LEGOLtng(_tiny_config({"step_cond": True}))
 
 
-def _record_d(m: LEGOLtng) -> list:
+def _stage_d(method: str) -> list:
+    """The ``d`` each field evaluation of a step-0.5 solve receives."""
+    m = _model()
     seen: list = []
-    m.model.register_forward_pre_hook(
-        lambda _mod, _a, kw: seen.append(kw.get("d", None)), with_kwargs=True,
-    )
+    m.model.register_forward_pre_hook(lambda _mod, _a, kw: seen.append(kw.get("d", None)), with_kwargs=True)
+    m.eval()
+    m.rc.odeint_conf.update({"method": method, "step_size": 0.5})
+    m(_fake_batch())
     return seen
 
 
 def test_v1_gets_half_the_step_and_v2_stays_instantaneous() -> None:
-    m = _model()
-    seen = _record_d(m)
-    m.eval()
-    m.rc.odeint_conf.update({"method": "midpoint", "step_size": 0.5})
-    m(_fake_batch())
-
+    seen = _stage_d("midpoint")
     assert len(seen) >= 2, seen
     v1_d, v2_d = seen[0], seen[1]
     assert isinstance(v1_d, torch.Tensor), f"v1 got d={v1_d!r}, want a tensor"
@@ -54,12 +41,7 @@ def test_v1_gets_half_the_step_and_v2_stays_instantaneous() -> None:
 
 
 def test_euler_still_passes_the_whole_step() -> None:
-    m = _model()
-    seen = _record_d(m)
-    m.eval()
-    m.rc.odeint_conf.update({"method": "euler", "step_size": 0.5})
-    m(_fake_batch())
-
+    seen = _stage_d("euler")
     assert seen and isinstance(seen[0], torch.Tensor), seen
     assert torch.allclose(seen[0].float(), torch.tensor(0.5)), seen[0]
 

@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import math
 
+import pytest
 import torch
 
-from test_helpers import MANIFOLD
+from test_helpers import MANIFOLD, _prep_config
 from legofmt.data.dataloaders import GetLEGOData
 from legofmt.data.prep import DataPrep
 from legofmt.data.struct import _F
@@ -36,13 +37,9 @@ def _raw_row(t: float, m: float, direction, pos, pdgid: float):
 
 
 def _prep(energy_kin: bool | None) -> DataPrep:
-    cfg = {
-        "cutoff_mev": CUTOFF, "max_energy": MAX_E, "proj_ray": False,
-        "cond_scalars": ["Density"],
-        "manifold": MANIFOLD,
-    }
-    if energy_kin is not None:
-        cfg["energy_kin"] = energy_kin
+    cfg = _prep_config(max_energy=MAX_E, energy_kin=energy_kin)
+    if energy_kin is None:
+        del cfg["energy_kin"]
     return DataPrep(cfg)
 
 
@@ -66,8 +63,10 @@ def _prepped(energy_kin: bool | None):
     return stored[0], prep.norm_e(stored)[0]
 
 
-def test_energy_kin_scalar_from_kinetic_column() -> None:
-    stored, loaded = _prepped(energy_kin=True)
+@pytest.mark.parametrize("energy_kin", [True, None], ids=["explicit", "default"])
+def test_energy_kin_scalar_from_kinetic_column(energy_kin) -> None:
+    """Kinetic is the default."""
+    stored, loaded = _prepped(energy_kin)
     assert abs(float(_F(stored).in_p[..., 0, 0]) - 100.0) < 1e-4      # MeV in the file
     got = float(_F(loaded).in_p[..., 0, 0])
     assert abs(got - _scal(100.0)) < 1e-5, (got, _scal(100.0))
@@ -77,13 +76,6 @@ def test_energy_kin_scalar_from_kinetic_column() -> None:
     for tag, f in (("stored", stored), ("loaded", loaded)):
         got_o = float(_F(f).out_p[..., 0, 0])
         assert abs(got_o - want) < 1e-5, (tag, got_o, want)
-
-
-def test_default_is_kinetic() -> None:
-    stored, loaded = _prepped(energy_kin=None)
-    assert abs(float(_F(stored).in_p[..., 0, 0]) - 100.0) < 1e-4
-    got = float(_F(loaded).in_p[..., 0, 0])
-    assert abs(got - _scal(100.0)) < 1e-5, got
 
 
 def test_explicit_false_is_momentum_based() -> None:

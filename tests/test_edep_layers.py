@@ -11,17 +11,12 @@ import pytest
 import torch
 from torch.utils.data._utils.collate import default_collate
 
-from test_helpers import MANIFOLD
+from test_helpers import _prep_config as _cfg
 from legofmt.data.dataloaders import LEGODataset
 from legofmt.data.prep import DataPrep
 from legofmt.data.struct import DataStruct
 
 CUTOFF = 10.0
-
-
-def _cfg(**kw):
-    return {"cutoff_mev": CUTOFF, "manifold": MANIFOLD, "proj_ray": False,
-            "cond_scalars": ["Density"], "energy_kin": True, **kw}
 
 
 def _raw(n=4, k=3):

@@ -1,4 +1,4 @@
-"""MultModel fixes from the 2026-10-17 review."""
+"""MultModel: schedule-free train mode across validation, and warnings for missing checkpoint keys."""
 
 from __future__ import annotations
 

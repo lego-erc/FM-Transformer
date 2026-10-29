@@ -10,29 +10,33 @@ tensor keeps the old elementwise scale. Off by default: every other model is unc
 
 from __future__ import annotations
 
-import copy
+import json
 
 import pytest
 import torch
 
 from legofmt.data.prep import DataPrep
 from legofmt.data.struct import _F
+from legofmt.main.generate import GenerateOut
+from legofmt.main.modules import LEGOLtng
+from legofmt.mod_comps.config import resolve_legoltng_config
 
-from test_helpers import _fake_batch, _tiny_config
+from test_helpers import MANIFOLD, _fake_batch, _fill_edep, _gun_cond, _save_flow_ckpt, _save_mult_ckpt, _tiny_config
 
 
-def _prep(wall: bool = True, species=None) -> DataPrep:
-    cfg = copy.deepcopy(_tiny_config()["config"])
-    cfg["model_conf"].update(edep_log_min=1e-6, edep_wall=wall, max_energy=2000.0)
-    if species is not None:
-        cfg["model_conf"]["edep_wall_species"] = species
-    return DataPrep(cfg)
+def _prep(wall: bool = True, **model_conf) -> DataPrep:
+    return DataPrep(_tiny_config(edep_log_min=1e-6, edep_wall=wall, max_energy=2000.0, **model_conf)["config"])
+
+
+@pytest.fixture
+def gen(tmp_path) -> GenerateOut:
+    return GenerateOut(str(_save_flow_ckpt(tmp_path, LEGOLtng)), str(_save_mult_ckpt(tmp_path)), device="cpu")
 
 
 def test_wall_species_keeps_the_log_row_for_the_others() -> None:
     """edep_wall_species [11, -11, 22]: e-/e+/gamma rows take the wall, every other species the log row -- the wall
     resolves a contained EM shower near E_in but its prior misplaces a hadron's deposit."""
-    some, every, none = _prep(species=[11, -11, 22]), _prep(), _prep(wall=False)
+    some, every, none = _prep(edep_wall_species=[11, -11, 22]), _prep(), _prep(wall=False)
     e_in, E = torch.full((4,), 1000.0), torch.tensor([980.0, 980.0, 225.0, 225.0])
     pid = torch.tensor([11.0, 22.0, 2212.0, 2112.0])
     u = some.norm_edep_row(E, e_in, pid)
@@ -115,24 +119,12 @@ def test_norm_e_encodes_the_row_from_the_raw_incoming_energy(wall: bool) -> None
 
 
 @torch.no_grad()
-def test_generate_out_keeps_the_wall_row_and_skips_the_mev_clamp(tmp_path, monkeypatch) -> None:
+def test_generate_out_keeps_the_wall_row_and_skips_the_mev_clamp(gen, monkeypatch) -> None:
     """With the wall the row is bounded by the cap by construction: GenerateOut must not apply the old MeV clamp
     (which works on the old scale and would rewrite u), and the row decodes to <= E_cap."""
-    from legofmt.main.generate import GenerateOut
-    from legofmt.main.modules import LEGOLtng
-    from test_edep_ceiling import _cond
-    from test_helpers import _save_flow_ckpt, _save_mult_ckpt
-
-    gen = GenerateOut(str(_save_flow_ckpt(tmp_path, LEGOLtng)), str(_save_mult_ckpt(tmp_path)), device="cpu")
     gen.dp.edep_wall = True
-
-    def at_the_edge(batch, *_):
-        f, m, am = batch
-        f = f.clone()
-        _F(f).edep.fill_(1.0)
-        return f, m, am
-    monkeypatch.setattr(gen.model, "forward", at_the_edge)
-    sols, _, _ = gen(_cond(22, 150.0, batch=64))
+    monkeypatch.setattr(gen.model, "forward", _fill_edep(1.0))
+    sols, _, _ = gen(_gun_cond(22, batch=64))
     row = _F(sols).edep
     flowed = row > 0
     assert flowed.any() and (row[flowed] == 1.0).all()
@@ -141,24 +133,13 @@ def test_generate_out_keeps_the_wall_row_and_skips_the_mev_clamp(tmp_path, monke
 
 
 @torch.no_grad()
-def test_g4_api_hands_out_the_log_scale_row(tmp_path, monkeypatch) -> None:
+def test_g4_api_hands_out_the_log_scale_row(gen, monkeypatch) -> None:
     """Callers of gen_model_w_g4_args (lego-eval) decode its E_dep with the checkpoint's edep_log_min, i.e. as the
     log row: a wall model re-encodes its row on that scale there, or every MeV they report is wrong."""
-    from legofmt.main.generate import GenerateOut
-    from legofmt.main.modules import LEGOLtng
-    from test_helpers import _save_flow_ckpt, _save_mult_ckpt
-
-    gen = GenerateOut(str(_save_flow_ckpt(tmp_path, LEGOLtng)), str(_save_mult_ckpt(tmp_path)), device="cpu")
     gen.dp.edep_wall = True
     e_in, pid, E = 150.0, 22, 140.0
     u = float(gen.dp.norm_edep_row(torch.tensor([E]), torch.tensor([e_in]), torch.tensor([float(pid)])))
-
-    def deposits(batch, *_):
-        f, m, am = batch
-        f = f.clone()
-        _F(f).edep.fill_(u)
-        return f, m, am
-    monkeypatch.setattr(gen.model, "forward", deposits)
+    monkeypatch.setattr(gen.model, "forward", _fill_edep(u))
     out = gen.gen_model_w_g4_args(16, torch.tensor([[0.0, 0.0, -1.0]]), torch.tensor([[0.0, 0.0, 1.0]]),
                                   torch.tensor([e_in]), torch.tensor([1.0]), torch.tensor([1.0]), torch.tensor([pid]))
     row = out["per_event"]["E_dep"]
@@ -170,24 +151,12 @@ def test_g4_api_hands_out_the_log_scale_row(tmp_path, monkeypatch) -> None:
 
 @torch.no_grad()
 @pytest.mark.parametrize("pid, clamped", [(22, False), (2212, True)])
-def test_the_mev_clamp_applies_to_the_log_row_species_only(tmp_path, monkeypatch, pid, clamped) -> None:
+def test_the_mev_clamp_applies_to_the_log_row_species_only(gen, monkeypatch, pid, clamped) -> None:
     """With edep_wall_species [11, -11, 22] a photon's wall row is capped by construction and left alone, while a
     proton's log row is still clamped at E_in (+ its _EDEP_EXCESS_MEV, 0 for protons)."""
-    from legofmt.main.generate import GenerateOut
-    from legofmt.main.modules import LEGOLtng
-    from test_edep_ceiling import _cond
-    from test_helpers import _save_flow_ckpt, _save_mult_ckpt
-
-    gen = GenerateOut(str(_save_flow_ckpt(tmp_path, LEGOLtng)), str(_save_mult_ckpt(tmp_path)), device="cpu")
     gen.dp.edep_wall, gen.dp.edep_wall_species = True, [11, -11, 22]
-
-    def at_the_edge(batch, *_):
-        f, m, am = batch
-        f = f.clone()
-        _F(f).edep.fill_(1.0)
-        return f, m, am
-    monkeypatch.setattr(gen.model, "forward", at_the_edge)
-    sols, _, _ = gen(_cond(pid, 150.0, batch=64))
+    monkeypatch.setattr(gen.model, "forward", _fill_edep(1.0))
+    sols, _, _ = gen(_gun_cond(pid, batch=64))
     row = _F(sols).edep
     flowed = row > 0
     assert flowed.any()
@@ -201,14 +170,6 @@ def test_the_mev_clamp_applies_to_the_log_row_species_only(tmp_path, monkeypatch
 # Per incoming species, the largest E_dep - E_in [MeV] in the training data (meta.json edep_excess_max_mev, written by
 # gen_data.py; for an older dataset computed from data_prepped.pt at fresh training). It replaces the hand-set
 # EDEP_WALL_MARGIN_MEV / _EDEP_EXCESS_MEV; checkpoints without it keep the constants.
-
-def _prep_excess(excess: dict, species=None) -> DataPrep:
-    cfg = copy.deepcopy(_tiny_config()["config"])
-    cfg["model_conf"].update(edep_log_min=1e-6, edep_wall=True, max_energy=2000.0, edep_excess_mev=excess)
-    if species is not None:
-        cfg["model_conf"]["edep_wall_species"] = species
-    return DataPrep(cfg)
-
 
 def _raw_file(e_in, pid, edep) -> torch.Tensor:
     """A stored (pre-norm_e) tensor: incoming kinetic energy and E_dep in MeV."""
@@ -228,7 +189,7 @@ def test_edep_excess_max_is_the_largest_deposit_above_e_in_per_species() -> None
 def test_the_cap_is_e_in_plus_the_data_excess() -> None:
     """A neutron deposit 2 MeV above E_in is the edge when the data's largest excess is 2 MeV; the hand-set 10 MeV
     margin left it inside the channel."""
-    dp, const = _prep_excess({2112: 2.0, 211: 150.0}), _prep()
+    dp, const = _prep(edep_excess_mev={2112: 2.0, 211: 150.0}), _prep()
     e_in, pid = torch.tensor([500.0, 500.0]), torch.tensor([2112.0, 211.0])
     E = torch.tensor([502.0, 640.0])
     u = dp.norm_edep_row(E, e_in, pid)
@@ -238,14 +199,10 @@ def test_the_cap_is_e_in_plus_the_data_excess() -> None:
 
 def test_a_walled_species_missing_from_the_data_is_an_error() -> None:
     with pytest.raises(ValueError, match="edep_excess_mev"):
-        _prep_excess({11: 0.0}, species=[11, 22])
+        _prep(edep_excess_mev={11: 0.0}, edep_wall_species=[11, 22])
 
 
 def test_fresh_training_takes_the_excess_from_meta_or_the_data(tmp_path) -> None:
-    import json
-    from legofmt.mod_comps.config import resolve_legoltng_config
-    from test_helpers import MANIFOLD
-
     meta = {"ntokens": 8, "particles": [11.0, 22.0, 2212.0], "max_energy": 1000.0, "cutoff_mev": 10.0,
             "cond_scalars": ["Density"], "energy_kin": True}
     cfg = {"dl_conf": {"lds_args": {"data": str(tmp_path), "cutoff_mev": 10.0}, "bs": 2},
@@ -264,23 +221,11 @@ def test_fresh_training_takes_the_excess_from_meta_or_the_data(tmp_path) -> None
 
 
 @torch.no_grad()
-def test_the_mev_clamp_uses_the_data_excess(tmp_path, monkeypatch) -> None:
+def test_the_mev_clamp_uses_the_data_excess(gen, monkeypatch) -> None:
     """A log-row proton is clamped at E_in + its data excess (30 MeV here), not at the hand-set E_in + 0."""
-    from legofmt.main.generate import GenerateOut
-    from legofmt.main.modules import LEGOLtng
-    from test_edep_ceiling import _cond
-    from test_helpers import _save_flow_ckpt, _save_mult_ckpt
-
-    gen = GenerateOut(str(_save_flow_ckpt(tmp_path, LEGOLtng)), str(_save_mult_ckpt(tmp_path)), device="cpu")
     gen.dp.edep_excess_mev = {2212: 30.0}
-
-    def at_the_edge(batch, *_):
-        f, m, am = batch
-        f = f.clone()
-        _F(f).edep.fill_(1.0)
-        return f, m, am
-    monkeypatch.setattr(gen.model, "forward", at_the_edge)
-    sols, _, _ = gen(_cond(2212, 150.0, batch=64))
+    monkeypatch.setattr(gen.model, "forward", _fill_edep(1.0))
+    sols, _, _ = gen(_gun_cond(2212, batch=64))
     row = _F(sols).edep
     flowed = row > 0
     assert flowed.any()

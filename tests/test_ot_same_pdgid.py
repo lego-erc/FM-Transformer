@@ -17,40 +17,16 @@ import itertools
 import torch
 
 from legofmt.base_dist import base_nn
-from legofmt.data.struct import DataStruct, _F
+from legofmt.data.struct import DataStruct
 from legofmt.main.modules import LEGOLtng
-from test_helpers import _tiny_config
+from test_helpers import _fake_batch, _tiny_config
 
 
-def _config(**model_conf) -> dict:
-    cfg = _tiny_config()
-    cfg["config"]["model_conf"].update(
-        {"ot_coupling": True, "model_args": {**cfg["config"]["model_conf"]["model_args"], "max_seq_l": 7}},
-        **model_conf,
-    )
-    return cfg
-
-
-def _batch(B: int = 3, L: int = 7) -> DataStruct:
-    """2 conditioning slots, 1 incoming, 4 outgoing: pdgids [22, 22, 211, 211]."""
-    f = torch.zeros(B, L, 8)
-    f[:, 0, 0] = 1.0
-    f[:, 1, 0] = 0.1
-    _F(f).non_p[..., 1:-1] = 1.0
-    f[:, 2, 0] = 0.8
-    f[:, 2, 1:4] = torch.tensor([0.0, 0.0, 1.0])
-    f[:, 2, 4:7] = torch.tensor([0.0, 0.0, -1.0])
-    f[:, 2, 7] = 22.0
-    g = torch.Generator().manual_seed(0)
-    f[:, 3:, 0] = torch.rand(B, L - 3, generator=g)
-    f[:, 3:, 1:4] = torch.nn.functional.normalize(torch.randn(B, L - 3, 3, generator=g), dim=-1)
-    f[:, 3:, 4:7] = torch.nn.functional.normalize(torch.randn(B, L - 3, 3, generator=g), dim=-1)
-    f[:, 3:, 7] = torch.tensor([22.0, 22.0, 211.0, 211.0])
-    m = torch.zeros(B, L, dtype=torch.long)
-    m[:, 1] = 1
-    m[:, 3:] = 1
-    am = torch.ones(B, L, dtype=torch.bool)
-    return DataStruct(f, m, am)
+def _batch() -> DataStruct:
+    """``_fake_batch`` with 4 outgoing slots, pdgids [22, 22, 211, 211], and the E_dep row generated."""
+    ds = _fake_batch(B=3, L=7, edep_generated=True)
+    ds.f.full[:, 3:, 7] = torch.tensor([22.0, 22.0, 211.0, 211.0])
+    return ds
 
 
 class _BruteLap:
@@ -70,34 +46,26 @@ class _BruteLap:
         return out
 
 
-def _run(model_conf: dict) -> tuple[_BruteLap, torch.Tensor]:
+def _run(monkeypatch) -> tuple[_BruteLap, torch.Tensor]:
     lap = _BruteLap()
-    orig = base_nn.batch_linear_assignment
-    base_nn.batch_linear_assignment = lap
-    try:
-        model = LEGOLtng(_config(**model_conf))
-        model.on_fit_start()
-        model.train()
-        torch.manual_seed(0)
-        model.gen_base_wrapper(_batch())
-    finally:
-        base_nn.batch_linear_assignment = orig
-    pid = _batch().f.out_p[..., -1]
-    return lap, pid
+    monkeypatch.setattr(base_nn, "batch_linear_assignment", lap)
+    model = LEGOLtng(_tiny_config({"max_seq_l": 7}, ot_coupling=True))
+    model.on_fit_start()
+    model.train()
+    torch.manual_seed(0)
+    model.gen_base_wrapper(_batch())
+    return lap, _batch().f.out_p[..., -1]
 
 
-def test_cost_blocks_cross_species_pairs() -> None:
-    lap, pid = _run({})
+def test_cost_blocks_cross_species_pairs(monkeypatch) -> None:
+    lap, pid = _run(monkeypatch)
     cross = pid.unsqueeze(-1) != pid.unsqueeze(-2)
     assert lap.cost is not None, "OT branch never ran"
     assert (lap.cost[cross] >= 1e5).all(), "cross-species pair not blocked"
     assert (lap.cost[~cross] < 1e5).all(), "within-species pair wrongly blocked"
 
 
-def test_assignment_stays_within_species() -> None:
-    lap, pid = _run({})
-    B, n, _ = lap.cost.shape
-    assign = _BruteLap.__call__(lap, lap.cost)
-    picked = torch.take_along_dim(pid, assign, dim=1)
+def test_assignment_stays_within_species(monkeypatch) -> None:
+    lap, pid = _run(monkeypatch)
+    picked = torch.take_along_dim(pid, lap(lap.cost), dim=1)
     assert torch.equal(picked, pid), f"assignment crossed species:\n{pid}\n{picked}"
-

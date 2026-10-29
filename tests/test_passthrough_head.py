@@ -7,28 +7,10 @@ to the neutral incoming species.
 
 from __future__ import annotations
 
-import pytest
 import torch
 
-from test_helpers import _mult_config
+from test_helpers import _pt_mult_model as _model
 from legofmt.multiplicity.model import MultModel
-
-
-def _config(**mm) -> dict:
-    conf = _mult_config()
-    conf["mm_conf"].update(
-        ptypes=torch.tensor([22, 211, 2112], dtype=torch.int64),
-        ptypes_in=torch.tensor([22, 211, 2112, 2212], dtype=torch.int64),
-        train_inverse=False,
-    )
-    del conf["mm_conf"]["inv_model_args"]
-    conf["mm_conf"].update(mm)
-    return conf
-
-
-def _model(**mm) -> MultModel:
-    torch.manual_seed(0)
-    return MultModel({"state_dict": {}, "config": _config(**mm)})
 
 
 def _inputs(model: MultModel, pdgid_in_idx: int, n: int = 64):
@@ -147,12 +129,11 @@ def _count_batch(m, n=64, seed=3):
             torch.zeros(n, dtype=torch.long))
 
 
-def _logits(m, in_tok, counts, idx):
+def _trunk(m, in_tok, counts, idx):
+    """Training's teacher-forced decoder pass, written out: (in_embd, decoder output)."""
     in_embd = m.proj_in(in_tok) + m.embd_pp_(idx)
-    seq = torch.cat((in_embd.unsqueeze(1),
-                     m.embd_in_(counts[:, : m.rc.max_seq_len - 1] + m._in_offsets)), dim=1)
-    out = m.model(seq, mask=None, condition=in_embd)
-    return torch.einsum("bsh,shp->bsp", out, m.proj_out_w) + m.proj_out_b
+    seq = torch.cat((in_embd.unsqueeze(1), m.embd_in_(counts[:, : m.rc.max_seq_len - 1] + m._in_offsets)), dim=1)
+    return in_embd, m.model(seq, mask=None, condition=in_embd)
 
 
 def test_count_loss_ignores_passthrough_rows() -> None:
@@ -187,8 +168,8 @@ def test_an_unmasked_batch_is_the_plain_cross_entropy() -> None:
     m = _model()
     m.trainer = None
     in_tok, counts, idx = _count_batch(m)
-    expect = torch.nn.functional.cross_entropy(
-        _logits(m, in_tok, counts, idx).reshape(-1, m.rc.max_particles), counts.reshape(-1))
+    logits = torch.einsum("bsh,shp->bsp", _trunk(m, in_tok, counts, idx)[1], m.proj_out_w) + m.proj_out_b
+    expect = torch.nn.functional.cross_entropy(logits.reshape(-1, m.rc.max_particles), counts.reshape(-1))
     assert torch.allclose(m.training_step((in_tok, counts, idx), 0), expect, atol=1e-6)
 
 
@@ -222,10 +203,8 @@ def test_trunk_head_sampling_matches_training_slot0() -> None:
     m = _model(passthrough_head=True, passthrough_on="trunk").eval()
     in_tok, counts, idx = _count_batch(m, n=16)
     with torch.no_grad():
-        in_embd = m.proj_in(in_tok) + m.embd_pp_(idx)
-        seq = torch.cat((in_embd.unsqueeze(1),
-                         m.embd_in_(counts[:, : m.rc.max_seq_len - 1] + m._in_offsets)), dim=1)
-        train_slot0 = m.model(seq, mask=None, condition=in_embd)[:, 0]
+        in_embd, out = _trunk(m, in_tok, counts, idx)
+        train_slot0 = out[:, 0]
         sample_slot0 = m.model(in_embd.unsqueeze(1), mask=None, condition=in_embd)[:, 0]
     assert torch.allclose(train_slot0, sample_slot0, atol=1e-5)
 
