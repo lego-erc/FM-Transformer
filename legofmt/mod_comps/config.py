@@ -34,12 +34,8 @@ _MANIFOLDS: dict[str, type] = {
 def build_manifold(spec: str | list) -> ProductManifold:
     if isinstance(spec, str):
         return build_manifold_from_string(spec)
-
     if isinstance(spec, list):
-        manifolds = [_MANIFOLDS[p["name"].lower()]() for p in spec]
-        dims = tuple(p["dim"] for p in spec)
-        return ProductManifold(manifolds, dims)
-
+        return ProductManifold([_MANIFOLDS[p["name"].lower()]() for p in spec], tuple(p["dim"] for p in spec))
     raise ValueError(f"Cannot build manifold from spec: {spec!r}")
 
 
@@ -129,55 +125,43 @@ def _amp_dtype(precision) -> "torch.dtype | None":
     return None
 
 
-def resolve_legoltng_config(full_config: dict) -> ResolvedLEGOConfig:
+def _unpack(full_config: dict) -> tuple[dict, dict | None]:
+    """A deep copy of a checkpoint dict or a bare config, as (config, state_dict or None)."""
     full = copy.deepcopy(full_config)
-    state_dict = full.get("state_dict")
-    config = full.get("config", full)
+    return full.get("config", full), full.get("state_dict")
 
-    if state_dict is None:
-        return _resolve_fresh(config)
-    return _resolve_from_checkpoint(config, state_dict)
+
+def resolve_legoltng_config(full_config: dict) -> ResolvedLEGOConfig:
+    config, state_dict = _unpack(full_config)
+    return _resolve_fresh(config) if state_dict is None else _resolve_from_checkpoint(config, state_dict)
 
 
 def _resolve_fresh(config: dict) -> ResolvedLEGOConfig:
     model_conf = config["model_conf"]
     model_args = model_conf["model_args"]
     dpath = config["dl_conf"]["lds_args"]["data"]
-
     if dpath.endswith(".pt"):
-        raise ValueError(
-            "Fresh-training path expects a directory containing meta.json; "
-            f"got a .pt file: {dpath}"
-        )
+        raise ValueError(f"Fresh-training path expects a directory containing meta.json; got a .pt file: {dpath}")
 
     config["dl_conf"].setdefault("data_path", f"{dpath}/data_prepped.pt")
 
     meta = json.loads(Path(dpath, "meta.json").read_text())
     config.setdefault("additional", {})["data_meta"] = meta
     config["additional"]["x_transformers_version"] = str(XT_VERSION)
-    max_seq_l = meta["ntokens"]
-    pdgids = (
-        torch.tensor(meta["particles"], dtype=torch.int64).sort().values.contiguous()
-    )
+    pdgids = torch.tensor(meta["particles"], dtype=torch.int64).sort().values.contiguous()
 
     max_energy = model_conf.get("max_energy", meta.get("max_energy"))
     if max_energy is None:
-        raise KeyError(
-            f"max_energy missing from {dpath}/meta.json and model_conf; "
-            "regenerate meta.json or set model_conf['max_energy']."
-        )
+        raise KeyError(f"max_energy missing from {dpath}/meta.json and model_conf; "
+                       "regenerate meta.json or set model_conf['max_energy'].")
     model_conf["max_energy"] = max_energy
-    cutoff_mev = meta.get(
-        "cutoff_mev", config["dl_conf"]["lds_args"].get("cutoff_mev")
-    )
+    cutoff_mev = meta.get("cutoff_mev", config["dl_conf"]["lds_args"].get("cutoff_mev"))
     if cutoff_mev is None:
-        raise KeyError(
-            f"cutoff_mev missing from {dpath}/meta.json and dl_conf.lds_args."
-        )
+        raise KeyError(f"cutoff_mev missing from {dpath}/meta.json and dl_conf.lds_args.")
     config["dl_conf"]["lds_args"]["cutoff_mev"] = cutoff_mev
 
     model_args["npdgids"] = pdgids.shape[0] + 1
-    model_args.setdefault("max_seq_l", max_seq_l)
+    model_args.setdefault("max_seq_l", meta["ntokens"])
     model_conf.setdefault("cond_scalars", tuple(meta.get("cond_scalars", ("Density",))))
     if "energy_kin" in meta:
         model_conf.setdefault("energy_kin", bool(meta["energy_kin"]))
@@ -195,27 +179,18 @@ def _resolve_fresh(config: dict) -> ResolvedLEGOConfig:
     # ``pdgids`` lives at model_conf scope (one level above model_args) so
     # it is preserved by the manual torch.save round-trip in scripts/train.py.
     model_conf["pdgids"] = pdgids
-
-    return _build_resolved(
-        config, model_conf, model_args, max_seq_l, pdgids, state_dict=None,
-    )
+    return _build_resolved(config, meta["ntokens"], pdgids, state_dict=None)
 
 
 def _resolve_from_checkpoint(config: dict, state_dict: dict) -> ResolvedLEGOConfig:
     model_conf = config["model_conf"]
     model_args = model_conf["model_args"]
-
     rename_ntokens(model_args)
     apply_legacy_projection_in_out(model_args, state_dict)
     additional = config.setdefault("additional", {})
     qk_norm_scale_compat(model_args, additional)
     additional["x_transformers_version"] = str(XT_VERSION)
-
-    return _build_resolved(
-        config, model_conf, model_args,
-        model_args["max_seq_l"], model_conf["pdgids"],
-        state_dict=state_dict,
-    )
+    return _build_resolved(config, model_args["max_seq_l"], model_conf["pdgids"], state_dict=state_dict)
 
 
 # --- back-compat: the 2026-09 loss-weighting rename and the removal of the t-bins ---
@@ -252,15 +227,22 @@ def resolve_len_buckets(spec, max_seq_l: int) -> tuple[int, ...] | None:
     return tuple(sorted({int(b) for b in spec if int(b) < max_seq_l} | {max_seq_l}))
 
 
-def _build_resolved(
-    config: dict,
-    model_conf: dict,
-    model_args: dict,
-    max_seq_l: int,
-    pdgids: torch.Tensor,
-    state_dict: dict | None,
-) -> ResolvedLEGOConfig:
+# model_conf keys that ResolvedLEGOConfig carries as they are, with their defaults
+_LEGO_DEFAULTS = {
+    "t_dist": "sd3", "t_dist_scale": 1.4, "t_dist_shift": 1.0, "ot_coupling": False, "base_pretrain_batches": 300,
+    "base_pretrain_bs": None, "pdgid_is_idx": False, "one_step_euler_fac": 0.0, "one_step_euler_sections": 8,
+    "one_step_euler_every": 1, "learned_loss_weights": False, "edep_cell": False, "edep_whiten": False,
+    "edep_whiten_max_sig": None, "edep_whiten_feed": False, "dir_zoom": None, "dir_zoom_mix": 0.0,
+    "dir_zoom_nucleons_max": None, "max_loss_weight": -6.0, "overflow_delta": 0.0, "canon_sym": False,
+    "sym_aug": False, "reflow_path": None, "reflow_every": 1, "reflow_start_epoch": 0,
+}
+
+
+def _build_resolved(config: dict, max_seq_l: int, pdgids: torch.Tensor, state_dict: dict | None) -> ResolvedLEGOConfig:
+    model_conf, dl_conf = config["model_conf"], config["dl_conf"]
+    model_args = model_conf["model_args"]
     migrate_loss_weight_keys(model_conf)
+    c = {k: model_conf.get(k, d) for k, d in _LEGO_DEFAULTS.items()}
     cond_scalars = tuple(model_conf.get("cond_scalars", ("Density",)))
     n_prefix = len(cond_scalars) + 1  # + edep slot (generated)
     set_layout(cond_scalars)
@@ -273,38 +255,25 @@ def _build_resolved(
         geom.setdefault("hide_scalars", True)
         geom["n_prefix"] = n_prefix
 
-    sections = model_conf.get("one_step_euler_sections", 8)
-    if not state_dict and model_conf.get("one_step_euler_fac", 0.0) > 0:  # loading weights never trains
+    if not state_dict and c["one_step_euler_fac"] > 0:  # loading weights never trains
         if not model_args.get("step_cond", False):
-            raise ValueError(
-                "one_step_euler_fac > 0 requires model_args.step_cond=True; "
-                "without it the network never sees the step size and the loss "
-                "collapses to a curvature penalty on the velocity field."
-            )
-        if sections < 1:
-            raise ValueError(
-                f"one_step_euler_sections must be >= 1, got {sections}."
-            )
-    dir_zoom = model_conf.get("dir_zoom")
-    if dir_zoom is not None and not dir_zoom > 0:
-        raise ValueError(f"dir_zoom must be > 0 (rad) or absent, got {dir_zoom}.")
-    dir_zoom_mix = model_conf.get("dir_zoom_mix", 0.0)
-    if not 0.0 <= dir_zoom_mix < 1.0:
-        raise ValueError(f"dir_zoom_mix must be in [0, 1), got {dir_zoom_mix}.")
-    dir_zoom_nucleons_max = model_conf.get("dir_zoom_nucleons_max")
-    if dir_zoom_nucleons_max is not None and not (isinstance(dir_zoom_nucleons_max, int) and dir_zoom_nucleons_max >= 0):
-        raise ValueError(f"dir_zoom_nucleons_max must be an int >= 0 or absent, got {dir_zoom_nucleons_max}.")
-    overflow_delta = model_conf.get("overflow_delta", 0.0)
-    if overflow_delta < 0:
-        raise ValueError(f"overflow_delta must be >= 0, got {overflow_delta}.")
+            raise ValueError("one_step_euler_fac > 0 requires model_args.step_cond=True; without it the network never "
+                             "sees the step size and the loss collapses to a curvature penalty on the velocity field.")
+        if c["one_step_euler_sections"] < 1:
+            raise ValueError(f"one_step_euler_sections must be >= 1, got {c['one_step_euler_sections']}.")
+    if c["dir_zoom"] is not None and not c["dir_zoom"] > 0:
+        raise ValueError(f"dir_zoom must be > 0 (rad) or absent, got {c['dir_zoom']}.")
+    if not 0.0 <= c["dir_zoom_mix"] < 1.0:
+        raise ValueError(f"dir_zoom_mix must be in [0, 1), got {c['dir_zoom_mix']}.")
+    nuc = c["dir_zoom_nucleons_max"]
+    if nuc is not None and not (isinstance(nuc, int) and nuc >= 0):
+        raise ValueError(f"dir_zoom_nucleons_max must be an int >= 0 or absent, got {nuc}.")
+    if c["overflow_delta"] < 0:
+        raise ValueError(f"overflow_delta must be >= 0, got {c['overflow_delta']}.")
     cuboid_dim = model_conf.get("cuboid_dim")
-    if model_conf.get("canon_sym", False) and cuboid_dim and len(set(cuboid_dim)) > 1:
-        raise ValueError(
-            f"canon_sym rotates every face onto +x, which is a symmetry of a cube only; "
-            f"got cuboid_dim={cuboid_dim}."
-        )
-    max_loss_weight = model_conf.get("max_loss_weight", -6.0)
-    dl_conf = config["dl_conf"]
+    if c["canon_sym"] and cuboid_dim and len(set(cuboid_dim)) > 1:
+        raise ValueError(f"canon_sym rotates every face onto +x, which is a symmetry of a cube only; "
+                         f"got cuboid_dim={cuboid_dim}.")
     len_buckets = resolve_len_buckets(dl_conf.get("len_buckets"), max_seq_l)
     len_mode = dl_conf.get("len_mode", "split")
     len_split = dl_conf.get("len_split", 8)
@@ -317,67 +286,40 @@ def _build_resolved(
     if edep_ae is not None:
         # len_mode group keeps a batch whole and in order (the per-layer targets stay with their events); split
         # reorders and runs pieces, which do not carry the latent token
-        if ((len_buckets is not None and len_mode != "group") or model_conf.get("reflow_path")
-                or model_conf.get("reflow_start_epoch", 0) > 0
+        if ((len_buckets is not None and len_mode != "group") or c["reflow_path"] or c["reflow_start_epoch"] > 0
                 or (model_conf.get("mask_conf") or {}).get("p_forward", 1.0) < 1):
             raise ValueError("model_conf.edep_ae does not support training len_buckets in split mode, reflow or "
                              "inverse-mask events (mask_conf.p_forward < 1) yet.")
         model_args.setdefault("lat_dim", edep_ae["config"]["K"])   # the field's latent token (CFMTrafo_x)
 
+    whiten_global = model_conf.get("edep_whiten_global")
     return ResolvedLEGOConfig(
+        **c,
         max_seq_l=max_seq_l,
         pdgids_template=pdgids.contiguous(),
         manifold=build_manifold(model_conf["manifold"]),
         model_args=model_args,
-        t_dist=model_conf.get("t_dist", "sd3"),
-        t_dist_scale=model_conf.get("t_dist_scale", 1.4),
-        t_dist_shift=model_conf.get("t_dist_shift", 1.0),
-        ot_coupling=model_conf.get("ot_coupling", False),
-        base_pretrain_batches=model_conf.get("base_pretrain_batches", 300),
-        base_pretrain_bs=model_conf.get("base_pretrain_bs"),
-        pdgid_is_idx=model_conf.get("pdgid_is_idx", False),
-        one_step_euler_fac=model_conf.get("one_step_euler_fac", 0.0),
-        one_step_euler_sections=sections,
-        one_step_euler_every=model_conf.get("one_step_euler_every", 1),
-        learned_loss_weights=model_conf.get("learned_loss_weights", False),
-        edep_cell=model_conf.get("edep_cell", False),
-        edep_whiten=model_conf.get("edep_whiten", False),
-        edep_whiten_max_sig=model_conf.get("edep_whiten_max_sig"),
-        edep_whiten_feed=model_conf.get("edep_whiten_feed", False),
-        edep_whiten_global=(tuple(model_conf["edep_whiten_global"]) if model_conf.get("edep_whiten_global") is not None
-                            else None),
-        dir_zoom=dir_zoom,
-        dir_zoom_mix=dir_zoom_mix,
-        dir_zoom_nucleons_max=dir_zoom_nucleons_max,
-        max_loss_weight=max_loss_weight,
-        max_loss_weight_flow=model_conf.get("max_loss_weight_flow", max_loss_weight),
-        max_loss_weight_edep=model_conf.get("max_loss_weight_edep", max_loss_weight),
-        overflow_delta=overflow_delta,
-        canon_sym=model_conf.get("canon_sym", False),
-        sym_aug=model_conf.get("sym_aug", False),
+        edep_whiten_global=None if whiten_global is None else tuple(whiten_global),
+        max_loss_weight_flow=model_conf.get("max_loss_weight_flow", c["max_loss_weight"]),
+        max_loss_weight_edep=model_conf.get("max_loss_weight_edep", c["max_loss_weight"]),
         cond_scalars=cond_scalars,
         n_prefix=n_prefix,
         mask_conf=model_conf.get("mask_conf", {}),
         max_energy=model_conf["max_energy"],
-        cutoff_mev=config["dl_conf"]["lds_args"]["cutoff_mev"],
+        cutoff_mev=dl_conf["lds_args"]["cutoff_mev"],
         amp_dtype=_amp_dtype((config.get("additional") or {}).get("precision")),
         len_buckets=len_buckets,
         len_mode=len_mode,
         len_split=len_split,
         len_max_tokens=dl_conf.get("len_max_tokens"),
-        gen_len_buckets=resolve_len_buckets(
-            config.get("odeint_conf", {}).get("len_buckets"), max_seq_l,
-        ),
+        gen_len_buckets=resolve_len_buckets(config.get("odeint_conf", {}).get("len_buckets"), max_seq_l),
         dl_conf=dl_conf,
         opt_conf=config["opt_conf"],
         odeint_conf=config.get("odeint_conf", {}),
         val_conf=config.get("val_conf", {}),
         config=config,
         state_dict=state_dict,
-        reflow_path=model_conf.get("reflow_path"),
         reflow_kwargs=model_conf.get("reflow_kwargs", {}),
-        reflow_every=model_conf.get("reflow_every", 1),
-        reflow_start_epoch=model_conf.get("reflow_start_epoch", 0),
         edep_ae=edep_ae,
         n_lat=edep_ae["config"]["K"] if edep_ae else 0,
     )
@@ -420,12 +362,8 @@ class ResolvedMultConfig:
 
 
 def resolve_mult_config(full_config: dict) -> ResolvedMultConfig:
-    full = copy.deepcopy(full_config)
-    state_dict = full.get("state_dict")
-    config = full.get("config", full)
-    if state_dict is None:
-        return _resolve_fresh_mult(config)
-    return _resolve_from_checkpoint_mult(config, state_dict)
+    config, state_dict = _unpack(full_config)
+    return _resolve_fresh_mult(config) if state_dict is None else _resolve_from_checkpoint_mult(config, state_dict)
 
 
 def _resolve_fresh_mult(config: dict) -> ResolvedMultConfig:
@@ -456,15 +394,12 @@ def _resolve_fresh_mult(config: dict) -> ResolvedMultConfig:
 
     if "max_count" not in mm_conf:
         mm_conf["max_count"] = int(MultLoader(config).counts.max().item()) + 1
+    return _build_resolved_mult(config, state_dict=None)
 
-    return _build_resolved_mult(config, mm_conf, dl_conf, state_dict=None)
 
-
-def _resolve_from_checkpoint_mult(
-    config: dict, state_dict: dict
-) -> ResolvedMultConfig:
+def _resolve_from_checkpoint_mult(config: dict, state_dict: dict) -> ResolvedMultConfig:
     mm_conf = config.setdefault("mm_conf", {})
-    dl_conf = config.setdefault("dl_conf", {})
+    config.setdefault("dl_conf", {})
     mm_conf.setdefault("max_count", mm_conf.get("max_out_particles"))
     additional = config.setdefault("additional", {})
     model_args = mm_conf.get("model_args", {})
@@ -476,58 +411,41 @@ def _resolve_from_checkpoint_mult(
     ptypes = mm_conf.get("ptypes")
     max_count = mm_conf.get("max_count")
     if ptypes is not None and max_count is not None and len(state_dict) > 0:
-        max_seq_len = (
-            ptypes.shape[0] if torch.is_tensor(ptypes) else len(ptypes)
-        )
-        state_dict = migrate_legacy_mult_heads(
-            state_dict, max_seq_len=max_seq_len, max_particles=max_count,
-        )
-
-    return _build_resolved_mult(config, mm_conf, dl_conf, state_dict=state_dict)
+        state_dict = migrate_legacy_mult_heads(state_dict, max_seq_len=len(ptypes), max_particles=max_count)
+    return _build_resolved_mult(config, state_dict=state_dict)
 
 
-def _build_resolved_mult(
-    config: dict,
-    mm_conf: dict,
-    dl_conf: dict,
-    state_dict: dict | None,
-) -> ResolvedMultConfig:
-    ptypes = mm_conf["ptypes"]
-    ptypes_in = mm_conf["ptypes_in"]
-    if not torch.is_tensor(ptypes):
-        ptypes = torch.tensor(ptypes)
-    if not torch.is_tensor(ptypes_in):
-        ptypes_in = torch.tensor(ptypes_in)
+# mm_conf keys that ResolvedMultConfig carries as they are, with their defaults
+_MULT_DEFAULTS = {
+    "h_dim": 512, "n_layers": 6, "n_heads": 8, "dropout": 0.1, "use_abs_pos_emb": True, "post_emb_norm": True,
+    "pos_scale": 50.0, "canon_sym": False, "sym_aug": False, "train_inverse": False,
+}
 
+
+def _build_resolved_mult(config: dict, state_dict: dict | None) -> ResolvedMultConfig:
+    mm_conf = config["mm_conf"]
+    c = {k: mm_conf.get(k, d) for k, d in _MULT_DEFAULTS.items()}
+    ptypes, ptypes_in = torch.as_tensor(mm_conf["ptypes"]), torch.as_tensor(mm_conf["ptypes_in"])
     cond_scalars = tuple(mm_conf.get("cond_scalars", ("Density",)))
     set_layout(cond_scalars)
 
     return ResolvedMultConfig(
+        **c,
         max_seq_len=ptypes.shape[0],
         max_particles=mm_conf["max_count"],
         n_ptypes_in=ptypes_in.shape[0],
         ptypes=ptypes.contiguous(),
         ptypes_in=ptypes_in.contiguous(),
-        h_dim=mm_conf.get("h_dim", 512),
         in_dim=len(cond_scalars) + 7,
-        n_layers=mm_conf.get("n_layers", 6),
-        n_heads=mm_conf.get("n_heads", 8),
-        dropout=mm_conf.get("dropout", 0.1),
-        use_abs_pos_emb=mm_conf.get("use_abs_pos_emb", True),
-        post_emb_norm=mm_conf.get("post_emb_norm", True),
-        pos_scale=mm_conf.get("pos_scale", 50.0),
-        canon_sym=mm_conf.get("canon_sym", False),
-        sym_aug=mm_conf.get("sym_aug", False),
         model_args=mm_conf.get("model_args", {}),
-        dl_conf=dl_conf,
+        dl_conf=config["dl_conf"],
         mm_conf=mm_conf,
         opt_conf=config.get("opt_conf", mm_conf.get("opt_conf")),  # top-level first, mm_conf for back-compat
         val_conf=config.get("val_conf", {}),
         config=config,
         state_dict=state_dict,
-        train_inverse=mm_conf.get("train_inverse", False),
         inv_model_args=mm_conf.get("inv_model_args", mm_conf.get("model_args", {})),
-        inv_h_dim=mm_conf.get("inv_h_dim", mm_conf.get("h_dim", 512)),
-        inv_n_layers=mm_conf.get("inv_n_layers", mm_conf.get("n_layers", 6)),
-        inv_n_heads=mm_conf.get("inv_n_heads", mm_conf.get("n_heads", 8)),
+        inv_h_dim=mm_conf.get("inv_h_dim", c["h_dim"]),
+        inv_n_layers=mm_conf.get("inv_n_layers", c["n_layers"]),
+        inv_n_heads=mm_conf.get("inv_n_heads", c["n_heads"]),
     )
