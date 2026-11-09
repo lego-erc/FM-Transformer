@@ -21,24 +21,22 @@ from legofmt.data.prep import DataPrep
 n_items = 500        # density points swept per material
 n_events_per_item = 4000
 
-pos = np.array([-50.0, 0.0, 0.0], dtype=np.float64)   # ignored with random_gun=True
-mom = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+pos = np.array([-50.0, 0.0, 0.0])   # ignored with random_gun=True
+mom = np.array([1.0, 0.0, 0.0])
 
-energy = np.array([300.0], dtype=np.float64)
 energy_max = 300.0
 energy_min = 10.0
+energy = np.array([energy_max])   # ignored with random_energy=True
 pdgids_in = np.array([-11, 11, 22], dtype=np.int32)
 
-materials = [
+materials = [               # (Z, A, cube edge [mm])
     (18.0, 39.95, 100.0),   # argon
     (29.0, 63.546, 10.0),   # copper
 ]
 density_space = np.linspace(0.5, 10.0, n_items)
 
-density       = np.tile(density_space, len(materials))
-atomic_number = np.repeat(np.array([z for z, _, _ in materials], dtype=np.float64), n_items)
-mass_number   = np.repeat(np.array([a for _, a, _ in materials], dtype=np.float64), n_items)
-size          = np.repeat(np.array([s for _, _, s in materials], dtype=np.float64), n_items)
+density = np.tile(density_space, len(materials))
+atomic_number, mass_number, size = np.repeat(np.array(materials).T, n_items, axis=1)
 
 data = pyg4lego.run_simulation(
     n_events_per_item, pos, mom, energy,
@@ -78,20 +76,20 @@ config = {
     "cuboid_dim": cuboid_dim,
 }
 
-dataset = LEGODataset(
+d = LEGODataset(
     data=data,
     prep=DataPrep(config),
     cutoff_mev=energy_min,
     min_particles=0,
     is_filtered=False,
     device="cpu",
-)
+).data
+del data   # the raw float64 events: not needed past prep, and the largest thing still held
 
 out_dir = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("LEGO_DATA_DIR", ".")
 os.makedirs(out_dir, exist_ok=True)
 padded = "--padded" in sys.argv[2:]   # the padded data_prepped.pt, for legofmt versions without packed files
 
-d = dataset.data
 if padded:
     torch.save((d.f.full, d.m.full, d.am.full) + (() if d.edep_layers is None else (d.edep_layers,)),
                f"{out_dir}/data_prepped.pt")
