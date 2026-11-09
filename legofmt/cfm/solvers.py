@@ -15,6 +15,7 @@ from torch import Tensor
 
 from flow_matching.solver import ODESolver
 
+from legofmt.rng import LATENT, SYM_FLOW
 from legofmt.data.struct import DataStruct, _F
 
 from legofmt.cfm.project_model import is_compiled, uncompiled
@@ -114,10 +115,11 @@ class Solvers:
         time_grid: Tensor | None = None,
         return_intermediates: bool = False,
         buckets: list[int] | None = None,
+        rng=None,
     ) -> Tensor:
         ds_t, pdgids_idx = self._prep_solve(ds_t)
         if x_init is None:
-            x_init = self.gen_base_wrapper(ds_t)
+            x_init = self.gen_base_wrapper(ds_t, rng=rng)
         if x_init.shape == ds_t.f.model_in.shape:
             x_init = x_init.where(ds_t.am.full.unsqueeze(-1), _F(x_init).in_p)
         if self.rc.edep_whiten:
@@ -126,7 +128,10 @@ class Solvers:
         # through chunked / bucketed packed into R extra rows of the output and is split off below
         K, C = self.rc.n_lat, x_init.shape[-1]
         R = -(-K // C)
-        z_init = (torch.randn(x_init.shape[0], K, device=x_init.device, dtype=x_init.dtype),) if K else ()
+        z_init = ()
+        if K:
+            z_init = (torch.randn(x_init.shape[0], K, device=x_init.device, dtype=x_init.dtype) if rng is None
+                      else rng.normal(LATENT, torch.arange(K)).to(x_init),)
 
         if time_grid is None:  # adaptive ODESolver methods get the bare [0, 1]
             n = max(round(1.0 / step_size), 1) if method in _STEPPED else 1
@@ -217,12 +222,12 @@ class Solvers:
 
     _midpoint_steps = partialmethod(_steps, "midpoint")  # lego_eval probes hasattr(ltng, "_midpoint_steps")
 
-    def _solve_by_length(self, ds_t: DataStruct, base: Tensor, **kw) -> Tensor:
+    def _solve_by_length(self, ds_t: DataStruct, base: Tensor, rng=None, **kw) -> Tensor:
         L_max = ds_t.am.full.shape[1]
         # odeint_conf may gain len_buckets after construction (lego_eval's per-model odeint override)
         buckets = self.rc.gen_len_buckets or resolve_len_buckets(self.rc.odeint_conf.get("len_buckets"), L_max)
         if buckets is None:
-            return self._solve(ds_t, x_init=base, **kw)
+            return self._solve(ds_t, x_init=base, rng=rng, **kw)
         buckets = [min(b, L_max) for b in buckets]
         lengths, order = ds_t.am.full.sum(1).sort()
         counts = torch.bincount(lengths, minlength=L_max + 1).cumsum(0)[buckets].tolist()
@@ -230,7 +235,8 @@ class Solvers:
         sols, lats, a = [], [], 0
         for L, b in zip(buckets, counts):
             if b > a:
-                sol = self._solve(ds_t[a:b].trim(L), x_init=base[a:b, :L], **kw)
+                sol = self._solve(ds_t[a:b].trim(L), x_init=base[a:b, :L],
+                                  rng=None if rng is None else rng.sub(order[a:b]), **kw)
                 sols.append(F.pad(sol, (0, 0, 0, L_max - L)))
                 lats.append(self._edep_latents)
             a = b
@@ -239,11 +245,12 @@ class Solvers:
         return torch.cat(sols, dim=-3).index_select(-3, order.argsort())
 
     @torch.no_grad()
-    def forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None) -> tuple:
-        return self._forward(batch, _batch_idx)
+    def forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None, rng=None) -> tuple:
+        return self._forward(batch, _batch_idx, rng=rng)
 
-    def _forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None) -> tuple:
-        """``forward`` without ``torch.no_grad`` (the density design differentiates through it)."""
+    def _forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None, rng=None) -> tuple:
+        """``forward`` without ``torch.no_grad`` (the density design differentiates through it). ``rng``
+        (legofmt.rng.EventRNG, one key per row of ``batch``) keys every random draw on its event."""
         self._to_eval()
 
         cfg = self.rc.odeint_conf
@@ -263,9 +270,11 @@ class Solvers:
         fwd  = ds_t.m.full[:, self.rc.n_prefix] == 0
         if self.sym is not None:
             face = self.sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
-            g    = torch.randint(8, face.shape, device=face.device) if self.rc.sym_aug or cfg.get("sym_rand") else None
+            g    = ((torch.randint(8, face.shape, device=face.device) if rng is None
+                     else rng.randint(8, SYM_FLOW).view(face.shape).to(face.device))
+                    if self.rc.sym_aug or cfg.get("sym_rand") else None)
             ds_t = DataStruct(self._canon_dirs(ds_t.f.full, face, fwd, g=g), ds_t.m.full, ds_t.am.full)
-        base   = self.gen_base_wrapper(ds_t)
+        base   = self.gen_base_wrapper(ds_t, rng=rng)
         pdgids = ds_t.f.pdgids
         am     = ds_t.am.full.unsqueeze(-1)
 
@@ -275,7 +284,7 @@ class Solvers:
             amp = _amp_dtype(cfg["amp"]) if "amp" in cfg else self.rc.amp_dtype
             with contextlib.nullcontext() if amp is None else torch.autocast(base.device.type, dtype=amp):
                 sols = self._solve_by_length(
-                    ds_t, base,
+                    ds_t, base, rng=rng,
                     split_size=cfg.get("split_size"),
                     step_size=cfg.get("step_size", 0.04),
                     method=cfg.get("method", "midpoint"),

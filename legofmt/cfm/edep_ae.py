@@ -16,6 +16,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from legofmt.rng import AE_MIX, AE_NORM, AE_ZERO
+
 LOG_OFFSET = 0.1               # MeV, the encoder's log(E + offset): about a MIP in 0.3 mm Si
 _HALF_LOG_2PI = 0.9189385332046727
 
@@ -56,14 +58,18 @@ class EdepLayerAE(nn.Module):
         return -torch.where(E <= 0, F.logsigmoid(a), F.logsigmoid(-a) + cont).mean()
 
     @torch.no_grad()
-    def sample(self, z: Tensor, tot: Tensor) -> Tensor:
-        """(B, K) standardised latents, (B,) totals [MeV] -> (B, n_layers) deposits that sum to the totals."""
+    def sample(self, z: Tensor, tot: Tensor, rng=None) -> Tensor:
+        """(B, K) standardised latents, (B,) totals [MeV] -> (B, n_layers) deposits that sum to the totals; ``rng``
+        (legofmt.rng.EventRNG) keys the draws per event and layer."""
         z, tot = z.float(), tot.float().reshape(-1, 1)
         a, lw, mu, ls = self._head(z, tot.clamp(min=1e-6))
-        k = torch.distributions.Categorical(logits=lw).sample()[..., None]
-        v = mu.gather(-1, k)[..., 0] + ls.gather(-1, k)[..., 0].exp() * torch.randn_like(a)
-        E = torch.where(torch.rand_like(a) < torch.sigmoid(a), torch.zeros_like(a),
-                        torch.minimum(v, self.log_e_max).exp())
+        layer = torch.arange(a.shape[-1], device=a.device)
+        k = (torch.distributions.Categorical(logits=lw).sample() if rng is None
+             else rng.categorical(lw.softmax(-1), AE_MIX, layer))[..., None]
+        v = mu.gather(-1, k)[..., 0] + ls.gather(-1, k)[..., 0].exp() * (
+            torch.randn_like(a) if rng is None else rng.normal(AE_NORM, layer).to(a))
+        u = torch.rand_like(a) if rng is None else rng.uniform(AE_ZERO, layer).to(a)
+        E = torch.where(u < torch.sigmoid(a), torch.zeros_like(a), torch.minimum(v, self.log_e_max).exp())
         dead = E.sum(-1) == 0
         E[dead, a[dead].argmin(-1)] = 1.0
         return torch.where(tot > 0, E * tot / E.sum(-1, keepdim=True), torch.zeros_like(E))

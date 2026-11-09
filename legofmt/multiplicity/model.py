@@ -25,6 +25,7 @@ from legofmt.data.struct import cond_scalars
 from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.geometry.symmetry_projections import CubeSymmetry
 from legofmt.mod_comps.config import resolve_mult_config
+from legofmt.rng import COUNT, PASSTHROUGH, SYM_COUNT, SYM_PT
 from legofmt.mod_comps.optimizers import (
     build_optimizer, opt_eval, opt_is_schedulefree, opt_train, schedulefree_adamw,
 )
@@ -241,11 +242,12 @@ class MultModel(LightningModule):
             self.opt, self._sched = build_optimizer(self.parameters(), rc.opt_conf)
         self._opt_is_sf = opt_is_schedulefree(self.opt)
 
-    def proj_in(self, x):
+    def proj_in(self, x, rng=None, stream: int = SYM_COUNT):
         x = x.clone()
         if self.sym is not None:
             face = self.sym.face_of(x[..., -3:])
-            g    = torch.randint(8, face.shape, device=face.device) if self.rc.sym_aug else None
+            g    = ((torch.randint(8, face.shape, device=face.device) if rng is None
+                     else rng.randint(8, stream).view(face.shape).to(face.device)) if self.rc.sym_aug else None)
             dirs = self.sym.canonicalize(torch.stack((x[..., -6:-3], x[..., -3:]), dim=-2), face, g)
             x[..., -6:-3], x[..., -3:] = dirs[..., 0, :], dirs[..., 1, :]
         # out of place: an in-place write over to_cuboid's split views breaks the gradient log_prob needs
@@ -332,19 +334,23 @@ class MultModel(LightningModule):
         return total
 
     @torch.no_grad()
-    def passthrough_prob(self, in_tok: torch.Tensor, pdgid_in_idx: torch.Tensor) -> torch.Tensor:
+    def passthrough_prob(self, in_tok: torch.Tensor, pdgid_in_idx: torch.Tensor, rng=None) -> torch.Tensor:
         """P("this particle did not interact"), 0 outside the neutrals the head covers."""
         if self.pt_head is None:
             return torch.zeros(in_tok.shape[0], device=in_tok.device)
-        in_embd = self.proj_in(in_tok) + self.embd_pp_(pdgid_in_idx)
+        in_embd = self.proj_in(in_tok, rng, SYM_PT) + self.embd_pp_(pdgid_in_idx)
         # slot 0 is causal, so the one-token pass equals training's out_f[:, 0]
         pt_in = self.model(in_embd.unsqueeze(1), mask=None, condition=in_embd)[:, 0] if self.pt_on_trunk else in_embd
         return self.pt_head(pt_in).squeeze(-1).sigmoid() * self._pt_pdgid_allowed[pdgid_in_idx]
 
-    def sample_passthrough(self, in_tok: torch.Tensor, pdgid_in_idx: torch.Tensor) -> torch.Tensor:
-        """Bernoulli draw of "this particle did not interact", masked to neutrals."""
-        p = self.passthrough_prob(in_tok, pdgid_in_idx)
-        return torch.rand_like(p) < p
+    def sample_passthrough(self, in_tok: torch.Tensor, pdgid_in_idx: torch.Tensor, rng=None) -> torch.Tensor:
+        """Bernoulli draw of "this particle did not interact", masked to neutrals. A keyed draw (``rng``, a
+        legofmt.rng.EventRNG) evaluates the head in eval mode: dropout would be randomness no key covers."""
+        if rng is not None:
+            self._opt_eval()
+            self.eval()
+        p = self.passthrough_prob(in_tok, pdgid_in_idx, rng)
+        return (torch.rand_like(p) if rng is None else rng.uniform(PASSTHROUGH).to(p)) < p
 
     def configure_optimizers(self):
         if self._sched is None:
@@ -421,10 +427,10 @@ class MultModel(LightningModule):
             self.log(f"val/count_ratio/{int(self.ptypes[i])}", gen[i] / true[i], sync_dist=False)
 
     @torch.no_grad()
-    def forward(self, batch: tuple, pt_mask: torch.Tensor | None = None):
+    def forward(self, batch: tuple, pt_mask: torch.Tensor | None = None, rng=None):
         """Inference only: a 3-D batch[0] runs InvModel (outgoing set -> incoming
         PID index), a 2-D one decodes counts autoregressively with a KV cache;
-        puts the module in eval mode."""
+        puts the module in eval mode. ``rng`` (legofmt.rng.EventRNG) keys the draws per event."""
         self._opt_eval()
         self.eval()
         if batch[0].dim() == 3:
@@ -442,10 +448,11 @@ class MultModel(LightningModule):
             counts[pt_mask, torch.searchsorted(self.ptypes, pid).clamp(max=self.rc.max_seq_len - 1)] = 1
             keep = ~pt_mask
             if keep.any():
-                counts[keep] = self.forward((in_tok[keep], None, pdgid_in_idx[keep]))
+                counts[keep] = self.forward((in_tok[keep], None, pdgid_in_idx[keep]),
+                                            rng=None if rng is None else rng.sub(keep))
             return counts
 
-        in_embd = self.proj_in(in_tok) + self.embd_pp_(pdgid_in_idx)
+        in_embd = self.proj_in(in_tok, rng) + self.embd_pp_(pdgid_in_idx)
         x = in_embd.unsqueeze(1)
 
         cache = None
@@ -459,7 +466,8 @@ class MultModel(LightningModule):
                 input_not_include_cache=(i > 0),
             )
             logits = out[:, -1] @ self.proj_out_w[i] + self.proj_out_b[i]
-            counts[:, i] = torch.multinomial(logits.softmax(-1), 1).squeeze(-1)
+            probs = logits.softmax(-1)
+            counts[:, i] = torch.multinomial(probs, 1).squeeze(-1) if rng is None else rng.categorical(probs, COUNT, i)
             if i < self.rc.max_seq_len - 1:
                 x = self.embd_in_(counts[:, i] + self._in_offsets[i]).unsqueeze(1)
         return counts

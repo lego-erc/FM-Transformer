@@ -20,6 +20,7 @@ from flow_matching.utils.manifolds import Sphere
 from legofmt.cfm.geom_encoder import x0_gcm2
 from legofmt.compat import load_legacy_base_head
 from legofmt.data.struct import DataStruct, _F
+from legofmt.rng import species_rank_ids
 
 try:
     from torch_linear_assignment import batch_linear_assignment
@@ -267,27 +268,30 @@ class BaseDist:
         out[:] = torch.take_along_dim(out, assign.unsqueeze(-1), dim=1)
         return base
 
-    def gen_base_wrapper(self, ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]", all_forward: bool = False) -> Tensor:
+    def gen_base_wrapper(self, ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]", all_forward: bool = False,
+                         rng=None) -> Tensor:
         """Draw ``x_0``: data on conditioning cells, the (learned) prior on generated
-        ones, an isotropic sample for inverse-mask events. ``lego_eval`` calls this."""
+        ones, an isotropic sample for inverse-mask events. ``lego_eval`` calls this. ``rng``
+        (legofmt.rng.EventRNG) keys every draw on the event and an outgoing slot's (species, rank)."""
         if not isinstance(ds_t, DataStruct):
             ds_t = DataStruct(*ds_t)
         self._base_head_loss = None
         data  = ds_t.f.model_in
         m     = ds_t.m.full
         fwd   = m[:, self.rc.n_prefix] == 0  # incoming slot conditions => forward event
-        noise = None if all_forward or fwd.all() else self.gen_base.iso(m.shape, data.device)
+        noise = None if all_forward or fwd.all() else self.gen_base.iso(m.shape, data.device, rng=rng)
         if not all_forward and not fwd.any():
             return torch.where((m == 1).unsqueeze(-1), noise, data)
 
         if hasattr(self, "base_head"):
             self._fit_base_head(ds_t, fwd)
+        elem = None if rng is None else species_rank_ids(ds_t.f.out_p[..., -1].long())
         base = torch.cat(
-            (ds_t.f.non_cc, self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc)), dim=1,
+            (ds_t.f.non_cc, self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc, rng=rng, elem=elem)), dim=1,
         )
         if self.rc.ot_coupling and self.model.training:
             base = self._ot_couple(base, ds_t, data)
-        base = self.gen_base.insert_add(base)
+        base = self.gen_base.insert_add(base, rng=rng)
         noise = base if noise is None else torch.where(fwd.view(-1, 1, 1), base, noise)
         return torch.where((m == 1).unsqueeze(-1), noise, data)
 

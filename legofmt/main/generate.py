@@ -21,6 +21,7 @@ from legofmt.geometry.energy_proj import EnergyProjections
 from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.main.modules import LEGOLtng
 from legofmt.multiplicity.model import MultModel
+from legofmt.rng import REFILL, EventRNG
 
 _EDEP_EXCESS_MEV = {11: 0.0, -11: 1.022, 22: 0.0, 2212: 0.0, 2112: 10.0, 211: 150.0, -211: 150.0}
 
@@ -65,6 +66,11 @@ def _exit_outward(sols: torch.Tensor) -> None:
     mn = m.gather(-1, ax)
     flip = (mn * u.gather(-1, ax).sign() < 0) & (out[..., -1:] != 0)
     m.scatter_(-1, ax, torch.where(flip, -mn, mn))
+
+
+def _rng_kw(rng, rows=None) -> dict:
+    """``rng=`` for a call only when keyed, so stubs and subclasses without the argument keep working."""
+    return {} if rng is None else {"rng": rng if rows is None else rng.sub(rows)}
 
 
 class GenerateOut(torch.nn.Module):
@@ -124,14 +130,20 @@ class GenerateOut(torch.nn.Module):
         self.pen = EnergyProjections(cutoff_mev=self.model.rc.cutoff_mev, max_energy=self.model.rc.max_energy)
         self.dp = DataPrep(flow_conf)   # the E_dep row's normalisation (edep_log_min), for the E_in ceiling
 
-    def __call__(self, cond: torch.Tensor, prepped: bool = False, passthrough: bool = True):
+    def __call__(self, cond: torch.Tensor, prepped: bool = False, passthrough: bool = True, rng=None):
         """``cond`` is ``[B, n_cond + 7] = [*cond_scalars, mom * E_MeV (3), pos (3), pdgid]``;
         the momentum must be energy-scaled. ``prepped=True`` skips the ray-trace and
         the energy split. ``passthrough=False`` never fires the pass-through token: the
         interacting branch, for a caller that drew the pass-through itself (``passthrough_prob``).
+        ``rng`` (legofmt.rng.EventRNG, one unique key per event) makes every random draw a function of
+        the event's key: independent of the batch, and shared by two models run on the same keys.
         Returns ``(sols, mask, attn_mask)`` in the ``(B, L, 8)`` layout."""
+        if rng is not None and len(rng.keys) != len(cond):
+            raise ValueError(f"rng needs one key per event: {len(rng.keys)} keys for {len(cond)} events")
+        if rng is not None:  # keys on the events' device: rows are subset by device masks, draws meet device params
+            rng = EventRNG(rng.keys.to(cond.device), rng.seed)
         cond_model = self._model_cond(cond, prepped)
-        cond_fm, mask, attn_mask = self.gen_batch(cond_model, passthrough=passthrough)
+        cond_fm, mask, attn_mask = self.gen_batch(cond_model, passthrough=passthrough, **_rng_kw(rng))
         nc = self.n_cond
         e_in = self.pen.from_scalar(cond_model[:, nc + 1:nc + 4], cond_model[:, nc:nc + 1]).norm(dim=-1)
         pid_in = cond_model[:, -1].long()
@@ -146,11 +158,11 @@ class GenerateOut(torch.nn.Module):
             sols = cond_fm.clone()
         elif pt_mask.any():
             keep = ~pt_mask
-            sub, _, _ = self.model((cond_fm[keep], mask[keep], attn_mask[keep]))
+            sub, _, _ = self.model((cond_fm[keep], mask[keep], attn_mask[keep]), **_rng_kw(rng, keep))
             sols = cond_fm.clone()
             sols[keep] = sub.to(sols.dtype)
         else:
-            sols, mask, attn_mask = self.model((cond_fm, mask, attn_mask))
+            sols, mask, attn_mask = self.model((cond_fm, mask, attn_mask), **_rng_kw(rng))
         sols[..., -1] = torch.cat([sols.new_zeros(1), self.pdgids.to(sols.dtype)])[sols[..., -1].long()]
         edep = _F(sols).edep
         edep.copy_(self._clamp_edep(edep, e_in, pid_in))
@@ -165,7 +177,7 @@ class GenerateOut(torch.nn.Module):
             run = ~pt_mask
             if run.any():
                 self.edep_layers[run] = ae.sample(self.model._edep_latents, self.dp.denorm_edep_row(
-                    _F(sols).edep[run].float(), e_in[run].float(), pid_in[run]))
+                    _F(sols).edep[run].float(), e_in[run].float(), pid_in[run]), **_rng_kw(rng, run))
         return sols, mask, attn_mask
 
     def _clamp_edep(self, edep: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor) -> torch.Tensor:
@@ -193,12 +205,15 @@ class GenerateOut(torch.nn.Module):
         token's draw uses, 0 for species the head does not cover. ``cond`` as for ``__call__``."""
         return self.gen_mult.passthrough_prob(*self._mult_in(self._model_cond(cond, prepped)))
 
-    def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None, passthrough=True):
+    def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None, passthrough=True,
+                            rng=None):
         """Geant4-shaped entry point: broadcast the per-gun arguments to ``B * n`` events
         and return ``{per_event, per_particle, per_voxel}`` in *model* normalisation
         (``per_event["E_dep"]`` is the normalised scalar, not MeV, always on the log/linear ``norm_edep`` scale that
-        callers decode with ``edep_log_min``: a ``model_conf.edep_wall`` row is re-encoded on it here)."""
-        sols, _, _ = self(self._g4_cond(n, pos, mom, energy, density, size, pdgids, Z, A), passthrough=passthrough)
+        callers decode with ``edep_log_min``: a ``model_conf.edep_wall`` row is re-encoded on it here).
+        ``rng`` as in ``__call__``, with ``B * n`` keys (gun-major, as ``repeat_interleave`` orders the events)."""
+        sols, _, _ = self(self._g4_cond(n, pos, mom, energy, density, size, pdgids, Z, A), passthrough=passthrough,
+                          **_rng_kw(rng))
         s = _F(sols)
         edep = s.edep
         if self.dp.edep_wall:
@@ -260,20 +275,21 @@ class GenerateOut(torch.nn.Module):
             mult_in[:, self.n_mult_cond] = (mult_in[:, self.n_mult_cond] * self.mult_e_scale).clamp(0.0, 1.0)
         return mult_in, pdgid_in_idx
 
-    def gen_batch(self, cond: torch.Tensor, passthrough: bool = True):
+    def gen_batch(self, cond: torch.Tensor, passthrough: bool = True, rng=None):
         """Sample per-pdgid counts, truncate to ``max_seq_l``, and build the padded
         ``(cond_fm, mask, attn_mask)`` triple the flow consumes."""
-        return self.build_batch(cond, *self.sample_counts(cond, passthrough))
+        return self.build_batch(cond, *self.sample_counts(cond, passthrough, **_rng_kw(rng)), **_rng_kw(rng))
 
-    def sample_counts(self, cond: torch.Tensor, passthrough: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
+    def sample_counts(self, cond: torch.Tensor, passthrough: bool = True,
+                      rng=None) -> tuple[torch.Tensor, torch.Tensor]:
         """The multiplicity model's draw for ``cond`` (model layout): pass-through flags and raw per-slot counts (as
         ``MultModel.forward`` returns them; ``MultModel.log_prob`` scores them)."""
         mult_in, pdgid_in_idx = self._mult_in(cond)
-        pt_mask = (self.gen_mult.sample_passthrough(mult_in, pdgid_in_idx) if passthrough
+        pt_mask = (self.gen_mult.sample_passthrough(mult_in, pdgid_in_idx, **_rng_kw(rng)) if passthrough
                    else torch.zeros(len(cond), dtype=torch.bool, device=cond.device))
-        return pt_mask, self.gen_mult((mult_in, None, pdgid_in_idx), pt_mask=pt_mask)
+        return pt_mask, self.gen_mult((mult_in, None, pdgid_in_idx), pt_mask=pt_mask, **_rng_kw(rng))
 
-    def build_batch(self, cond: torch.Tensor, pt_mask: torch.Tensor, counts: torch.Tensor):
+    def build_batch(self, cond: torch.Tensor, pt_mask: torch.Tensor, counts: torch.Tensor, rng=None):
         """The padded ``(cond_fm, mask, attn_mask)`` triple for a draw, truncated to ``max_seq_l``."""
         mult = counts[:, self.ptype_idx] * self.ptype_in_mask
 
@@ -284,8 +300,9 @@ class GenerateOut(torch.nn.Module):
         mult = (mult * scale).long()
         scaled = total > max_particles
         remaining = (scaled * (max_particles - mult.sum(-1, keepdim=True))).clamp(min=0)
-        dist = torch.multinomial(weights, max_particles, replacement=True)
         idx = torch.arange(max_particles, device=mult.device)
+        dist = (torch.multinomial(weights, max_particles, replacement=True) if rng is None
+                else rng.categorical(weights, REFILL, idx))
         mult.scatter_add_(-1, dist, (idx < remaining).long())
         occupied = idx < mult.sum(-1, keepdim=True)
         # species boundaries at the cumulative counts; the extra column absorbs

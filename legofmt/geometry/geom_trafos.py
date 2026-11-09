@@ -80,32 +80,40 @@ class GeomTrafos:
     def sample(
         self, n: tuple, loc_cc, kappa: torch.Tensor,
         bs_frac: float = 0.0, tanh_theta: bool = False, ang_pow=None,
+        rng=None, elem=None, stream: int = 0,
     ):
         """Directions concentrated (kappa) around loc_cc, wrapped-normal or
         tanh-normal theta; bs_frac sends the first round(bs_frac*B) events --
         all their particles -- to the antipode. ``ang_pow`` raises the
         tanh-normal theta to a power, so kappa sets the angular scale and
-        ang_pow the shape: one moment each, instead of one for both."""
+        ang_pow the shape: one moment each, instead of one for both. ``rng``
+        (legofmt.rng.EventRNG) draws theta / phi from ``stream`` / ``stream + 1``
+        at the per-event element ids ``elem`` (shape ``n``)."""
+        normal = lambda: torch.randn(n, device=loc_cc.device) if rng is None else rng.normal(stream, elem).to(loc_cc)
         loc = self.to_sph(loc_cc).expand((*n, -1))
         if bs_frac > 0.0:
             loc = loc.clone()
             loc[:round(bs_frac * n[0]), ..., 0] += torch.pi
         loc_theta, loc_phi = loc.split(1, -1)
         if tanh_theta:
-            t = (torch.randn(n, device=loc_cc.device) / kappa).tanh().abs()
+            t = (normal() / kappa).tanh().abs()
             if ang_pow is not None:   # a CUDA normal draw is exactly 0 ~once in 2**24, where t^p has an infinite slope
                 pos = t > 0
                 t = torch.where(pos, torch.where(pos, t, torch.ones_like(t)).pow(ang_pow), torch.zeros_like(t))
             samples_theta = torch.pi * t
         else:
-            z = 2 / kappa * torch.randn(n, device=loc_cc.device)
+            z = 2 / kappa * normal()
             samples_theta = ((z + torch.pi) % (2 * torch.pi) - torch.pi).abs()   # wrapped normal
-        samples_phi = 2 * torch.pi * torch.rand_like(samples_theta)
+        samples_phi = 2 * torch.pi * (torch.rand_like(samples_theta) if rng is None
+                                      else rng.uniform(stream + 1, elem).to(samples_theta))
         sph = torch.stack((samples_theta, samples_phi), dim=-1)
         return self.to_cc(self.rotate(sph, loc_theta, loc_phi + torch.pi / 2))
 
-    def sample_iso(self, n: tuple, mpct, device=None):
-        """mpct isotropic unit directions per event."""
-        phi = 2 * torch.pi * torch.rand((*n, mpct), device=device)
-        theta = torch.acos(2 * torch.rand((*n, mpct), device=device) - 1)
+    def sample_iso(self, n: tuple, mpct, device=None, rng=None, elem=None, stream: int = 0):
+        """mpct isotropic unit directions per event; ``rng`` as in ``sample``."""
+        ids = None if rng is None else elem[..., None] * mpct + torch.arange(mpct, device=elem.device)
+        rand = lambda s: (torch.rand((*n, mpct), device=device) if rng is None
+                          else rng.uniform(stream + s, ids).float().to(device))
+        phi = 2 * torch.pi * rand(0)
+        theta = torch.acos(2 * rand(1) - 1)
         return self.to_cc(torch.stack((theta, phi), dim=-1)).flatten(-2)
