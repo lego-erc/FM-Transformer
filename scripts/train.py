@@ -144,8 +144,12 @@ if compile_mode == "model":  # fm: the ProjectModel; mult: the count Decoder wra
 
 if run.get("data_seed") is not None:
     torch.manual_seed(int(run["data_seed"]))
-# resume_ckpt: a Lightning checkpoint (optimizer, scheduler, epoch) to continue from
-trainer.fit(model=model, ckpt_path=run.get("resume_ckpt"))
+# resume_ckpt: a Lightning checkpoint (optimizer, scheduler, epoch) to continue from. fit restores it only after
+# setup, so freeze the base head here: otherwise setup pretrains a new one that the restore then overwrites
+resume_ckpt = run.get("resume_ckpt")
+if resume_ckpt and hasattr(model, "base_head"):
+    model.base_head.requires_grad_(False)
+trainer.fit(model=model, ckpt_path=resume_ckpt)
 if not trainer.is_global_zero:  # one writer: concurrent torch.save to one path can corrupt it
     raise SystemExit(0)
 
