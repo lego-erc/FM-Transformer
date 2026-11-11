@@ -31,6 +31,7 @@ class GenerateBase:
         self.edep_mu = 0.0   # per-event edep base params; overwritten by LEGOLtng's base_head
         self.edep_sig = 1.0
         self.ang_pow = None  # per-event angular shape; set by base_head when ang_shape
+        self.sm_pow = 1.0    # sm_norm shape q: u = 1 - tanh(sm |z|^q); set per slot by base_head_lik
 
         if self.base_dist not in ("poles", "iso", "iso_pos"):
             raise ValueError(f"base_dist must be 'poles', 'iso', or 'iso_pos', got {self.base_dist!r}")
@@ -54,7 +55,7 @@ class GenerateBase:
         elif self.scale_dist == "uniform":
             u = torch.rand((*shape, 1), device=e_in.device) if u is None else u
         elif self.scale_dist == "sm_norm":
-            u = 1 - torch.tanh(normal().abs() * self.sm_scale)
+            u = 1 - torch.tanh(normal().abs().pow(self.sm_pow) * self.sm_scale)
         elif self.scale_dist == "logit_norm":
             u = torch.sigmoid(normal())  # smooth, symmetric on (0,1)
         else:

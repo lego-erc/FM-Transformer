@@ -68,7 +68,7 @@ def test_head_params_gradient_finite_at_normal_incidence() -> None:
     f[:, 5, 1:4] = torch.tensor([0.0, 0.0, 1.0])
     f[:, 5, 4:7] = torch.tensor([0.0, 0.0, -1.0])
     f.requires_grad_()   # every cell, the incoming row included: in a sampled event they share one graph
-    _, mu, sig, _, _ = m.base_head_params(DataStruct(f, ds.m.full, ds.am.full))
+    _, mu, sig, _, _, _ = m.base_head_params(DataStruct(f, ds.m.full, ds.am.full))
     (g,) = torch.autograd.grad((mu + sig).sum(), f)
     assert torch.isfinite(g).all()
 

@@ -46,7 +46,7 @@ def test_a_deposit_far_below_its_prior_stays_a_deposit() -> None:
     # (E_dep == 0) for the count model, so the continuum is held at 4.4 sigmas
     model = _model()
     ds = _head_batch(torch.full((2,), 0.5), torch.ones(2, dtype=torch.long))
-    _, mu, sig, _, _ = model.base_head_params(ds)
+    _, mu, sig, _, _, _ = model.base_head_params(ds)
     edep = model.gen_base.e_dep_max * torch.sigmoid(mu.reshape(-1) + torch.tensor([-5.0, -8.0]) * sig.reshape(-1))
     ds = _head_batch(edep, torch.ones(2, dtype=torch.long))
     back = model._edep_whiten(model._edep_whiten(ds.f.full, ds), ds, inverse=True)[:, 1, 0]
@@ -84,7 +84,7 @@ def test_capped_scale_keeps_broad_priors_on_a_finer_grid() -> None:
     model = _model()
     ds = _head_batch(torch.tensor([0.3, 0.7]), torch.tensor([1, 2]))
     full = model._edep_whiten(ds.f.full, ds)[:, 1, 0]
-    _, mu, sig, _, _ = model.base_head_params(ds)
+    _, mu, sig, _, _, _ = model.base_head_params(ds)
     model.rc = replace(model.rc, edep_whiten_max_sig=0.1)
     capped = model._edep_whiten(ds.f.full, ds)
     assert torch.allclose(capped[:, 1, 0], full * sig.reshape(-1) / sig.reshape(-1).clamp(max=0.1), atol=1e-5)
@@ -99,7 +99,7 @@ def test_feed_hands_the_prior_to_the_network_and_restores_the_filler() -> None:
     model.rc = replace(model.rc, edep_whiten_feed=True)
     ds = _head_batch(torch.tensor([0.3, 0.7]), torch.tensor([1, 2]))
     y = model._edep_whiten(ds.f.full, ds)
-    _, mu, sig, _, _ = model.base_head_params(ds)
+    _, mu, sig, _, _, _ = model.base_head_params(ds)
     enc = torch.nn.functional.normalize(torch.stack((mu.reshape(-1), torch.ones(2), torch.zeros(2)), -1), dim=-1)
     assert torch.allclose(y[:, 1, 1:4], enc, atol=1e-6)
     assert torch.allclose(y[:, 1, 4:7].norm(dim=-1), torch.ones(2), atol=1e-6)
