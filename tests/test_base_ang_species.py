@@ -11,7 +11,8 @@ import math
 import pytest
 import torch
 
-from legofmt.base_dist.base_nn import BaseDist, build_base_head
+from legofmt.base_dist.base_nn import build_base_head
+from legofmt.legacy.base_nn import LegacyBaseDist
 from legofmt.data.struct import DataStruct
 from test_helpers import GEN_BASE, _base_rc
 
@@ -31,7 +32,7 @@ def test_per_slot_prior_recovers_species_specific_kappas() -> None:
     """Two species with different opening angles in every event: fitting the per-slot branch of
     _base_moment_loss recovers one kappa per species, while the pooled branch can only settle on a
     compromise between them."""
-    class M(BaseDist):
+    class M(LegacyBaseDist):
         def __init__(self):
             self.rc = _base_rc(ang_species=True, ang_weight=1000.0)
             self.gen_base = GEN_BASE

@@ -15,6 +15,7 @@ import lightning as ltng
 from legofmt.base_dist import base_nn
 from legofmt.base_dist.base_nn import BaseDist, build_base_head, _OT_COUPLING_REQUIRES_LAP
 from legofmt.base_dist.gen_base import GenerateBase
+from legofmt.legacy.base_nn import LegacyBaseDist
 
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt.cfm.edep_ae import build_edep_ae
@@ -62,7 +63,7 @@ def _interacting_only(ds) -> _Interacting:
     return _Interacting(ds, keep_idx)
 
 
-class LEGOLtng(TrainStep, BaseDist, Solvers, ltng.LightningModule):
+class LEGOLtng(TrainStep, LegacyBaseDist, BaseDist, Solvers, ltng.LightningModule):
 
     def __init__(self, full_config: dict) -> None:
         super().__init__()

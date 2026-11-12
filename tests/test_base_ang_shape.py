@@ -12,7 +12,8 @@ import math
 import pytest
 import torch
 
-from legofmt.base_dist.base_nn import BaseDist, build_base_head
+from legofmt.base_dist.base_nn import build_base_head
+from legofmt.legacy.base_nn import LegacyBaseDist
 from legofmt.data.struct import DataStruct
 from legofmt.geometry.geom_trafos import GeomTrafos
 from test_helpers import GEN_BASE, _base_rc
@@ -102,7 +103,7 @@ def test_two_moments_are_matchable_only_with_the_extra_parameter() -> None:
 
 
 def test_ang_weight_scales_only_the_angular_term() -> None:
-    class M(BaseDist):
+    class M(LegacyBaseDist):
         def __init__(self, w):
             self.rc = _base_rc(ang_weight=w)
             self.gen_base = GEN_BASE
