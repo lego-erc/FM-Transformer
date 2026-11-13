@@ -122,10 +122,8 @@ class Solvers:
             x_init = self.gen_base_wrapper(ds_t, rng=rng)
         if x_init.shape == ds_t.f.model_in.shape:
             x_init = x_init.where(ds_t.am.full.unsqueeze(-1), _F(x_init).in_p)
-        if self.rc.edep_whiten:
-            x_init = self._edep_whiten(x_init, ds_t)
         # model_conf.edep_ae: the latent z (B, K) starts from N(0, 1) and is integrated with the event; it travels
-        # through chunked / bucketed packed into R extra rows of the output and is split off below
+        # through chunked / bucketed packed into R extra tokens of the output and is split off below
         K, C = self.rc.n_lat, x_init.shape[-1]
         R = -(-K // C)
         z_init = ()
@@ -140,6 +138,8 @@ class Solvers:
                 time_grid = time_grid.flip(0)
         else:  # explicit grids (e.g. a YAML list) are used as given; ``reverse`` only flips the built one
             time_grid = torch.as_tensor(time_grid, dtype=x_init.dtype, device=x_init.device)
+        if time_grid[0] > 0:   # a start past t = 0 is a state as solve returns it (reverse: the data), E_dep a deposit
+            x_init = self._edep_whiten(x_init, ds_t)
 
         def _sample(x_init, mask, attn_mask, pdgids_idx, *z):
             # contiguous: a dynamic graph is guarded on the strides / offsets of the bucket and chunk views
@@ -172,7 +172,7 @@ class Solvers:
             L = ds_t.am.full.shape[1]
             sols, z = sols[..., :L, :], sols[..., L:, :].flatten(-2)[..., :K]
             self._edep_latents = z if z.dim() == 2 else z[-1]  # the final state's, with return_intermediates
-        return self._edep_whiten(sols, ds_t, inverse=True) if self.rc.edep_whiten else sols
+        return self._edep_whiten(sols, ds_t, inverse=True)
 
     def _field(self, x: Tensor, t, z: Tensor | None, **kw) -> tuple[Tensor, Tensor | None]:
         """The velocity, and that of the ``model_conf.edep_ae`` latent ``z`` (``None`` without it)."""
@@ -279,7 +279,7 @@ class Solvers:
         am     = ds_t.am.full.unsqueeze(-1)
 
         if cfg.get("return_base", False):
-            sols = base.masked_fill(~am, torch.nan)
+            sols = self._edep_whiten(base, ds_t, inverse=True).masked_fill(~am, torch.nan)
         else:
             amp = _amp_dtype(cfg["amp"]) if "amp" in cfg else self.rc.amp_dtype
             with contextlib.nullcontext() if amp is None else torch.autocast(base.device.type, dtype=amp):

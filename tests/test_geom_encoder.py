@@ -3,7 +3,7 @@
 A small bidirectional transformer over one token per layer ([thickness mm, density g/cm3, Z, A], beam side first,
 plus radiation / interaction lengths and Fourier features of the cumulative depth) prepends K summary tokens to the
 flow's sequence. They are conditioning tokens (t = 1, d = 0), never transported and dropped before the output
-projection. With ``hide_scalars`` the composite Density / Z / A / Size rows stay in the data (the base head and
+projection. With ``hide_scalars`` the composite Density / Z / A / Size tokens stay in the data (the base head and
 the count model read them) but are masked out of the flow's attention, so the stack reaches the flow only through
 the tokens.
 """
@@ -69,23 +69,23 @@ def test_tokens_have_the_flow_width_and_see_the_layer_order() -> None:
     assert not torch.allclose(enc(), rev())
 
 
-def test_output_shape_and_conditioning_rows_unchanged() -> None:
+def test_output_shape_and_conditioning_tokens_unchanged() -> None:
     m = _model()
     _wake(m)
     ds = _fake_batch()
     v = _velocity(m, ds)
     assert v.shape == ds.f.full.shape[:2] + (7,)
-    cond_rows = ds.m.full == 0
-    assert v[cond_rows].abs().max() == 0
+    cond_tokens = ds.m.full == 0
+    assert v[cond_tokens].abs().max() == 0
 
 
 @pytest.mark.parametrize("hide", [True, False])
-def test_hidden_scalar_rows_do_not_reach_the_generated_rows(hide: bool) -> None:
+def test_hidden_scalar_tokens_do_not_reach_the_generated_tokens(hide: bool) -> None:
     m = _model({**GEOM, "hide_scalars": hide})
     _wake(m)
     ds = _fake_batch()
     f2 = ds.f.full.clone()
-    f2[:, 0, 0] = 7.0                                  # the Density row
+    f2[:, 0, 0] = 7.0                                  # the Density token
     ds2 = type(ds)(f2, ds.m.full, ds.am.full)
     gen = ds.m.full == 1
     same = torch.allclose(_velocity(m, ds)[gen], _velocity(m, ds2)[gen], atol=1e-6)

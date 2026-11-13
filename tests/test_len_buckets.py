@@ -40,8 +40,8 @@ def _muon_cosine() -> dict:
 def _ragged_batch(n_out=N_OUT, edep_generated: bool = False) -> DataStruct:
     """``_fake_batch`` at ``L_MAX`` with event i keeping only ``n_out[i]`` outgoing
     particles: compacted to the front, the rest padding (``m = 0``, ``am = False``).
-    Padding rows hold finite on-manifold filler and pdgid 0, like ``DataPrep``'s
-    ``nan_to_num(1)`` rows; zeros would project to NaN, and NaN * 0 survives a mask."""
+    Padding tokens hold finite on-manifold filler and pdgid 0, like ``DataPrep``'s
+    ``nan_to_num(1)`` tokens; zeros would project to NaN, and NaN * 0 survives a mask."""
     ds = _fake_batch(B=len(n_out), L=L_MAX, edep_generated=edep_generated)
     f, m, am = ds.f.full.clone(), ds.m.full.clone(), ds.am.full.clone()
     for i, n in enumerate(n_out):

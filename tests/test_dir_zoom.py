@@ -79,7 +79,7 @@ def test_config_resolves_the_dir_zoom_keys() -> None:
         resolve_legoltng_config(_tiny_config(dir_zoom=THETA_S, dir_zoom_nucleons_max=-1))
 
 
-def test_only_outgoing_rows_of_forward_events_are_zoomed() -> None:
+def test_only_outgoing_tokens_of_forward_events_are_zoomed() -> None:
     model = _model()
     ds = _fake_batch()
     x, am = ds.f.full, ds.am.full
@@ -87,12 +87,12 @@ def test_only_outgoing_rows_of_forward_events_are_zoomed() -> None:
     fwd[0] = False
     z = model._zoom_dirs(x, am, fwd)
     n = model.rc.n_prefix
-    out_rows = am.clone()
-    out_rows[:, :n + 1] = False
-    out_rows[0] = False
-    assert torch.equal(z[~out_rows], x[~out_rows])
-    assert torch.equal(z[out_rows][:, [0, 4, 5, 6, 7]], x[out_rows][:, [0, 4, 5, 6, 7]])
-    assert not torch.allclose(z[out_rows][:, 1:4], x[out_rows][:, 1:4])
+    out_tokens = am.clone()
+    out_tokens[:, :n + 1] = False
+    out_tokens[0] = False
+    assert torch.equal(z[~out_tokens], x[~out_tokens])
+    assert torch.equal(z[out_tokens][:, [0, 4, 5, 6, 7]], x[out_tokens][:, [0, 4, 5, 6, 7]])
+    assert not torch.allclose(z[out_tokens][:, 1:4], x[out_tokens][:, 1:4])
 
 
 def test_events_with_more_nucleons_than_the_gate_are_not_zoomed() -> None:

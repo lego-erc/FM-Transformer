@@ -1,6 +1,6 @@
 """The hand-unrolled solvers transport only ``mask == 1`` slots and stay on the manifold.
 
-Conditioning and pad rows must come back bit-identical to ``x_init`` (a solver once
+Conditioning and pad tokens must come back bit-identical to ``x_init`` (a solver once
 moved them), and the sphere factors must stay unit: ``rk4`` used to run through
 flow_matching's Euclidean ``ODESolver``, which let them drift off the sphere.
 """
@@ -15,7 +15,7 @@ from test_helpers import _fake_batch, _tiny_config
 
 
 @pytest.mark.parametrize("method", ["euler", "midpoint", "rk4"])
-def test_solver_keeps_conditioning_rows_and_the_manifold(method: str) -> None:
+def test_solver_keeps_conditioning_tokens_and_the_manifold(method: str) -> None:
     torch.manual_seed(0)
     m = LEGOLtng(_tiny_config())
     with torch.no_grad():  # a fast field, so drift off the sphere would be visible

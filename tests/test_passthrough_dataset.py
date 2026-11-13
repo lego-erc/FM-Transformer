@@ -54,7 +54,7 @@ def test_a_zero_deposit_event_with_secondaries_is_kept() -> None:
     assert len(_interacting_only(_dataset([0.0], [2]))) == 1
 
 
-def test_the_surviving_edep_row_is_strictly_positive() -> None:
+def test_the_surviving_edep_token_is_strictly_positive() -> None:
     view = _interacting_only(_dataset([0.0, 0.3, 0.0, 0.0, 1.0], [1, 1, 1, 1, 2]))
     assert all(e > 0 for e in _edeps(view))
 

@@ -59,10 +59,10 @@ class ResolvedLEGOConfig:
     one_step_euler_every: int
     learned_loss_weights: bool
     edep_cell: bool
-    edep_whiten: bool            # the E_dep row in units of the base head's per-event prior (BaseDist._edep_whiten)
-    edep_whiten_max_sig: float | None  # cap on that unit (logit), so a broad prior keeps a fine MeV grid; None = no cap
-    edep_whiten_feed: bool       # hand each event's (mu, unit) to the network on the E_dep row's direction factors
-    edep_whiten_global: tuple[float, float] | None  # (c, s): one logit map y = (logit u - c) / s for every event
+    edep_whiten: bool            # the E_dep token in units of the base head's per-event prior; off: legacy.edep_token
+    edep_whiten_max_sig: float | None  # legacy.edep_token: cap on that unit (logit) for a finer MeV grid; None = no cap
+    edep_whiten_feed: bool       # legacy.edep_token: each event's (mu, unit) on the E_dep token's direction factors
+    edep_whiten_global: tuple[float, float] | None  # legacy.edep_token: (c, s), one map y = (logit u - c) / s for all
     dir_zoom: float | None       # theta_s of the outgoing-direction polar zoom (rad); None = off
     dir_zoom_mix: float          # linear share of that zoom; 0 = pure log
     dir_zoom_nucleons_max: int | None  # events with more outgoing nucleons (nuclear interactions) are not zoomed
@@ -236,6 +236,10 @@ _LEGO_DEFAULTS = {
     "dir_zoom_nucleons_max": None, "max_loss_weight": -6.0, "overflow_delta": 0.0, "canon_sym": False,
     "sym_aug": False, "reflow_path": None, "reflow_every": 1, "reflow_start_epoch": 0,
 }
+# base_conf flags a base_head_lik config must set: tanh_theta is the angular distribution its likelihood assumes,
+# the others name what that head always does. And the conditioning scalars its inputs are built from.
+_LIK_FLAGS = ("tanh_theta", "base_head_nout", "ang_shape", "ang_nout", "ang_species")
+_BASE_HEAD_SCALARS = ("Z", "A", "Size")
 
 
 def _build_resolved(config: dict, max_seq_l: int, pdgids: torch.Tensor, state_dict: dict | None) -> ResolvedLEGOConfig:
@@ -274,6 +278,20 @@ def _build_resolved(config: dict, max_seq_l: int, pdgids: torch.Tensor, state_di
     if c["canon_sym"] and cuboid_dim and len(set(cuboid_dim)) > 1:
         raise ValueError(f"canon_sym rotates every face onto +x, which is a symmetry of a cube only; "
                          f"got cuboid_dim={cuboid_dim}.")
+    base_conf = config.get("base_conf") or {}
+    if base_conf.get("base_head_lik", False):
+        missing = [k for k in _LIK_FLAGS if not base_conf.get(k, False)]
+        if missing or base_conf.get("scale_dist") != "sm_norm":
+            raise ValueError(f"base_head_lik needs scale_dist sm_norm and {_LIK_FLAGS} (its two passes); got "
+                             f"scale_dist {base_conf.get('scale_dist')!r}, missing {missing}.")
+        if base_conf.get("base_head") is None and c["base_pretrain_batches"] <= 0:
+            raise ValueError("base_head_lik needs base_pretrain_batches > 0 or a saved base_conf.base_head.")
+        if not all(s in cond_scalars for s in _BASE_HEAD_SCALARS):
+            raise ValueError(f"base_head needs the {_BASE_HEAD_SCALARS} conditioning scalars; "
+                             f"got cond_scalars={cond_scalars}.")
+        hidden = base_conf.get("base_head_hidden")
+        if hidden is not None and len(hidden) != 2:
+            raise ValueError(f"base_head_lik needs base_head_hidden [trunk, group], got {hidden}.")
     len_buckets = resolve_len_buckets(dl_conf.get("len_buckets"), max_seq_l)
     len_mode = dl_conf.get("len_mode", "split")
     len_split = dl_conf.get("len_split", 8)

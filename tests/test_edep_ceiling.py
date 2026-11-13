@@ -2,7 +2,7 @@
 that cannot deposit more (e-, gamma, p; e+ plus the 1.022 MeV its annihilation
 releases) and leaves pi+- and n alone, whose captures release rest mass / binding
 energy (stack59 500k test set: pi+- exceed E_in in 14-17% of events, by up to 178 MeV).
-The flow's E_dep row has no wall at E_in -- it is normalised by ``max_energy``."""
+The flow's E_dep token has no wall at E_in -- it is normalised by ``max_energy``."""
 
 from __future__ import annotations
 

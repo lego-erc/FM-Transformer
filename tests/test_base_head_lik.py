@@ -12,11 +12,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from legofmt.base_dist.base_nn import BaseHeadLik, _ang_logp, _en_logp
-from legofmt.base_dist.gen_base import GenerateBase
+from legofmt.base_dist.base_dists import Angles, Energy
+from legofmt.base_dist.nn import BaseHead
+from legofmt.base_dist.nn_fit import angles_logp, energy_logp, head_nll
+from legofmt.base_dist.gen_base import GenerateBase, sample_directions
 from legofmt.data.struct import DataStruct
-from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.main.modules import LEGOLtng
+from legofmt.rng import Noise
 from test_helpers import _head_batch, _head_config
 
 W0 = 3e-4
@@ -60,9 +62,9 @@ def test_energy_density_is_the_derivative_of_the_sampler_cdf(s, q) -> None:
     h = 1e-6
     num = (cdf(u + h) - cdf(u - h)) / (2 * h)
     sv, qv = torch.full_like(u, s), torch.full_like(u, q)
-    assert torch.allclose(_en_logp(u, sv, qv, eps=0.0).exp(), num, rtol=1e-5)
+    assert torch.allclose(energy_logp(Energy(sv, qv), u, eps=0.0).exp(), num, rtol=1e-5)
     # the outlier mixture: (1 - eps) p + eps
-    assert torch.allclose(_en_logp(u, sv, qv).exp(), (1 - 1e-3) * num + 1e-3, rtol=1e-5)
+    assert torch.allclose(energy_logp(Energy(sv, qv), u).exp(), (1 - 1e-3) * num + 1e-3, rtol=1e-5)
 
 
 @pytest.mark.parametrize("kap, pw", [(8.0, 1.0), (2.0, 0.5), (0.7, 2.5), (15.0, 0.3)])
@@ -72,15 +74,15 @@ def test_angle_density_matches_the_sampler(kap, pw) -> None:
     w = torch.linspace(0.01, 0.95, 48, dtype=torch.float64)
     h = 1e-7
     k, p = torch.full_like(w, kap), torch.full_like(w, pw)
-    assert torch.allclose(_ang_logp(w, k, p, eps=0.0).exp(), (cdf(w + h) - cdf(w - h)) / (2 * h), rtol=1e-5)
+    assert torch.allclose(angles_logp(Angles(k, p), w, eps=0.0).exp(), (cdf(w + h) - cdf(w - h)) / (2 * h), rtol=1e-5)
     # below W0 (float32 directions do not resolve it) a value is scored as the censored mass P(W < W0)
     w0 = torch.tensor([W0], dtype=torch.float64)
-    cen = _ang_logp(torch.tensor([0.0, 1e-4], dtype=torch.float64), k[:2], p[:2])
+    cen = angles_logp(Angles(k[:2], p[:2]), torch.tensor([0.0, 1e-4], dtype=torch.float64))
     assert torch.allclose(cen, ((1 - 1e-3) * cdf(w0) + 1e-3 * W0).log().expand(2), rtol=1e-9)
     # and the sampler draws that law
     torch.manual_seed(0)
     loc = torch.nn.functional.normalize(torch.tensor([[0.3, -0.5, 0.8]]), dim=-1)
-    d = GeomTrafos().sample((200000, 1), loc, torch.tensor(kap), 0.0, True, torch.tensor(pw))
+    d = sample_directions(Angles(torch.tensor(kap), torch.tensor(pw)), loc, Noise((200000, 1), loc.device))
     ws = ((d.reshape(-1, 3) * loc).sum(-1).clamp(-1, 1).acos() / torch.pi).double().sort().values
     emp = torch.arange(1, len(ws) + 1, dtype=torch.float64) / len(ws)
     res = ws >= W0
@@ -199,10 +201,7 @@ def test_fit_base_head_hands_the_sampler_per_slot_scale_and_shape() -> None:
 # ------------------------------------------------------------------ the fit
 def _lik_parts(model: LEGOLtng, ds: DataStruct) -> torch.Tensor:
     fwd = ds.m.full[:, model.rc.n_prefix] == 0
-    sm, mu, sig, kap, pw, q = model.base_head_params(ds)
-    idx = model._species_idx(ds.f.out_p[..., -1], sm.shape[-1])
-    s, q, kap, pw = (t.gather(1, idx) for t in (sm, q, kap, pw))
-    return model._base_lik_loss(ds, fwd, s, mu, sig, kap, pw, q)
+    return head_nll(ds, fwd, model._slot_prior(ds), model.gen_base.e_dep_max)
 
 
 def test_lik_loss_ignores_pad_content() -> None:
@@ -275,8 +274,7 @@ def test_pretrain_if_needed_standardises_on_the_forward_training_events_first() 
     seen = {}
     model.pretrain_base = lambda batches, **kw: seen.update(kw, n=len(list(batches))) or 0.0
     model._pretrain_base_if_needed()
-    n_cls = len(model.pdgids_template) + 1
-    y = model._base_head_x(ds)[~inv][:, [0, 1 + n_cls, 2 + n_cls]]
+    y = model._head_inputs(ds)[0][~inv]
     sd = y.std(0)
     assert (sd[[0, 2]] > 1e-3).all() and sd[1] <= 1e-6
     assert torch.allclose(model.base_head.mean, y.mean(0))
@@ -306,8 +304,9 @@ def test_lik_loss_terms_are_the_per_unit_means() -> None:
     wm, wp = ang(slice(1, 4)), ang(slice(4, 7))
     ok = edep > 0
     y = torch.logit(edep[ok].clamp(1e-4, 1 - 1e-4))
-    ref = torch.stack((-_en_logp(u, s, q)[c].mean(),
-                       -(_ang_logp(wm, kap, pw, eps=1e-3) + _ang_logp(wp, kap, pw, eps=1e-3))[valid].mean(),
+    ref = torch.stack((-energy_logp(Energy(s, q), u)[c].mean(),
+                       -(angles_logp(Angles(kap, pw), wm, eps=1e-3)
+                         + angles_logp(Angles(kap, pw), wp, eps=1e-3))[valid].mean(),
                        -torch.distributions.Normal(mu[ok, 0], sig[ok, 0]).log_prob(y).mean().double()))
     assert torch.allclose(got, ref, rtol=1e-6, atol=0)
 
@@ -355,17 +354,18 @@ def test_energy_and_angle_shapes_are_clamped() -> None:
 def test_lik_head_standardises_energy_chord_log_t_and_drops_a_constant_one() -> None:
     torch.manual_seed(0)
     n = 4
-    h = BaseHeadLik(n, [8, 8], 0.5, 8.0)
+    h = BaseHead(n, [8, 8], 0.5, 8.0)
     with torch.no_grad():
         for p in h.parameters():
             p.add_(0.3 * torch.randn(p.shape))
         h.mean.copy_(torch.tensor([0.5, 0.4, 4.0]))
         h.std.copy_(torch.tensor([0.3, 0.2, torch.inf]))   # log t constant on the training set
-    x = torch.rand(16, 3 + n + 1 + n)
-    x[:, 1:1 + n] = torch.nn.functional.one_hot(torch.arange(16) % n, n).float()
-    moved = lambda col: x.clone().index_put_((torch.arange(16), torch.full((16,), col)), torch.full((16,), 9.0))
-    assert torch.equal(h(x), h(moved(2 + n))), "the constant log t column must not reach the head"
-    assert not torch.allclose(h(x), h(moved(1 + n))), "the chord column must reach the head"
+    cont, out_set = torch.rand(16, 3), torch.rand(16, 1 + n)
+    species = torch.nn.functional.one_hot(torch.arange(16) % n, n).float()
+    out = lambda c: torch.cat(h(c, species, out_set), -1)
+    moved = lambda col: cont.clone().index_fill_(1, torch.tensor([col]), 9.0)
+    assert torch.equal(out(cont), out(moved(2))), "the constant log t column must not reach the head"
+    assert not torch.allclose(out(cont), out(moved(1))), "the chord column must reach the head"
 
 
 def test_lik_pretraining_lr_schedule_and_clip(monkeypatch) -> None:

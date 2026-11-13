@@ -27,7 +27,7 @@ def codec():
 
 
 def _event(pen, dp, e_in: float, edep: float, out: list[tuple[int, float]], L: int = 9) -> torch.Tensor:
-    """One (1, L, 8) model-space event: E_dep row, incoming row, outgoing rows (pdgid, MeV), NaN padding."""
+    """One (1, L, 8) model-space event: E_dep token, incoming token, outgoing tokens (pdgid, MeV), NaN padding."""
     set_layout(COND)
     f = torch.full((1, L, 8), float("nan"))
     f[..., 7] = 0.0
@@ -162,12 +162,12 @@ def test_padding_stays_padding(codec) -> None:
     assert _F(f).out_p[0, 2:, :7].isnan().all() and (_F(f).out_p[0, 2:, 7] == 0).all()
 
 
-def _exit_event(rows: list[tuple[list[float], list[float]]], L: int = 12) -> torch.Tensor:
-    """(1, L, 8) event whose outgoing rows carry (momentum direction, position direction), pdgid 11."""
+def _exit_event(tokens: list[tuple[list[float], list[float]]], L: int = 12) -> torch.Tensor:
+    """(1, L, 8) event whose outgoing tokens carry (momentum direction, position direction), pdgid 11."""
     set_layout(COND)
     f = torch.full((1, L, 8), float("nan"))
     f[..., 7] = 0.0
-    for i, (m, u) in enumerate(rows):
+    for i, (m, u) in enumerate(tokens):
         _F(f).out_p[0, i, 1:4] = torch.nn.functional.normalize(torch.tensor(m), dim=0)
         _F(f).out_p[0, i, 4:7] = torch.nn.functional.normalize(torch.tensor(u), dim=0)
         _F(f).out_p[0, i, 0] = 0.5

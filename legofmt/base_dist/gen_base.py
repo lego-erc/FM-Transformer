@@ -1,108 +1,70 @@
-"""Samplers for the flow's base distribution -- the ``x_0`` it integrates from.
+"""The sampler of the flow's base distribution: a draw of ``x_0``, the state the flow integrates from.
 
-``base_dist`` picks the direction prior (``poles`` concentrates around the
-incoming direction; ``iso`` / ``iso_pos`` do not), ``scale_dist`` the energy
-prior, and ``insert_add`` fills the edep row. The sampler must match the
-manifold the flow integrates on.
+```
+energy     u = Energy(s, q).sample(z)                 the outgoing energy, as a fraction of the incoming one
+momentum   w = Angles(kappa, pw).sample(z)            its angle to the incoming momentum, / pi; azimuth uniform
+position   w = Angles(kappa, pw).sample(z)            the same about the incoming position
+E_dep      z                                          the event's deposit, in units of its prior
+```
+
+``z ~ N(0, 1)``, one per cell; the distributions are ``base_dists.py``. Their parameters are the config's constants
+until the base head sets them for a batch (``interface._set_prior``), per outgoing slot.
+
+This is the recipe's draw (``scale_dist: sm_norm``, ``base_dist: poles``, ``tanh_theta`` with the shape exponent,
+``bs_frac: 0``). Every other option is :mod:`legofmt.legacy.gen_base`.
 """
 
 import torch
 import torch.nn.functional as F
 
 from legofmt import rng as R
+from legofmt.base_dist.base_dists import Angles, Energy
 from legofmt.geometry.geom_trafos import GeomTrafos
+from legofmt.legacy.gen_base import LegacySampler
+
+_GEOM = GeomTrafos()
 
 
-class GenerateBase:
-    """Samples the flow's base distribution: directions from base_dist
-    (poles/iso/iso_pos), the energy prior from scale_dist, the E_dep row from
-    insert_add."""
+def sample_directions(angles, axis, noise, stream=0):
+    """Unit directions ``(*noise.shape, 3)`` about ``axis``: the polar angle ``theta = pi w`` with ``w`` drawn from
+    ``angles``, the azimuth ``phi`` uniform. Keyed noise draws them from ``stream`` and ``stream + 1``."""
+    theta = torch.pi * angles.sample(noise.normal(stream).to(axis))
+    phi   = 2 * torch.pi * noise.uniform(stream + 1).to(theta)
+    return _GEOM.direction_about(axis, theta, phi)
+
+
+class GenerateBase(LegacySampler):
+    """Draws ``x_0``: ``__call__`` the outgoing slots, ``insert_add`` the E_dep cell. Holds the distributions'
+    parameters between ``interface._set_prior`` and the draw (``lego_eval`` reads ``edep_mu`` / ``edep_sig`` back)."""
 
     def __init__(self, config: dict):
-        self.geom_trafos = GeomTrafos()
         base_conf = config.get("base_conf") or {}
-        self.base_dist = base_conf.get("base_dist", "poles")
-        self.tanh_theta = base_conf.get("tanh_theta", False)
-        self.kappa = base_conf.get("kappa", torch.tensor(10.0))
+        super().__init__(base_conf)   # the options: scale_dist, base_dist, tanh_theta, bs_frac
         self.e_dep_max = base_conf.get("e_dep_max", 1.)
-        self.bs_frac = base_conf.get("bs_frac", 0.0)
-        self.scale_dist = base_conf.get("scale_dist", "trunc_norm")
-        self.sm_scale = base_conf.get("sm_scale", 0.5)  # sm_norm tanh temperature; larger -> flatter energy base
-        self.edep_mu = 0.0   # per-event edep base params; overwritten by LEGOLtng's base_head
-        self.edep_sig = 1.0
-        self.ang_pow = None  # per-event angular shape; set by base_head when ang_shape
-        self.sm_pow = 1.0    # sm_norm shape q: u = 1 - tanh(sm |z|^q); set per slot by base_head_lik
-
-        if self.base_dist not in ("poles", "iso", "iso_pos"):
-            raise ValueError(f"base_dist must be 'poles', 'iso', or 'iso_pos', got {self.base_dist!r}")
+        self.sm_scale  = base_conf.get("sm_scale", 0.5)               # energy s
+        self.sm_pow    = 1.0                                          # energy q
+        self.kappa     = base_conf.get("kappa", torch.tensor(10.0))   # angles kappa
+        self.ang_pow   = None                                         # angles pw: only a base head sets it
+        self.edep_mu   = 0.0                                          # E_dep mu
+        self.edep_sig  = 1.0                                          # E_dep sig
 
     def __call__(self, shape, incoming_rt, rng=None, elem=None):
-        """``rng`` (legofmt.rng.EventRNG) keys the draws per event, ``elem`` (B, n_out) per slot."""
-        if self.base_dist == "iso":
-            return self.iso_dirs(shape, incoming_rt=incoming_rt, rng=rng, elem=elem)
-        return self.poles(shape, incoming_rt=incoming_rt, iso_pos=(self.base_dist == "iso_pos"), rng=rng, elem=elem)
-
-    def rd_scale(self, shape, e_in, rng=None, elem=None):
-        """Energy prior for the outgoing slots per scale_dist; returns (B, n_out, 1)."""
-        u = None if rng is None else rng.uniform(R.BASE_E, elem)[..., None]   # float64 until the end
-        normal = lambda: torch.randn((*shape, 1), device=e_in.device) if u is None else torch.special.ndtri(u)
-        if self.scale_dist == "trunc_norm":
-            if u is None:
-                u = torch.nn.init.trunc_normal_(e_in.new_empty((*shape, 1)), std=1.0, a=-1.0, b=0.0) + 1.0
-            else:  # N(0, 1) truncated to [-1, 0] by its inverse CDF
-                lo = torch.special.ndtr(torch.tensor(-1.0, dtype=u.dtype))
-                u = torch.special.ndtri(lo + u * (0.5 - lo)) + 1.0
-        elif self.scale_dist == "uniform":
-            u = torch.rand((*shape, 1), device=e_in.device) if u is None else u
-        elif self.scale_dist == "sm_norm":
-            u = 1 - torch.tanh(normal().abs().pow(self.sm_pow) * self.sm_scale)
-        elif self.scale_dist == "logit_norm":
-            u = torch.sigmoid(normal())  # smooth, symmetric on (0,1)
-        else:
-            raise ValueError("Unknown scale_dist")
-        return e_in.view(-1, 1, 1) * u.to(e_in)
-
-    def poles(self, shape, incoming_rt, iso_pos=False, rng=None, elem=None, **kwargs):
-        p_cc = F.normalize(incoming_rt[..., 1:4], dim=-1)
-        loc_cc = incoming_rt[..., -3:]
-        e_sc = self.rd_scale(shape, torch.ones_like(incoming_rt[..., 0:1]), rng=rng, elem=elem)
-        if iso_pos:
-            x = self.geom_trafos.sample_iso(shape, 1, device=incoming_rt.device, rng=rng, elem=elem, stream=R.BASE_POS)
-        else:
-            x = self.geom_trafos.sample(
-                shape, loc_cc, self.kappa, self.bs_frac, self.tanh_theta, self.ang_pow,
-                rng=rng, elem=elem, stream=R.BASE_POS)
-        p_ = self.geom_trafos.sample(shape, p_cc, self.kappa, 0.0, self.tanh_theta, self.ang_pow,
-                                     rng=rng, elem=elem, stream=R.BASE_MOM)
-        base = torch.cat((e_sc, p_, x), dim=-1)
-        return torch.cat((incoming_rt, base), dim=1)
-
-    def iso_dirs(self, shape, incoming_rt, rng=None, elem=None, **kwargs):
-        # naive base: isotropic momentum/position directions; energy scale from
-        # rd_scale (per scale_dist), E_dep row from insert_add.
-        e_sc = self.rd_scale(shape, torch.ones_like(incoming_rt[..., 0:1]), rng=rng, elem=elem)
-        p_ = self.geom_trafos.sample_iso(shape, 1, device=incoming_rt.device, rng=rng, elem=elem, stream=R.BASE_MOM)
-        x  = self.geom_trafos.sample_iso(shape, 1, device=incoming_rt.device, rng=rng, elem=elem, stream=R.BASE_POS)
-        base = torch.cat((e_sc, p_, x), dim=-1)
-        return torch.cat((incoming_rt, base), dim=1)
-
-    @torch.no_grad()
-    def iso(self, shape, device, rng=None):
-        """Fully isotropic x_0 for inverse-mask events, on all rows; unrelated
-        to base_dist='iso', which routes to iso_dirs."""
-        elem = None if rng is None else torch.arange(shape[1], device=device).expand(shape)
-        e = (torch.rand((*shape, 1), device=device) if rng is None
-             else rng.uniform(R.ISO_E, elem)[..., None].float().to(device))
-        p = self.geom_trafos.sample_iso(shape, 1, device=device, rng=rng, elem=elem, stream=R.ISO_MOM)
-        x = self.geom_trafos.sample_iso(shape, 1, device=device, rng=rng, elem=elem, stream=R.ISO_POS)
-        return torch.cat((e, p, x), dim=-1)
+        """``(B, 1 + n_out, 7)``: the incoming token as given, then a draw (energy, momentum, position) for each of
+        the ``shape`` = (B, n_out) outgoing slots. Without ``rng`` the noise is torch's; ``rng`` (legofmt.rng.EventRNG)
+        keys it per event, ``elem`` (B, n_out) per slot."""
+        if not self.is_recipe(): return super().__call__(shape, incoming_rt, rng, elem)   # any other option
+        noise  = R.Noise(shape, incoming_rt.device, rng, elem)
+        in_mom = F.normalize(incoming_rt[..., 1:4], dim=-1)
+        in_pos = incoming_rt[..., -3:]
+        angles = Angles(self.kappa, self.ang_pow)
+        energy = Energy(self.sm_scale, self.sm_pow).sample(noise.normal(R.BASE_E)[..., None]).to(incoming_rt)
+        pos    = sample_directions(angles, in_pos, noise, R.BASE_POS)   # torch's stream: position before momentum
+        mom    = sample_directions(angles, in_mom, noise, R.BASE_MOM)
+        outgoing = torch.cat((energy, mom, pos), dim=-1)
+        return torch.cat((incoming_rt, outgoing), dim=1)
 
     def insert_add(self, base, rng=None):
-        """Fills the E_dep row's energy cell from the (learned) sigmoid-normal
-        edep_mu/edep_sig, in place."""
-        mu, sig = self.edep_mu, self.edep_sig
-        if torch.is_tensor(mu):
-            mu, sig = mu.squeeze(-1), sig.squeeze(-1)
-        z = torch.randn_like(base[:, 1, 0]) if rng is None else rng.normal(R.EDEP).to(base)
-        base[:, 1, 0] = self.e_dep_max * torch.sigmoid(mu + sig * z)
+        """Fills the E_dep token's energy cell with ``z ~ N(0, 1)``, in place: the flow carries E_dep in units of the
+        event's prior (``edep_whiten.py``), where the prior is the standard normal."""
+        base[:, 1, 0] = R.Noise(base.shape[:1], base.device, rng).normal(R.EDEP).to(base)
         return base

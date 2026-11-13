@@ -12,10 +12,11 @@ from torch.utils.data import DataLoader, Subset, random_split
 
 import lightning as ltng
 
-from legofmt.base_dist import base_nn
-from legofmt.base_dist.base_nn import BaseDist, build_base_head, _OT_COUPLING_REQUIRES_LAP
+from legofmt.base_dist import ot_coupling
+from legofmt.base_dist.interface import BaseDist, build_base_head
 from legofmt.base_dist.gen_base import GenerateBase
 from legofmt.legacy.base_nn import LegacyBaseDist
+from legofmt.legacy.edep_token import LegacyEdepToken
 
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt.cfm.edep_ae import build_edep_ae
@@ -63,7 +64,7 @@ def _interacting_only(ds) -> _Interacting:
     return _Interacting(ds, keep_idx)
 
 
-class LEGOLtng(TrainStep, LegacyBaseDist, BaseDist, Solvers, ltng.LightningModule):
+class LEGOLtng(TrainStep, LegacyEdepToken, LegacyBaseDist, BaseDist, Solvers, ltng.LightningModule):
 
     def __init__(self, full_config: dict) -> None:
         super().__init__()
@@ -82,7 +83,6 @@ class LEGOLtng(TrainStep, LegacyBaseDist, BaseDist, Solvers, ltng.LightningModul
         self.val_metrics = ShowerValMetrics()
         self.ps          = ProductPathSampler(self.rc.manifold)
 
-        self._base_head_loss = None
         # frozen per-layer E_dep autoencoder: its K latents are flown as one token of the field (model_args.lat_dim);
         # solve leaves the generated latents in _edep_latents
         self.edep_ae = build_edep_ae(self.rc.edep_ae) if self.rc.edep_ae else None
@@ -114,7 +114,7 @@ class LEGOLtng(TrainStep, LegacyBaseDist, BaseDist, Solvers, ltng.LightningModul
 
         if self.rc.state_dict is not None:
             if self.rc.n_lat and self.rc.state_dict and "lat_in.weight" not in self.rc.state_dict:  # strict=False
-                raise ValueError("model_conf.edep_ae checkpoint without the latent token (lat_in): the 16-row "
+                raise ValueError("model_conf.edep_ae checkpoint without the latent token (lat_in): the 16-token "
                                  "prototype (feat/edep-latents) is not supported.")
             self.model.vf.load_state_dict(self.rc.state_dict, strict=False)
 
@@ -143,8 +143,8 @@ class LEGOLtng(TrainStep, LegacyBaseDist, BaseDist, Solvers, ltng.LightningModul
 
     @torch.no_grad()
     def on_fit_start(self) -> None:
-        if self.rc.ot_coupling and base_nn.batch_linear_assignment is None:
-            raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
+        if self.rc.ot_coupling and ot_coupling.batch_linear_assignment is None:
+            raise RuntimeError(ot_coupling._OT_COUPLING_REQUIRES_LAP)
         if self.reflow_teacher is not None:
             self.reflow_teacher.to(self.device)
         self.model.train()
@@ -174,26 +174,26 @@ class LEGOLtng(TrainStep, LegacyBaseDist, BaseDist, Solvers, ltng.LightningModul
 
     def _canon_dirs(self, x: Tensor, face: Tensor, fwd: Tensor, inverse: bool = False,
                     g: Tensor | None = None) -> Tensor:
-        rot  = self.sym.uncanonicalize if inverse else self.sym.canonicalize
-        dirs = rot(torch.stack((x[..., 1:4], x[..., 4:7]), dim=-2), face, g)
-        new  = torch.cat((x[..., 0:1], dirs[..., 0, :], dirs[..., 1, :], x[..., 7:]), dim=-1)
-        rows = torch.arange(x.shape[-2], device=x.device) >= self.rc.n_prefix
-        new  = torch.where(rows.view(1, -1, 1), new, x)
+        rot    = self.sym.uncanonicalize if inverse else self.sym.canonicalize
+        dirs   = rot(torch.stack((x[..., 1:4], x[..., 4:7]), dim=-2), face, g)
+        new    = torch.cat((x[..., 0:1], dirs[..., 0, :], dirs[..., 1, :], x[..., 7:]), dim=-1)
+        tokens = torch.arange(x.shape[-2], device=x.device) >= self.rc.n_prefix
+        new    = torch.where(tokens.view(1, -1, 1), new, x)
         return torch.where(fwd[:, None, None], new, x)
 
     def _zoom_dirs(self, x: Tensor, am: Tensor, fwd: Tensor, inverse: bool = False,
                    pdgids: Tensor | None = None) -> Tensor:
-        u    = x[..., self.rc.n_prefix:self.rc.n_prefix + 1, 1:4]
-        dirs = zoom_polar(x[..., 1:4], u, self.rc.dir_zoom, inverse, self.rc.dir_zoom_mix)
-        new  = torch.cat((x[..., 0:1], dirs, x[..., 4:]), dim=-1)
-        rows = torch.arange(x.shape[-2], device=x.device) > self.rc.n_prefix
+        u      = x[..., self.rc.n_prefix:self.rc.n_prefix + 1, 1:4]
+        dirs   = zoom_polar(x[..., 1:4], u, self.rc.dir_zoom, inverse, self.rc.dir_zoom_mix)
+        new    = torch.cat((x[..., 0:1], dirs, x[..., 4:]), dim=-1)
+        tokens =torch.arange(x.shape[-2], device=x.device) > self.rc.n_prefix
         if self.rc.dir_zoom_nucleons_max is not None:
             nucleons = torch.tensor([2112.0, 2212.0], device=x.device)
             if self.rc.pdgid_is_idx:
                 nucleons = self.convert_pdgids(nucleons).to(pdgids.dtype)
-            n_nuc = (am & rows & torch.isin(pdgids[..., 0], nucleons)).sum(-1)
+            n_nuc = (am & tokens & torch.isin(pdgids[..., 0], nucleons)).sum(-1)
             fwd = fwd & (n_nuc <= self.rc.dir_zoom_nucleons_max)
-        return torch.where((am & rows & fwd[:, None]).unsqueeze(-1), new, x)
+        return torch.where((am & tokens & fwd[:, None]).unsqueeze(-1), new, x)
 
     def configure_optimizers(self):
         if self._lr_sched is not None:  # the trainer's exact count, not scripts/train.py's dataset_size estimate

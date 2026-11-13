@@ -12,10 +12,10 @@ import math
 import pytest
 import torch
 
-from legofmt.base_dist.base_nn import build_base_head
+from legofmt.base_dist.interface import build_base_head
 from legofmt.legacy.base_nn import LegacyBaseDist
 from legofmt.data.struct import DataStruct
-from legofmt.geometry.geom_trafos import GeomTrafos
+from legofmt.legacy.gen_base import sample_dirs
 from test_helpers import GEN_BASE, _base_rc
 
 
@@ -26,14 +26,13 @@ def _theta(kappa, ang_pow, n=200000, seed=0):
 
 
 def test_ang_pow_defaults_to_the_old_sampler() -> None:
-    g = GeomTrafos()
     loc = torch.tensor([[[0.0, 0.0, 1.0]]])
     torch.manual_seed(0)
-    a = g.sample((1, 8), loc, torch.tensor(8.0), 0.0, True)
+    a = sample_dirs((1, 8), loc, torch.tensor(8.0), 0.0, True)
     torch.manual_seed(0)
-    b = g.sample((1, 8), loc, torch.tensor(8.0), 0.0, True, None)
+    b = sample_dirs((1, 8), loc, torch.tensor(8.0), 0.0, True, None)
     torch.manual_seed(0)
-    c = g.sample((1, 8), loc, torch.tensor(8.0), 0.0, True, torch.tensor(1.0))
+    c = sample_dirs((1, 8), loc, torch.tensor(8.0), 0.0, True, torch.tensor(1.0))
     assert torch.equal(a, b) and torch.allclose(a, c, atol=1e-6)
 
 
@@ -56,10 +55,9 @@ def test_ang_pow_changes_the_shape_at_a_fixed_mean() -> None:
 
 
 def test_sampler_is_finite_and_on_the_sphere() -> None:
-    g = GeomTrafos()
     loc = torch.nn.functional.normalize(torch.randn(4, 1, 3), dim=-1)
     for pw in (None, torch.full((4, 1), 0.4), torch.full((4, 1), 3.0)):
-        d = g.sample((4, 6), loc, torch.full((4, 1), 8.0), 0.0, True, pw)
+        d = sample_dirs((4, 6), loc, torch.full((4, 1), 8.0), 0.0, True, pw)
         v = d.view(4, 6, 3)
         assert torch.isfinite(v).all()
         assert torch.allclose(v.norm(dim=-1), torch.ones(4, 6), atol=1e-5)

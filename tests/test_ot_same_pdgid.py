@@ -16,14 +16,14 @@ import itertools
 
 import torch
 
-from legofmt.base_dist import base_nn
+from legofmt.base_dist import ot_coupling
 from legofmt.data.struct import DataStruct
 from legofmt.main.modules import LEGOLtng
 from test_helpers import _fake_batch, _tiny_config
 
 
 def _batch() -> DataStruct:
-    """``_fake_batch`` with 4 outgoing slots, pdgids [22, 22, 211, 211], and the E_dep row generated."""
+    """``_fake_batch`` with 4 outgoing slots, pdgids [22, 22, 211, 211], and the E_dep token generated."""
     ds = _fake_batch(B=3, L=7, edep_generated=True)
     ds.f.full[:, 3:, 7] = torch.tensor([22.0, 22.0, 211.0, 211.0])
     return ds
@@ -48,7 +48,7 @@ class _BruteLap:
 
 def _run(monkeypatch) -> tuple[_BruteLap, torch.Tensor]:
     lap = _BruteLap()
-    monkeypatch.setattr(base_nn, "batch_linear_assignment", lap)
+    monkeypatch.setattr(ot_coupling, "batch_linear_assignment", lap)
     model = LEGOLtng(_tiny_config({"max_seq_l": 7}, ot_coupling=True))
     model.on_fit_start()
     model.train()

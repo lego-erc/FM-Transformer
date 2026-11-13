@@ -113,7 +113,7 @@ prep = DataPrep(config)
 # mmap for the n_out pass only: it reads just the attention masks. The merge pass reads everything, and on
 # GPFS faulting a whole chunk in through mmap takes ~5x as long as a plain load.
 paths = [f"{out_dir}/chunks/chunk_{i}.pt" for i in range(n_chunks)]
-n_out = [torch.load(p, weights_only=False, mmap=True)[2].sum(1) - 1 for p in paths]   # outgoing per event; row 0 is the incoming
+n_out = [torch.load(p, weights_only=False, mmap=True)[2].sum(1) - 1 for p in paths]   # outgoing per event; token 0 is the incoming
 sizes = [len(n) for n in n_out]
 n_out = torch.cat(n_out)
 if arg == "stats":
@@ -154,7 +154,7 @@ else:
     packed = PackedData.concat(chunks)
     del chunks
     torch.save(packed.to_dict(), f"{out_dir}/data_packed.pt")
-    ntokens, pids = packed.L, packed.rows[:, -1]
+    ntokens, pids = packed.L, packed.tokens[:, -1]
 
 pdgids = pids.flatten().nan_to_num().unique()
 pdgids = pdgids[(0 < pdgids.abs()) & (pdgids.abs() < 100000000)].tolist() # filter pdgids

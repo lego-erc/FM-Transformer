@@ -1,7 +1,7 @@
-"""Base-distribution paths superseded by ``base_conf.base_head_lik`` (:mod:`legofmt.base_dist.base_nn`), kept so older
+"""Base-distribution paths superseded by ``base_conf.base_head_lik`` (:mod:`legofmt.base_dist.interface`), kept so older
 configs and checkpoints still run unchanged: the moment-matched MLP head and no learned head at all.
 
-``build_legacy_base_head`` is reached from ``base_nn.build_base_head`` for every config without ``base_head_lik``.
+``build_legacy_base_head`` is reached from ``interface.build_base_head`` for every config without ``base_head_lik``.
 ``LegacyBaseDist`` precedes ``BaseDist`` in ``LEGOLtng``'s bases; on a ``base_head_lik`` model each override hands
 straight to ``BaseDist``.
 """
@@ -27,7 +27,7 @@ def build_legacy_base_head(rc, gen_base) -> nn.Module | None:
     """The moment head, or ``None`` when the config wants no head.
 
     The caller assigns the result as ``LEGOLtng.base_head``; the absence of the
-    attribute is what ``_fit_base_head`` and ``setup`` test with ``hasattr``.
+    attribute is what ``_set_prior`` and ``setup`` test with ``hasattr``.
     """
     bc = rc.config.get("base_conf") or {}
     hs = bc.get("base_head")
@@ -84,14 +84,14 @@ class LegacyBaseDist:
             return super().base_head_params(ds_t)
         bc      = self.rc.config.get("base_conf") or {}
         n_cls   = len(self.pdgids_template) + 1
-        x       = self._base_head_x(ds_t)
+        cont, species, extra = self._head_inputs(ds_t)
+        x       = torch.cat((cont[:, :1], species, cont[:, 1:]), dim=-1)   # [E, species one-hot, chord, log t]
         if bc.get("base_head_nout", False):
             # Only E_dep's (mu, sig) see the outgoing set. sm_scale and kappa are
             # read from a second pass with those inputs zeroed -- a constant, so
             # the NLL fits them to the marginal over n_out, as without the flag.
             # Conditioning them too moved kappa 5.6..44.7 across branches and cost
             # 2x on direction losses; conditioning E_dep alone kept the gain.
-            extra   = torch.cat(self._out_set_feats(ds_t), dim=-1)
             both    = torch.cat((torch.cat((x, extra), -1), torch.cat((x, torch.zeros_like(extra)), -1)))
             with torch.autocast(x.device.type, enabled=False):  # fp32 as at inference and in pretraining
                 out_e, out = self.base_head(both).chunk(2)  # one forward for both passes
@@ -151,13 +151,16 @@ class LegacyBaseDist:
         l_kappa = l_kappa * (self.rc.config.get("base_conf") or {}).get("ang_weight", 1.0)
         return l_scale + l_edep + l_kappa
 
-    def _fit_base_head(self, ds_t, fwd) -> None:
-        """No head: nothing to fit. Moment head: as ``BaseDist``'s, with the moment loss, and one ``(kappa, pw)`` per
-        slot only under ``ang_species``."""
+    def _set_prior(self, ds_t) -> None:
+        """No head: nothing to set. Moment head: hand the sampler the head's outputs, one ``(kappa, pw)`` per slot
+        only under ``ang_species``, and while the head is trainable leave the moment loss in ``_base_head_loss``
+        (``pretrain_base`` fits through ``gen_base_wrapper``); only a head being fitted hands over detached values."""
         if not hasattr(self, "base_head"):
             return
         if _lik(self.rc):
-            return super()._fit_base_head(ds_t, fwd)
+            return super()._set_prior(ds_t)
+        self._base_head_loss = None
+        fwd   = ds_t.m.full[:, self.rc.n_prefix] == 0
         learn = self.model.training and next(self.base_head.parameters()).requires_grad
         keep = (lambda v: v.detach()) if learn else (lambda v: v)
         with torch.set_grad_enabled(learn or torch.is_grad_enabled()):
@@ -196,6 +199,7 @@ class LegacyBaseDist:
                     ds_t = DataStruct(self._zoom_dirs(ds_t.f.full, ds_t.am.full, fwd_z, pdgids=ds_t.f.pdgids),
                                       ds_t.m.full, ds_t.am.full)
                 opt.zero_grad()
+                self._base_head_loss = None   # stays None when the batch has no forward event
                 self.gen_base_wrapper(ds_t)
                 if self._base_head_loss is None:
                     continue

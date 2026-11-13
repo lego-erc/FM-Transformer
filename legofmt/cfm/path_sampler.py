@@ -31,7 +31,7 @@ class ProductPathSampler:
                 th = v.norm(dim=-1, keepdim=True)
                 c, s = (t_b * th).cos(), (t_b * th).sin()
                 # normalised like flow_matching's retraction branch, which also maps
-                # the E_dep row's (1, 1, 1) direction filler onto the sphere
+                # the E_dep token's (1, 1, 1) direction filler onto the sphere
                 x_t.append(F.normalize(c * x0 + s * v / th.clamp_min(torch.finfo(th.dtype).tiny), dim=-1))
                 dx_t.append(c * v - th * s * x0)
             elif isinstance(man, Euclidean):

@@ -1,4 +1,4 @@
-"""The sphere factors' expmap must be differentiable at zero velocity: every conditioning row of a solve gets exactly
+"""The sphere factors' expmap must be differentiable at zero velocity: every conditioning token of a solve gets exactly
 zero velocity, and flow_matching's ``Sphere.expmap`` hands ``torch.where`` a ``0/0`` there, which turns the whole
 backward pass NaN (harmless under no_grad, fatal for differentiating a sampled event)."""
 
@@ -32,7 +32,7 @@ def test_expmap_gradient_is_finite_at_zero_velocity() -> None:
     assert torch.isfinite(u.grad).all() and torch.isfinite(x.grad).all()
 
 
-def test_product_expmap_gradient_is_finite_on_conditioning_rows() -> None:
+def test_product_expmap_gradient_is_finite_on_conditioning_tokens() -> None:
     man = build_manifold([{"name": "euclidean", "dim": 1}, {"name": "sphere", "dim": 3}, {"name": "sphere", "dim": 3}])
     g = torch.Generator().manual_seed(1)
     x = torch.cat((torch.rand(8, 1, generator=g), F.normalize(torch.randn(8, 3, generator=g), dim=-1),

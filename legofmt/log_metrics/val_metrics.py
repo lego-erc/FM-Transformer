@@ -151,7 +151,7 @@ class ShowerValMetrics:
             dp = lego._edep_dp
             e_in = dp.pen.from_scalar(ds_t.f.in_cc[:, 0, 1:4], ds_t.f.in_cc[:, 0, 0:1]).norm(dim=-1)
             fake = lego.edep_ae.sample(lego._edep_latents,
-                                       dp.denorm_edep_row(gen.edep.float(), e_in.float(), ds_t.f.in_p[:, 0, -1]))
+                                       dp.denorm_edep_token(gen.edep.float(), e_in.float(), ds_t.f.in_p[:, 0, -1]))
             out.update(edep_layer_metrics(dp.denorm_edep(ds_t.edep_layers.float()), fake))
         return out
 

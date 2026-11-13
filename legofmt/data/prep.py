@@ -16,7 +16,7 @@ from legofmt.geometry.energy_proj import EnergyProjections
 from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.mod_comps.config import build_manifold
 
-# model_conf.edep_wall: the E_dep row's cap is E_in + a margin [MeV] per incoming species -- what Geant4 can deposit
+# model_conf.edep_wall: the E_dep token's cap is E_in + a margin [MeV] per incoming species -- what Geant4 can deposit
 # above E_in. Normally the training data's own largest excess (model_conf.edep_excess_mev, DataPrep.edep_excess_max);
 # these hand-set values only serve checkpoints from before it (e+ annihilation; pions: absorption releases the rest
 # mass, up to +178 MeV in the stack data; neutrons: binding, 3e-5 of events by up to 4.6 MeV). Species not listed get
@@ -74,8 +74,8 @@ class DataPrep:
     @torch.no_grad()
     def cc_trafo(self, cc: Tensor, e_kin: Tensor | None = None) -> Tensor:
         """MeV momenta/positions -> (energy scalar, unit mom dir, unit pos dir)
-        projected onto the manifold; col 0 keeps MeV for the incoming row and
-        stores 1 - log(e_out/cutoff)/log(e_in/cutoff) for outgoing rows. The pos
+        projected onto the manifold; col 0 keeps MeV for the incoming token and
+        stores 1 - log(e_out/cutoff)/log(e_in/cutoff) for outgoing tokens. The pos
         dir is that of x / cuboid_dim: the point on the unit cube the cuboid maps to."""
         cc = cc.nan_to_num(1)
         mom, pos = cc.split(3, -1)
@@ -101,7 +101,7 @@ class DataPrep:
         """MeV -> model scale for the two channels that depend on ``max_energy``,
         so a dataset can be generated without knowing it. The outgoing column is
         a log ratio: ``cutoff_mev`` only, already final. An optional 4th tensor
-        (per-layer E_dep) goes on the E_dep row's scale. Returns new tensors unless
+        (per-layer E_dep) goes on the E_dep token's scale. Returns new tensors unless
         ``inplace`` (a freshly loaded file: the copy doubled the load's peak RAM).
 
         Datasets written before the energy split are passed through; see
@@ -114,7 +114,7 @@ class DataPrep:
         in_cc = _F(f).in_cc
         e_in, pid = in_cc[..., 0, 0].clone(), _F(f).in_p[..., 0, -1]   # MeV, before it becomes the scalar below
         in_cc[..., 0:1] = self.pen.to_scalar_e(in_cc[..., 0:1])
-        _F(f).edep.copy_(self.norm_edep_row(_F(f).edep, e_in, pid))
+        _F(f).edep.copy_(self.norm_edep_token(_F(f).edep, e_in, pid))
         if edep_layers:   # optional (B, n_layers) tensor; norm_edep is elementwise
             return f, mask, attn_mask, self.norm_edep(edep_layers[0])
         return f, mask, attn_mask
@@ -146,8 +146,8 @@ class DataPrep:
         return cap, torch.log((self.edep_log_min or 1e-6) / cap), torch.log(cap / EDEP_WALL_EPS_MISSING_MEV)
 
     def edep_wall_mask(self, pid: Tensor) -> Tensor:
-        """Where the E_dep row is the wall: nowhere without ``model_conf.edep_wall``, for every incoming species with
-        it, or only for those listed in ``model_conf.edep_wall_species`` (raw pdgids; the rest keep the log row)."""
+        """Where the E_dep token is the wall: nowhere without ``model_conf.edep_wall``, for every incoming species with
+        it, or only for those listed in ``model_conf.edep_wall_species`` (raw pdgids; the rest keep the log token)."""
         if not self.edep_wall:
             return torch.zeros_like(pid, dtype=torch.bool)
         mask = torch.full_like(pid, self.edep_wall_species is None, dtype=torch.bool)
@@ -155,8 +155,8 @@ class DataPrep:
             mask |= pid == p
         return mask
 
-    def norm_edep_row(self, edep: Tensor, e_in: Tensor, pid: Tensor) -> Tensor:
-        """MeV -> model scale for the E_dep ROW, given the incoming kinetic energy [MeV] and raw pdgid (same shape).
+    def norm_edep_token(self, edep: Tensor, e_in: Tensor, pid: Tensor) -> Tensor:
+        """MeV -> model scale for the E_dep TOKEN, given the incoming kinetic energy [MeV] and raw pdgid (same shape).
         ``norm_edep`` unless ``model_conf.edep_wall`` (for the species ``edep_wall_mask`` selects): then the
         log-odds of the deposited fraction of E_cap = E_in + margin(species), z = log E_dep - log(E_cap - E_dep),
         rescaled from [log(eps / E_cap), log(E_cap / eps_missing)] to [0, 1]. Small deposits keep a log scale; near
@@ -170,8 +170,8 @@ class DataPrep:
         u = torch.where(e > 0, u, torch.zeros_like(u)).to(edep.dtype)
         return torch.where(self.edep_wall_mask(pid), u, self.norm_edep(edep))
 
-    def denorm_edep_row(self, u: Tensor, e_in: Tensor, pid: Tensor) -> Tensor:
-        """Inverse of ``norm_edep_row``: E_cap * sigmoid(z); non-positive u (the sentinel) -> 0, u > 1 -> the cap."""
+    def denorm_edep_token(self, u: Tensor, e_in: Tensor, pid: Tensor) -> Tensor:
+        """Inverse of ``norm_edep_token``: E_cap * sigmoid(z); non-positive u (the sentinel) -> 0, u > 1 -> the cap."""
         if not self.edep_wall:
             return self.denorm_edep(u)
         cap, lo, hi = self._edep_wall_range(e_in.double(), pid)
@@ -191,22 +191,22 @@ class DataPrep:
 
     @torch.no_grad()
     def format_add(self, batch: tuple) -> Tensor:
-        """Prepend the conditioning-scalar rows and the generated E_dep row,
-        extending mask/attn_mask to match (E_dep is the only prefix row with
+        """Prepend the conditioning-scalar tokens and the generated E_dep token,
+        extending mask/attn_mask to match (E_dep is the only prefix token with
         mask=1). An optional ``E_dep_layers`` (B, n_layers) entry of data_add is
-        returned as a 4th tensor, in MeV like the E_dep row."""
+        returned as a 4th tensor, in MeV like the E_dep token."""
         cc_ext, mask, attn_mask, data_add = batch
         first, *rest = cond_scalars()
-        rows = []
+        tokens = []
         for name in (first, "E_dep", *rest):
-            row = torch.ones_like(cc_ext[:, :1])
-            row[..., 0] = data_add[name].view_as(row[..., 0])
-            rows.append(row)
-        target = torch.cat((*rows, cc_ext), dim=1).nan_to_num()
+            token = torch.ones_like(cc_ext[:, :1])
+            token[..., 0] = data_add[name].view_as(token[..., 0])
+            tokens.append(token)
+        target = torch.cat((*tokens, cc_ext), dim=1).nan_to_num()
         _F(target).non_p[..., -1] = 0
         z, o = torch.zeros_like(mask[:, :1]), torch.ones_like(mask[:, :1])
         mask = torch.cat((z, o, *([z] * len(rest)), mask), dim=1)
-        attn_mask = torch.cat((torch.ones_like(attn_mask[:, :1]).repeat(1, len(rows)), attn_mask), dim=1)
+        attn_mask = torch.cat((torch.ones_like(attn_mask[:, :1]).repeat(1, len(tokens)), attn_mask), dim=1)
         if "E_dep_layers" in data_add:
             return target, mask, attn_mask, data_add["E_dep_layers"]
         return target, mask, attn_mask

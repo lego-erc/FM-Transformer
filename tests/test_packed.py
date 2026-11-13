@@ -1,7 +1,7 @@
-"""The packed dataset format: only the real rows of each event plus where it starts.
+"""The packed dataset format: only the real tokens of each event plus where it starts.
 
 ``PackedData`` must give back exactly the padded tensors it was packed from -- every
-bit, padded rows included -- for any set of events.
+bit, padded tokens included -- for any set of events.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ def test_block_without_padding_concats(cond) -> None:
     t, n_prefix = prepped_padded(cond), len(cond) + 1
     full = t[2].sum(1) == t[0].shape[1]
     a = PackedData.from_padded(*(x[full] for x in t), n_prefix=n_prefix)
-    assert torch.isnan(a.pad_row).all()
+    assert torch.isnan(a.pad_token).all()
     b = PackedData.from_padded(*(x[~full] for x in t), n_prefix=n_prefix)
     out = PackedData.concat([a, b]).unpack()
     assert _equal(out, tuple(torch.cat((x[full], x[~full])) for x in t))
@@ -91,7 +91,7 @@ def test_accessors(cond) -> None:
     assert torch.equal(p.species_counts(ptypes), torch.stack([(pid == q).sum(1) for q in ptypes], -1))
     with pytest.raises(ValueError):
         p.species_counts(torch.tensor([0.0, 22.0]))
-    assert p.rows.shape[0] == int(t[2][:, n_prefix:].sum())
+    assert p.tokens.shape[0] == int(t[2][:, n_prefix:].sum())
 
 
 @pytest.mark.parametrize("cond", CONDS)
@@ -99,7 +99,7 @@ def test_from_padded_rejects_unrepresentable(cond) -> None:
     t, n_prefix = prepped_padded(cond), len(cond) + 1
     f, m, am = t
     bad_am = am.clone()
-    bad_am[0, n_prefix + 1] = False                     # event 0 is full length: a gap before later rows
+    bad_am[0, n_prefix + 1] = False                     # event 0 is full length: a gap before later tokens
     bad_m = m.clone()
     bad_m[0, 0] = 1
     pad = (~am).nonzero()[0]

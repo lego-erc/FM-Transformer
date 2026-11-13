@@ -349,8 +349,8 @@ def test_overflow_target_shift_is_value_scoped() -> None:
     assert torch.all(edep_new[edep_old == 0] == -0.08), "zero edep not shifted"
     assert torch.all(edep_new[edep_old != 0] == edep_old[edep_old != 0]), "non-zero edep moved"
     npf = model.rc.n_prefix
-    cond_rows = [0, *range(2, npf + 1)]
-    assert torch.equal(out.f.full[:, cond_rows], ds.f.full[:, cond_rows]), "prefix/incoming touched"
+    cond_tokens = [0, *range(2, npf + 1)]
+    assert torch.equal(out.f.full[:, cond_tokens], ds.f.full[:, cond_tokens]), "prefix/incoming touched"
     assert ds.f.full[0, 3, 0] == 0.0, "input batch was mutated in place"
 
 

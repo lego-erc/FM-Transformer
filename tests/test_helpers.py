@@ -84,7 +84,7 @@ def _tiny_config(model_args: dict | None = None, **model_conf) -> dict:
 def _fake_batch(B: int = 2, L: int = 5, edep_generated: bool = False) -> DataStruct:
     """Synthetic batch matching the padded sequence layout: 2 conditioning
     slots, 1 incoming-particle slot, then ``L - 3`` outgoing slots. ``edep_generated``
-    marks the E_dep row generated (``m = 1``), as in production."""
+    marks the E_dep token generated (``m = 1``), as in production."""
     f = torch.zeros(B, L, 8)
     f[:, 0, 0] = 1.0
     f[:, 1, 0] = 0.1
@@ -195,11 +195,11 @@ def _head_config(nout: bool, model_args: dict | None = None, **model_conf) -> di
 
 
 def _head_batch(edep: torch.Tensor, n_out: torch.Tensor, pid_in: float = 2212.0) -> DataStruct:
-    """Rows [Density, edep, Z, A, Size, incoming, out, out]; ``n_out`` in {1, 2}."""
+    """Tokens [Density, edep, Z, A, Size, incoming, out, out]; ``n_out`` in {1, 2}."""
     B = len(edep)
     f = torch.zeros(B, 8, 8)
-    for row, val in ((0, 3.0), (2, 18.0), (3, 39.95), (4, 100.0)):
-        f[:, row, 0] = val
+    for token, val in ((0, 3.0), (2, 18.0), (3, 39.95), (4, 100.0)):
+        f[:, token, 0] = val
     _F(f).non_p[..., 1:-1] = 1.0
     f[:, 1, 0] = edep
     f[:, 5, 0] = 1.0
@@ -232,7 +232,7 @@ def _gun_cond(pdgid: int, e_mev: float = 150.0, batch: int = 4) -> torch.Tensor:
 
 
 def _fill_edep(value: float):
-    """A stand-in for the flow's forward that writes ``value`` into every event's E_dep row."""
+    """A stand-in for the flow's forward that writes ``value`` into every event's E_dep token."""
     def forward(batch, *_):
         f, m, am = batch
         f = f.clone()
@@ -257,11 +257,11 @@ def prepped_padded(cond=("Density",), layers=False, n=6, k=4) -> tuple:
     events with 4/2/0/1/3/2 outgoing particles (event 0 full length, event 2 none)."""
     g = torch.Generator().manual_seed(0)
     e_out = torch.tensor(_PREPPED_E_OUT, dtype=torch.float32)[:n, :k]
-    def rows(e, shape):
+    def tokens(e, shape):
         d = torch.nn.functional.normalize(torch.randn(*shape, 3, generator=g), dim=-1)
         return torch.cat((e[..., None], e[..., None] * d, torch.randn(*shape, 3, generator=g) * 50.0), -1)
-    inc = torch.cat((rows(torch.full((n, 1), 200.0), (n, 1)), torch.full((n, 1, 1), 2212.0)), -1)
-    out = torch.cat((rows(e_out, (n, k)), torch.full((n, k, 1), 22.0)), -1)
+    inc = torch.cat((tokens(torch.full((n, 1), 200.0), (n, 1)), torch.full((n, 1, 1), 2212.0)), -1)
+    out = torch.cat((tokens(e_out, (n, k)), torch.full((n, k, 1), 22.0)), -1)
     per_event = {"E_dep": torch.rand(n, generator=g) * 100.0}
     for i, name in enumerate(cond):
         per_event[name] = torch.full((n,), 3.0 + i)

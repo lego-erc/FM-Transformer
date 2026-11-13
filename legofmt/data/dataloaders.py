@@ -39,7 +39,7 @@ class GetLEGOData:
         return self.dataset_cutoff(*args, **kwargs)
 
     def dataset_compact(self, data):
-        """Concatenate the incoming and outgoing per-particle tensors into one padded row axis."""
+        """Concatenate the incoming and outgoing per-particle tensors into one padded token axis."""
         pp = data.get("per_particle")
         return torch.cat((pp["Incoming"], pp["Outgoing"]), dim=-2).to(self.dtype), data.get("per_event")
 
@@ -49,7 +49,7 @@ class GetLEGOData:
         n_events: (int | None) = None,
     ) -> tuple[Tensor, Tensor, Tensor, dict]:
         """Drop particles below cutoff_mev (kinetic energy when energy_kin, else |p|;
-        the incoming row included), compact survivors to the front, drop events with
+        the incoming token included), compact survivors to the front, drop events with
         fewer than min_particles outgoing; padding is NaN."""
         dataset, data_add = self.dataset_compact(data)
         e_valid = dataset[..., 0] if self.energy_kin else dataset[..., 1:4].norm(dim=-1)
@@ -118,7 +118,7 @@ class LEGODataset(Dataset):
     def data(self) -> DataStruct:
         """The whole dataset as padded tensors; a packed file materialises them here, once."""
         if self._data is None:
-            gb = len(self.packed) * self.packed.L * 41 / 1e9   # bytes per padded row: 8 * 4 + 8 + 1
+            gb = len(self.packed) * self.packed.L * 41 / 1e9   # bytes per padded token: 8 * 4 + 8 + 1
             warnings.warn(f"materialising the packed dataset as padded tensors (~{gb:.1f} GB); "
                           "index it or use its accessors instead", UserWarning, stacklevel=2)
             self._data = DataStruct(*self.packed.unpack())

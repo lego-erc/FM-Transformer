@@ -21,7 +21,7 @@ def test_matches_geodesic_prob_path():
     B, L = 64, 6
     x0 = torch.cat((torch.rand(B, L, 1, dtype=torch.float64), _unit(B, L), _unit(B, L)), -1)
     x1 = torch.cat((torch.rand(B, L, 1, dtype=torch.float64), _unit(B, L), _unit(B, L)), -1)
-    x0[:, 0, 1:] = x1[:, 0, 1:] = 1.0  # the E_dep row's (1, 1, 1) direction filler
+    x0[:, 0, 1:] = x1[:, 0, 1:] = 1.0  # the E_dep token's (1, 1, 1) direction filler
     t = torch.rand(B, dtype=torch.float64)
     new = ProductPathSampler(MAN).sample(x0, x1, t)
     tt = t.repeat_interleave(L)

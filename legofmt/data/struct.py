@@ -2,8 +2,9 @@
 
 Slot roles depend on ``cond_scalars``, so never index the sequence directly --
 use ``_F`` (``d``, ``edep``, ``cond(name)``, ``in_p``, ``out_p``, ``model_in``,
-``energy``, ``pdgids``) and ``DataStruct``. The layout is process-global module
-state set by ``set_layout``, so constructing a model mutates it.
+``energy``, ``pdgids``, and a particle's columns ``in_*`` / ``out_*``) and
+``DataStruct``. The layout is process-global module state set by ``set_layout``,
+so constructing a model mutates it.
 """
 
 import torch
@@ -32,8 +33,8 @@ def n_prefix() -> int:
 
 
 def cond_slot(name: str) -> int:
-    """Row index of a conditioning scalar: cond_scalars[0] is row 0, the rest
-    are shifted by one because row 1 is the generated E_dep."""
+    """Token index of a conditioning scalar: cond_scalars[0] is token 0, the rest
+    are shifted by one because token 1 is the generated E_dep."""
     if name not in _COND_SCALARS:
         raise ValueError(f"{name!r} not in cond_scalars {_COND_SCALARS}")
     i = _COND_SCALARS.index(name)
@@ -68,6 +69,25 @@ class _F:
     def model_in(self) -> Tensor: return self.full[..., 0:7]
     @property
     def energy(self) -> Tensor: return self.full[..., 0:1]
+    # A particle's columns: [energy, momentum direction (3), position direction (3), pdgid].
+    # The incoming particle (B, .) ...
+    @property
+    def in_energy(self) -> Tensor: return self.full[..., n_prefix(), 0:1]
+    @property
+    def in_mom(self) -> Tensor: return self.full[..., n_prefix(), 1:4]
+    @property
+    def in_pos(self) -> Tensor: return self.full[..., n_prefix(), 4:7]
+    @property
+    def in_pid(self) -> Tensor: return self.full[..., n_prefix(), -1]
+    # ... and the outgoing slots (B, n_out, .)
+    @property
+    def out_energy(self) -> Tensor: return self.full[..., n_prefix() + 1:, 0]
+    @property
+    def out_mom(self) -> Tensor: return self.full[..., n_prefix() + 1:, 1:4]
+    @property
+    def out_pos(self) -> Tensor: return self.full[..., n_prefix() + 1:, 4:7]
+    @property
+    def out_pid(self) -> Tensor: return self.full[..., n_prefix() + 1:, -1]
 
 
 class _M:
@@ -76,6 +96,8 @@ class _M:
         self.full = m.squeeze(-1) if m.ndim > 2 else m  # accepts (B, L) or (B, L, 1); callers mix the two
     @property
     def out_p(self) -> Tensor: return self.full[..., n_prefix() + 1:]
+    @property
+    def fwd(self) -> Tensor: return self.full[..., n_prefix()] == 0   # of the mask m: the incoming slot conditions
 
 
 class DataStruct:

@@ -20,7 +20,7 @@ def sphere_logmap(x, y):
 
 
 def sphere_expmap(x, u):
-    """``Sphere.expmap`` with its arithmetic (bit-identical), differentiable at ``u = 0`` (every conditioning row of a
+    """``Sphere.expmap`` with its arithmetic (bit-identical), differentiable at ``u = 0`` (every conditioning token of a
     solve): the division sees 1 where the velocity is below EPS, so the unused branch of the ``where`` carries no
     ``0/0`` (``norm``'s backward is 0 at a zero norm)."""
     n = u.norm(dim=-1, keepdim=True)

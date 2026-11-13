@@ -39,7 +39,7 @@ class TrainStep:
         denom    = g.sum().clamp(min=1)
         out      = sq * g
         loss_ed  = None
-        if self.rc.edep_cell:  # the E_dep row is a cell of its own
+        if self.rc.edep_cell:  # the E_dep token is a cell of its own
             n_ed    = g[:, 1].sum().clamp(min=1)
             loss_ed = out[:, 1, 0].sum() / n_ed
             loss_e  = (out[..., 0:1].sum() - out[:, 1, 0].sum()) / (denom - n_ed).clamp(min=1)
@@ -71,7 +71,7 @@ class TrainStep:
     @torch.no_grad()
     def _sample_mask(self, ds_t: DataStruct) -> Tensor:
         """Per-event coin flip (``mask_conf.p_forward``) between the data mask and its
-        inverse (generate the incoming from the outgoing set); scalar rows stay conditioning."""
+        inverse (generate the incoming from the outgoing set); scalar tokens stay conditioning."""
         if not self.rc.mask_conf:
             return ds_t.m.full
         fwd = ds_t.m.full
@@ -97,8 +97,8 @@ class TrainStep:
     @torch.no_grad()
     def _teacher_transport(self, ds_t: DataStruct, base: Tensor, **solve_kwargs) -> Tensor:
         """The reflow teacher's transport of ``base`` on the generated slots, the data
-        elsewhere. The E_dep row is generated but its direction columns are the
-        (1,1,1) filler; transporting them gave that row an off-manifold target."""
+        elsewhere. The E_dep token is generated but its direction columns are the
+        (1,1,1) filler; transporting them gave that token an off-manifold target."""
         tgt = self.reflow_teacher.solve(ds_t, x_init=base, **solve_kwargs)
         tgt = torch.where((ds_t.m.full == 1).unsqueeze(-1), tgt, ds_t.f.model_in)
         tgt[:, :self.rc.n_prefix, 1:] = ds_t.f.non_cc[..., 1:]
@@ -193,9 +193,8 @@ class TrainStep:
                 # reflow: couple base to the teacher's transport of it
                 tgt  = self._teacher_transport(ds_t, base, **self.rc.reflow_kwargs)
                 ds_t = DataStruct(torch.cat((tgt, ds_t.f.pdgids), dim=-1), m, am)
-            if self.rc.edep_whiten:  # from here to the loss (flow map included) the E_dep row is whitened
-                base = self._edep_whiten(base, ds_t)
-                ds_t = DataStruct(self._edep_whiten(ds_t.f.full, ds_t), m, am)
+            # from here to the loss (flow map included) the data's E_dep token is in the base's unit
+            ds_t = DataStruct(self._edep_whiten(ds_t.f.full, ds_t), m, am)
             ps_ = self.ps.sample(base, ds_t.f.model_in, t)
             lat = {} if z0 is None else {"z": z0 + ps_.t * (z1 - z0)}
         # an explicit zero d, not None: the flow-map calls pass a tensor, and a None is a

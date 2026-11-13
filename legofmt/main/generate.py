@@ -43,7 +43,7 @@ def _balance_energy(sols: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor
     E = torch.where(live, pen.to_mev(e.double().nan_to_num(), e_in_n), 0.0)
     tot = E.sum(-1, keepdim=True)
     pair = 1.022 * ((live & (pid == -11)).sum(-1, keepdim=True) - (pid_in == -11).long())
-    budget = (e_in - dp.denorm_edep_row(s.edep.double(), e_in[:, 0], pid_in[:, 0])[:, None] - pair).clamp_min(0.0)
+    budget = (e_in - dp.denorm_edep_token(s.edep.double(), e_in[:, 0], pid_in[:, 0])[:, None] - pair).clamp_min(0.0)
     em = ((pid_in.abs() == 11) | (pid_in == 22)) & (e_in_n > 1e-6)  # at the cutoff the log ratio is 0/0
     lead_e, lead = E.max(-1, keepdim=True)
     is_lead = F.one_hot(lead[:, 0], E.shape[-1]).bool()
@@ -51,7 +51,7 @@ def _balance_energy(sols: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor
     surv = ~em & (e_in_n > 1e-6) & (pid.gather(-1, lead) == pid_in) & ((lead_e > 0.9 * e_in) | em_rest)
     w = torch.where(em, E / tot, surv * is_lead)                    # who takes the residual budget - tot
     absorbed = (em & (tot == 0))[:, 0]                              # nothing leaves: the deposit is the budget
-    s.edep[absorbed] = dp.norm_edep_row((e_in - pair)[:, 0], e_in[:, 0], pid_in[:, 0])[absorbed].to(s.edep.dtype)
+    s.edep[absorbed] = dp.norm_edep_token((e_in - pair)[:, 0], e_in[:, 0], pid_in[:, 0])[absorbed].to(s.edep.dtype)
     e.copy_(torch.where(w > 0, 1 - pen.to_scalar_e(E + w * (budget - tot)) / e_in_n, e.double()))
 
 
@@ -128,7 +128,7 @@ class GenerateOut(torch.nn.Module):
         self.proj_ray = CubeTrace(mc.get("cuboid_dim"))
         self.cuboid_dim = self.proj_ray.cuboid_dim  # kept apart: no_raytrace models stub proj_ray
         self.pen = EnergyProjections(cutoff_mev=self.model.rc.cutoff_mev, max_energy=self.model.rc.max_energy)
-        self.dp = DataPrep(flow_conf)   # the E_dep row's normalisation (edep_log_min), for the E_in ceiling
+        self.dp = DataPrep(flow_conf)   # the E_dep token's normalisation (edep_log_min), for the E_in ceiling
 
     def __call__(self, cond: torch.Tensor, prepped: bool = False, passthrough: bool = True, rng=None):
         """``cond`` is ``[B, n_cond + 7] = [*cond_scalars, mom * E_MeV (3), pos (3), pdgid]``;
@@ -170,24 +170,24 @@ class GenerateOut(torch.nn.Module):
             _balance_energy(sols, e_in, pid_in, self.pen, self.dp)
         if self.model.rc.odeint_conf.get("exit_consistency", False):
             _exit_outward(sols)
-        # per-layer E_dep [MeV], decoded after the balance rewrote the E_dep row; pass-throughs deposit nothing
+        # per-layer E_dep [MeV], decoded after the balance rewrote the E_dep token; pass-throughs deposit nothing
         self.edep_layers = None
         if ae is not None:
             self.edep_layers = sols.new_zeros(sols.shape[0], ae.n_layers)
             run = ~pt_mask
             if run.any():
-                self.edep_layers[run] = ae.sample(self.model._edep_latents, self.dp.denorm_edep_row(
+                self.edep_layers[run] = ae.sample(self.model._edep_latents, self.dp.denorm_edep_token(
                     _F(sols).edep[run].float(), e_in[run].float(), pid_in[run]), **_rng_kw(rng, run))
         return sols, mask, attn_mask
 
     def _clamp_edep(self, edep: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor) -> torch.Tensor:
-        """The E_dep row capped at E_in + the species' excess on the log row (a wall row is capped by
+        """The E_dep token capped at E_in + the species' excess on the log token (a wall token is capped by
         construction): the training data's largest excess (model_conf.edep_excess_mev), or for checkpoints from
         before it the hand-set _EDEP_EXCESS_MEV; out of place, so the density design can differentiate
         through it."""
-        log_row = ~self.dp.edep_wall_mask(pid_in)
+        log_token = ~self.dp.edep_wall_mask(pid_in)
         for pid, excess in (self.dp.edep_excess_mev or _EDEP_EXCESS_MEV).items():
-            hit = (pid_in == pid) & log_row
+            hit = (pid_in == pid) & log_token
             edep = torch.where(hit, torch.minimum(edep, self.dp.norm_edep(e_in + excess).to(edep)), edep)
         return edep
 
@@ -210,7 +210,7 @@ class GenerateOut(torch.nn.Module):
         """Geant4-shaped entry point: broadcast the per-gun arguments to ``B * n`` events
         and return ``{per_event, per_particle, per_voxel}`` in *model* normalisation
         (``per_event["E_dep"]`` is the normalised scalar, not MeV, always on the log/linear ``norm_edep`` scale that
-        callers decode with ``edep_log_min``: a ``model_conf.edep_wall`` row is re-encoded on it here).
+        callers decode with ``edep_log_min``: a ``model_conf.edep_wall`` token is re-encoded on it here).
         ``rng`` as in ``__call__``, with ``B * n`` keys (gun-major, as ``repeat_interleave`` orders the events)."""
         sols, _, _ = self(self._g4_cond(n, pos, mom, energy, density, size, pdgids, Z, A), passthrough=passthrough,
                           **_rng_kw(rng))
@@ -218,7 +218,7 @@ class GenerateOut(torch.nn.Module):
         edep = s.edep
         if self.dp.edep_wall:
             e_in = self.dp.pen.from_scalar(s.in_cc[:, 0, 1:4], s.in_cc[:, 0, 0:1]).norm(dim=-1)
-            edep = self.dp.norm_edep(self.dp.denorm_edep_row(edep.double(), e_in.double(),
+            edep = self.dp.norm_edep(self.dp.denorm_edep_token(edep.double(), e_in.double(),
                                                              s.in_p[:, 0, -1])).to(edep.dtype)
         per_event = {"E_dep": edep}
         per_event.update({k: s.cond(k) for k in self.cond_names})
@@ -321,7 +321,7 @@ class GenerateOut(torch.nn.Module):
 
         attn_mask = torch.cat((torch.ones_like(occupied[:, :1]).repeat(1, self.n_prefix + 1), occupied), dim=1)
         mask = attn_mask.long()
-        cond_idx = [0, *range(2, self.n_prefix)]  # the cond scalars' rows; the edep row 1 stays generated
+        cond_idx = [0, *range(2, self.n_prefix)]  # the cond scalars' tokens; the edep token 1 stays generated
         mask[:, cond_idx + [self.n_prefix]] = 0   # ... and the incoming conditions
         cond_fm[:, cond_idx, 0] = cond[:, :self.n_cond]
         _F(cond_fm).non_p[..., 1:-1] = 1

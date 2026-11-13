@@ -1,14 +1,18 @@
 """The differentiable generation path: ``_solve`` / ``_forward`` are ``solve`` / ``forward`` without their
-``torch.no_grad`` (which stays on the public methods), so a design parameter written into a conditioning row can be
+``torch.no_grad`` (which stays on the public methods), so a design parameter written into a conditioning token can be
 differentiated through a sampled event."""
 
 import pytest
 import torch
 import torch.nn.functional as F
 
+from legofmt.base_dist.base_dists import Angles
+from legofmt.base_dist.gen_base import sample_directions
 from legofmt.data.struct import DataStruct
 from legofmt.geometry.geom_trafos import GeomTrafos
+from legofmt.legacy.gen_base import sample_dirs
 from legofmt.main.modules import LEGOLtng
+from legofmt.rng import Noise
 
 from test_helpers import _fake_batch, _head_batch, _head_config, _tiny_config
 
@@ -67,7 +71,7 @@ def test_head_params_gradient_finite_at_normal_incidence() -> None:
     f = ds.f.full.clone()
     f[:, 5, 1:4] = torch.tensor([0.0, 0.0, 1.0])
     f[:, 5, 4:7] = torch.tensor([0.0, 0.0, -1.0])
-    f.requires_grad_()   # every cell, the incoming row included: in a sampled event they share one graph
+    f.requires_grad_()   # every cell, the incoming token included: in a sampled event they share one graph
     _, mu, sig, _, _, _ = m.base_head_params(DataStruct(f, ds.m.full, ds.am.full))
     (g,) = torch.autograd.grad((mu + sig).sum(), f)
     assert torch.isfinite(g).all()
@@ -110,7 +114,8 @@ def test_sample_gradient_finite_at_a_zero_draw(monkeypatch, ang_pow) -> None:
     kappa = torch.tensor(3.0, requires_grad=True)
     p = None if ang_pow is None else torch.tensor(ang_pow, requires_grad=True)
     loc = torch.tensor([[0.0, 0.0, 1.0]])
-    out = GeomTrafos().sample((4,), loc, kappa, tanh_theta=True, ang_pow=p)
+    out = (sample_dirs((4,), loc, kappa, tanh_theta=True) if p is None
+           else sample_directions(Angles(kappa, p), loc, Noise((4,), loc.device)))
     assert (out == loc.expand(4, -1)).all()   # forward: every direction exactly on the axis
     grads = torch.autograd.grad(out.sum(), [kappa] + ([] if p is None else [p]))
     assert all(torch.isfinite(g) for g in grads)
@@ -129,7 +134,7 @@ def test_rotate_gradient_finite_at_the_pole(theta: float) -> None:
 
 
 def test_gradient_finite_with_padding() -> None:
-    # events with 1 and 2 outgoing particles (a padded slot), whitened E_dep row, zero-velocity conditioning rows
+    # events with 1 and 2 outgoing particles (a padded slot), whitened E_dep token, zero-velocity conditioning tokens
     torch.manual_seed(0)
     m = _wake(LEGOLtng(_head_config(True, {"ntypes": 7}, edep_whiten=True)))
     m.eval()

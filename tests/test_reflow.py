@@ -1,7 +1,7 @@
-"""Reflow targets keep the prefix rows' direction filler, on both training paths.
+"""Reflow targets keep the prefix tokens' direction filler, on both training paths.
 
-The E_dep row is generated (``mask == 1``) but its direction columns are the
-``(1, 1, 1)`` filler; letting the teacher transport them gave that row an
+The E_dep token is generated (``mask == 1``) but its direction columns are the
+``(1, 1, 1)`` filler; letting the teacher transport them gave that token an
 off-manifold target (the ``loss/one_step_euler ~ 430`` spikes of kin_opts_290826).
 """
 

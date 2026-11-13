@@ -84,8 +84,8 @@ class CFMTrafo_x(nn.Module):
         if geom_encoder is not None:
             g = dict(geom_encoder)
             n_prefix, self.geom_hide = g.pop("n_prefix"), g.pop("hide_scalars")
-            # the composite cond-scalar rows (E_dep is row 1, the incoming particle row n_prefix)
-            self.register_buffer("geom_scalar_rows", torch.tensor([0, *range(2, n_prefix)]), persistent=False)
+            # the composite cond-scalar tokens (E_dep is token 1, the incoming particle token n_prefix)
+            self.register_buffer("geom_scalar_tokens", torch.tensor([0, *range(2, n_prefix)]), persistent=False)
             self.geom = GeomEncoder(g.pop("layers"), h_dim, **g)
         ntypes = ntypes if ntypes is not None else max_seq_l
         self.h_dim = h_dim
@@ -248,7 +248,7 @@ class CFMTrafo_x(nn.Module):
             embd = torch.cat((tok, embd), dim=1)
             if self.geom_hide:
                 attn_mask = attn_mask.clone()
-                attn_mask[:, self.geom_scalar_rows] = False
+                attn_mask[:, self.geom_scalar_tokens] = False
             attn_mask = torch.cat((attn_mask.new_ones(B, K), attn_mask), dim=1)
         if n_lat:
             tok = self.lat_in(z.to(embd.dtype)).unsqueeze(1)

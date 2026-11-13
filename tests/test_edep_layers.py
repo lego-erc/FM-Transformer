@@ -1,7 +1,7 @@
 """Optional per-layer E_dep: ``per_event["E_dep_layers"]`` of shape (B, n_layers).
 
-Prep carries it as a 4th tensor next to (f, m, am), in MeV like the E_dep row;
-``norm_e`` puts it on the E_dep row's model scale at load time. The token layout
+Prep carries it as a 4th tensor next to (f, m, am), in MeV like the E_dep token;
+``norm_e`` puts it on the E_dep token's model scale at load time. The token layout
 and the models are untouched, and 3-tuple files load as before.
 """
 
@@ -21,10 +21,10 @@ CUTOFF = 10.0
 
 def _raw(n=4, k=3):
     """n events, event 1 entirely below the cutoff (dropped by prep)."""
-    def row(e, d, p, pid):
+    def token(e, d, p, pid):
         return [e, *[e * c for c in d], *p, pid]
-    inc = torch.tensor([[row(200.0, (1, 0, 0), (-50, 0, 0), 2212.0)]]).repeat(n, 1, 1)
-    out = torch.tensor([[row(50.0, (0, 1, 0), (0, 50, 0), 22.0)]]).repeat(n, 2, 1)
+    inc = torch.tensor([[token(200.0, (1, 0, 0), (-50, 0, 0), 2212.0)]]).repeat(n, 1, 1)
+    out = torch.tensor([[token(50.0, (0, 1, 0), (0, 50, 0), 22.0)]]).repeat(n, 2, 1)
     inc[1, :, 0] = out[1, :, 0] = 1.0
     layers = torch.arange(n * k, dtype=torch.float32).view(n, k) + 1.0
     return {"per_particle": {"Incoming": inc, "Outgoing": out},
@@ -38,7 +38,7 @@ def test_prep_carries_edep_layers_of_the_kept_events() -> None:
     keep = torch.tensor([0, 2, 3])
     assert len(d) == 3
     torch.testing.assert_close(d.edep_layers, raw["per_event"]["E_dep_layers"][keep])
-    torch.testing.assert_close(d.f.edep, raw["per_event"]["E_dep"][keep])   # E_dep row unchanged
+    torch.testing.assert_close(d.f.edep, raw["per_event"]["E_dep"][keep])   # E_dep token unchanged
 
 
 @pytest.mark.parametrize("cfg", [_cfg(max_energy=300.0),

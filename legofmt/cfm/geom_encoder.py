@@ -20,7 +20,7 @@ N_FREQ = 8
 
 
 def x0_gcm2(Z: Tensor, A: Tensor) -> Tensor:
-    """Radiation length (Dahl's fit), in g/cm2; also the base head's (base_nn.py)."""
+    """Radiation length (Dahl's fit), in g/cm2; also the base head's (base_dist/interface.py)."""
     return 716.4 * A / (Z * (Z + 1) * torch.log(287.0 / Z.sqrt()))
 
 

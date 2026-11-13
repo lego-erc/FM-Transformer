@@ -6,13 +6,13 @@ replaces used (inverse normal CDF, inverse CDF of a categorical, ``u < p``). The
 changes is that an event's randomness no longer depends on its batch, its row or which rows a caller subsets, and
 that two models generating the same keyed events share it -- so the difference between them carries no draw luck.
 
-Without ``rng`` every call site keeps its torch draw (bit-identical to before). Keys must be unique within a sample:
-two events with one key get the same randomness.
+Without ``rng`` every call site keeps its torch draw (bit-identical to before); ``Noise`` is both behind one name.
+Keys must be unique within a sample: two events with one key get the same randomness.
 """
 
 import torch
 
-# Draw sites. Fixed ids, so a new draw never shifts an existing one; GeomTrafos draws use ``stream`` and ``stream + 1``.
+# Draw sites. Fixed ids, so a new draw never shifts an existing one; direction draws use ``stream`` and ``stream + 1``.
 PASSTHROUGH, SYM_PT, SYM_COUNT, COUNT, REFILL, SYM_FLOW, BASE_E, EDEP, LATENT, AE_MIX, AE_NORM, AE_ZERO = range(1, 13)
 BASE_MOM, BASE_POS, ISO_E, ISO_MOM, ISO_POS = 20, 22, 24, 26, 28
 
@@ -79,3 +79,22 @@ class EventRNG:
         target = (u * cdf[..., -1])[..., None] if one else u * cdf[..., -1:]
         idx = torch.searchsorted(cdf, target, right=True).clamp_(max=probs.shape[-1] - 1)
         return idx.squeeze(-1) if one else idx
+
+
+class Noise:
+    """One call site's draws for ``shape`` cells, so that the site reads the same with and without ``rng``: torch's
+    draw (float32 on ``device``) without, the keyed one at the ids ``elem`` (float64) with. ``stream`` names a keyed
+    draw; torch's stream is consumed in call order."""
+
+    def __init__(self, shape, device, rng: EventRNG | None = None, elem=0):
+        self.shape, self.device, self.rng, self.elem = shape, device, rng, elem
+
+    def normal(self, stream: int) -> torch.Tensor:
+        if self.rng is None:
+            return torch.randn(self.shape, device=self.device)
+        return self.rng.normal(stream, self.elem)
+
+    def uniform(self, stream: int) -> torch.Tensor:
+        if self.rng is None:
+            return torch.rand(self.shape, device=self.device)
+        return self.rng.uniform(stream, self.elem)

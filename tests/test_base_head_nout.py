@@ -49,7 +49,8 @@ def test_in_features_grow_only_with_the_flag() -> None:
 def test_out_set_feats_counts_multiplicity_and_species() -> None:
     model = LEGOLtng(_config(True))
     n_out = torch.tensor([1, 2, 1, 2])
-    n, cnt = model._out_set_feats(_batch(torch.full((4,), 0.1), n_out))
+    out_set = model._head_inputs(_batch(torch.full((4,), 0.1), n_out))[2]
+    n, cnt = out_set[:, :1], out_set[:, 1:]
     assert torch.allclose(n.squeeze(-1), n_out.float().log1p())
     # every valid outgoing slot is pdgid 11, so one column carries the whole count
     assert torch.allclose(cnt.max(-1).values, n_out.float().log1p())

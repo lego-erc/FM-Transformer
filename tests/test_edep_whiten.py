@@ -1,12 +1,13 @@
-"""``model_conf.edep_whiten``: the flow transports the E_dep row in units of the event's own base prior.
+"""``model_conf.edep_whiten``: the flow transports the E_dep token in units of the event's own base prior.
 
-The converged field (midpoint/rk4) never resolves an E_dep narrower than ~0.0022 log-row units (IQR) -- a fixed
+The converged field (midpoint/rk4) never resolves an E_dep narrower than ~0.0022 log-token units (IQR) -- a fixed
 floor in the channel, measured on the K = 1 W/Si stack over 600-1000 MeV protons at 0-20 deg, where Geant4's
 survivor peak is 0.0012 wide; where the true width is larger (40 deg) the field is right. A survivor sits at
 u ~ 0.9 with a 0.1% spread, so the floor is 1.6-2x its width. Whitening with the calibrated head,
 ``y = (logit(u / e_dep_max) - mu) / sig``, turns the prior into N(0, 1) and that peak into ~N(-0.4, 0.4^2):
 the same structure at O(1) in the network's coordinate. Deposit-free targets (the overflow sentinel) map to a
-fixed -6, decoded back to 0; ``solve`` whitens on entry and undoes it on exit, so every caller sees u.
+fixed -6, decoded back to 0. The base is drawn in this unit (a standard normal), ``solve`` maps its result back,
+so every caller sees u.
 """
 
 from __future__ import annotations
@@ -53,12 +54,43 @@ def test_a_deposit_far_below_its_prior_stays_a_deposit() -> None:
     assert (back > 0).all(), back
 
 
-def test_the_base_draw_whitens_to_its_latent() -> None:
+def test_the_base_draw_is_the_standard_normal() -> None:
+    # in the flow's unit the prior is N(0, 1): the base is z as drawn, and mapped back every draw is a deposit
     model = _model()
     ds = _head_batch(torch.full((4096,), 0.5), torch.ones(4096, dtype=torch.long))
     torch.manual_seed(0)
-    y = model._edep_whiten(model.gen_base_wrapper(ds), ds)[:, 1, 0]
+    x0 = model.gen_base_wrapper(ds)
+    y = x0[:, 1, 0]
     assert abs(float(y.mean())) < 0.1 and abs(float(y.std()) - 1) < 0.1
+    e = model._edep_whiten(x0, ds, inverse=True)[:, 1, 0]
+    assert ((e > 0) & (e < model.gen_base.e_dep_max)).all()
+
+
+def test_a_token_that_is_not_whitened_draws_the_deposit() -> None:
+    # legacy.edep_token: without edep_whiten the flow carries the deposit, and the base is e_dep_max sigmoid(mu + sig z)
+    torch.manual_seed(0)
+    model = LEGOLtng(_head_config(True))
+    ds = _head_batch(torch.full((4096,), 0.5), torch.ones(4096, dtype=torch.long))
+    x0 = model.gen_base_wrapper(ds)
+    e = x0[:, 1, 0]
+    assert ((e > 0) & (e < model.gen_base.e_dep_max)).all()
+    assert model._edep_whiten(x0, ds) is x0 and model._edep_whiten(x0, ds, inverse=True) is x0
+
+
+def test_solve_continues_from_a_state_it_returned() -> None:
+    # a start past t = 0 is a state as solve returns it, E_dep a deposit: two half solves are the whole one
+    model = _model()
+    ds = _head_batch(torch.full((8,), 0.5), torch.ones(8, dtype=torch.long))
+
+    def push(x, t, *a, **k):
+        v = torch.zeros_like(x)
+        v[:, 1, 0] = 1.0
+        return v
+    model.model.forward = push
+    x0 = model.gen_base_wrapper(ds)
+    whole = model.solve(ds, x_init=x0, method="euler", time_grid=[0.0, 0.5, 1.0])
+    half = model.solve(ds, x_init=x0, method="euler", time_grid=[0.0, 0.5])
+    assert torch.allclose(model.solve(ds, x_init=half, method="euler", time_grid=[0.5, 1.0]), whole, atol=1e-5)
 
 
 def test_solve_hands_back_the_deposit_scale() -> None:
@@ -92,7 +124,7 @@ def test_capped_scale_keeps_broad_priors_on_a_finer_grid() -> None:
 
 
 def test_feed_hands_the_prior_to_the_network_and_restores_the_filler() -> None:
-    # a whitened row is only decodable with its (mu, sig); edep_whiten_feed puts them in the row's two direction
+    # a whitened token is only decodable with its (mu, sig); edep_whiten_feed puts them in the token's two direction
     # factors as unit vectors (mu, 1, 0) / (log sig, 1, 0) -- on the sphere, so the projection keeps them -- and the
     # inverse puts the 1s filler back
     model = _model()
@@ -109,7 +141,7 @@ def test_feed_hands_the_prior_to_the_network_and_restores_the_filler() -> None:
 
 def test_global_whitening_is_one_map_for_every_event() -> None:
     # edep_whiten_global [c, s] is the same logit map for every event, y = (logit u - c) / s (another K = 4 arm, see
-    # above); below c - 4.4 s in logit (u < 0.33 for (1.5, 0.5), i.e. E_dep under ~1 keV on the 1e-6 log row) a
+    # above); below c - 4.4 s in logit (u < 0.33 for (1.5, 0.5), i.e. E_dep under ~1 keV on the 1e-6 log token) a
     # deposit is held there
     model = _model()
     model.rc = replace(model.rc, edep_whiten_global=(1.5, 0.5))
@@ -121,7 +153,7 @@ def test_global_whitening_is_one_map_for_every_event() -> None:
     assert torch.allclose(back, edep, atol=1e-5)
 
 
-def test_likelihood_refuses_the_whitened_row() -> None:
+def test_likelihood_refuses_the_whitened_token() -> None:
     # the whitening's Jacobian is not in the ODE likelihood: a silent number would be wrong
     model = _model()
     ds = _head_batch(torch.full((4,), 0.5), torch.ones(4, dtype=torch.long))

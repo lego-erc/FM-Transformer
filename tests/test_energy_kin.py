@@ -30,7 +30,7 @@ def _scal(e: float) -> float:
     return math.log(e / CUTOFF) / math.log(MAX_E / CUTOFF)
 
 
-def _raw_row(t: float, m: float, direction, pos, pdgid: float):
+def _raw_token(t: float, m: float, direction, pos, pdgid: float):
     """[E_kin, Px, Py, Pz, X, Y, Z, PDGID] as pyg4lego records it."""
     p = _p_of(t, m) if m > 0 else t
     return [t, *[p * d for d in direction], *pos, pdgid]
@@ -46,8 +46,8 @@ def _prep(energy_kin: bool | None) -> DataPrep:
 def _batch():
     # incoming proton T=100 (|p|=444.5), one outgoing neutron T=20 (|p|=194.7)
     cc = torch.tensor([[
-        _raw_row(100.0, 938.27, (1, 0, 0), (-50, 0, 0), 2212),
-        _raw_row(20.0, 939.57, (0, 1, 0), (0, 50, 0), 2112),
+        _raw_token(100.0, 938.27, (1, 0, 0), (-50, 0, 0), 2212),
+        _raw_token(20.0, 939.57, (0, 1, 0), (0, 50, 0), 2112),
     ]])
     mask = torch.tensor([[0, 1]])
     attn = torch.ones(1, 2, dtype=torch.bool)
@@ -89,8 +89,8 @@ def test_explicit_false_is_momentum_based() -> None:
 def test_energy_kin_exothermic_outgoing_clamps_to_zero() -> None:
     # capture gamma T=30 above the incoming neutron's T=12: ratio clamps -> 0
     cc = torch.tensor([[
-        _raw_row(12.0, 939.57, (1, 0, 0), (-50, 0, 0), 2112),
-        _raw_row(30.0, 0.0, (0, 1, 0), (0, 50, 0), 22),
+        _raw_token(12.0, 939.57, (1, 0, 0), (-50, 0, 0), 2112),
+        _raw_token(30.0, 0.0, (0, 1, 0), (0, 50, 0), 22),
     ]])
     batch = (cc, torch.tensor([[0, 1]]), torch.ones(1, 2, dtype=torch.bool),
              {"E_dep": torch.tensor([1.0]), "Density": torch.tensor([3.0])})
@@ -100,9 +100,9 @@ def test_energy_kin_exothermic_outgoing_clamps_to_zero() -> None:
 
 def test_energy_kin_cutoff_uses_kinetic() -> None:
     # neutron T=5 (|p|=97): kept by the momentum cutoff, dropped by the kinetic one
-    inc = torch.tensor([[_raw_row(500.0, 938.27, (1, 0, 0), (-50, 0, 0), 2212)]])
-    out = torch.tensor([[_raw_row(5.0, 939.57, (0, 1, 0), (0, 50, 0), 2112),
-                         _raw_row(50.0, 0.0, (0, 0, 1), (0, 0, 50), 22)]])
+    inc = torch.tensor([[_raw_token(500.0, 938.27, (1, 0, 0), (-50, 0, 0), 2212)]])
+    out = torch.tensor([[_raw_token(5.0, 939.57, (0, 1, 0), (0, 50, 0), 2112),
+                         _raw_token(50.0, 0.0, (0, 0, 1), (0, 0, 50), 22)]])
     data = {"per_particle": {"Incoming": inc, "Outgoing": out},
             "per_event": {"E_dep": torch.tensor([1.0]), "Density": torch.tensor([3.0])}}
     for kin, want_n in ((False, 2), (True, 1)):

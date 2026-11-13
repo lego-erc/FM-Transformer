@@ -1,7 +1,7 @@
 """Energy <-> model-scalar conversion.
 
 ``to_scalar`` maps MeV to ``log(|p|/cutoff) / log(max_energy/cutoff)`` clamped to
-``[0, 1]``. For outgoing rows ``DataPrep.cc_trafo`` then stores ``1 - e_out/e_in``
+``[0, 1]``. For outgoing tokens ``DataPrep.cc_trafo`` then stores ``1 - e_out/e_in``
 -- inverted and relative to the incoming particle -- which is why ``to_mev``
 reads ``(1 - e_model) * e_in``.
 """
@@ -43,7 +43,7 @@ class EnergyProjections:
         s_out = (1 - e_model.clamp(0.0, 1.0)) * e_in.clamp(0.0, 1.0)
         return self.cutoff * (self.max_energy / self.cutoff) ** s_out
 
-    # Legacy prefix-free 6-column transforms (row 0 = the incoming particle), kept
+    # Legacy prefix-free 6-column transforms (token 0 = the incoming particle), kept
     # for lego_eval's EnergyProjections("in_frac_log"); they do NOT follow the
     # padded _F layout.
     def identity(self, p_x: Tensor) -> Tensor:

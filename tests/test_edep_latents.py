@@ -189,7 +189,7 @@ def test_checkpoint_carries_the_autoencoder_and_the_token(tmp_path) -> None:
 
 
 def test_a_checkpoint_without_the_latent_token_is_refused() -> None:
-    """The vf loads with strict=False, so the 16-row prototype (no lat_in / lat_out) would silently generate with a
+    """The vf loads with strict=False, so the 16-token prototype (no lat_in / lat_out) would silently generate with a
     zero latent read-out."""
     m = LEGOLtng(_config())
     sd = {k: v for k, v in m.model.vf.state_dict().items() if not k.startswith("lat_")}
@@ -291,9 +291,9 @@ def _whitened_batch(B: int = 8) -> DataStruct:
     return ds
 
 
-def test_whitened_solve_returns_u_scale_rows_and_latents() -> None:
+def test_whitened_solve_returns_u_scale_tokens_and_latents() -> None:
     # a field pushing the whitened E_dep cell by +1 (one prior sigma) keeps u inside the channel once solve undoes the
-    # whitening -- after splitting the latent rows off, which must not reach the E_dep row or the layout
+    # whitening -- after splitting the latent tokens off, which must not reach the E_dep token or the layout
     m = _whitened()
     ds = _whitened_batch()
 

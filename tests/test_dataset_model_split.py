@@ -30,10 +30,10 @@ def _in_scalar(max_energy: float = 300.0) -> float:
 
 
 def _raw(n=4):
-    def row(e, d, p, pid):
+    def token(e, d, p, pid):
         return [e, *[e * c for c in d], *p, pid]
-    inc = torch.tensor([[row(E_IN, (1, 0, 0), (-50, 0, 0), 2212.0)]]).repeat(n, 1, 1)
-    out = torch.tensor([[row(E_OUT, (0, 1, 0), (0, 50, 0), 22.0)]]).repeat(n, 2, 1)
+    inc = torch.tensor([[token(E_IN, (1, 0, 0), (-50, 0, 0), 2212.0)]]).repeat(n, 1, 1)
+    out = torch.tensor([[token(E_OUT, (0, 1, 0), (0, 50, 0), 22.0)]]).repeat(n, 2, 1)
     return {"per_particle": {"Incoming": inc, "Outgoing": out},
             "per_event": {"E_dep": torch.full((n,), E_DEP),
                           "Density": torch.full((n,), 3.0)}}
