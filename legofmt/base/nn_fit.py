@@ -46,7 +46,7 @@ def head_nll(ds_t: DataStruct, fwd: Tensor, p: BaseParams, e_dep_max: float) -> 
     lp_en     = energy_logp(p.energy, f.out_energy)
     lp_ang    = (angles_logp(p.angles, angle_w(f.out_mom, f.in_mom))
                  + angles_logp(p.angles, angle_w(f.out_pos, f.in_pos)))
-    lp_edep   = edep_logp(p.edep, f.edep.unsqueeze(-1), e_dep_max).squeeze(-1)
+    lp_edep   = edep_logp(p.edep, f.edep, e_dep_max)
     sums      = torch.stack(((lp_en * continuum).sum(), (lp_ang * slot).sum(), (lp_edep * deposit).sum().double()))
     counts    = torch.stack((continuum.sum(), slot.sum(), deposit.sum())).double().clamp(min=1)
     return -sums / counts

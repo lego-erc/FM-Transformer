@@ -56,8 +56,6 @@ class LegacyEdepToken:
         if _plain(self.rc):
             return x0
         mu, sig = self.gen_base.edep_mu, self.gen_base.edep_sig
-        if torch.is_tensor(mu):
-            mu, sig = mu.squeeze(-1), sig.squeeze(-1)
         x0[:, 1, 0] = self.gen_base.e_dep_max * torch.sigmoid(mu + sig * x0[:, 1, 0])
         return x0
 
@@ -77,5 +75,4 @@ class LegacyEdepToken:
         if not self.rc.edep_whiten:
             return f
         _, mu, sig, _, _, _ = self.base_head_params(ds_t)   # by position: a legacy head returns a plain tuple
-        return whiten_edep_options(f, ds_t.m.full[:, 1] == 1, mu.reshape(-1), sig.reshape(-1),
-                                   self.gen_base.e_dep_max, self.rc, inverse)
+        return whiten_edep_options(f, ds_t.m.edep == 1, mu, sig, self.gen_base.e_dep_max, self.rc, inverse)

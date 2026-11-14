@@ -99,6 +99,8 @@ class _M:
     def __init__(self, m: Tensor) -> None:
         self.full = m.squeeze(-1) if m.ndim > 2 else m  # accepts (B, L) or (B, L, 1); callers mix the two
     @property
+    def edep(self) -> Tensor: return self.full[..., 1]
+    @property
     def out_p(self) -> Tensor: return self.full[..., n_prefix() + 1:]
     @property
     def fwd(self) -> Tensor: return self.full[..., n_prefix()] == 0   # of the mask m: the incoming slot conditions

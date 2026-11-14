@@ -155,7 +155,7 @@ def test_params_shapes_and_the_moment_head_has_no_energy_shape() -> None:
     model = _shaken(LEGOLtng(_config()))
     n_cls = len(model.pdgids_template) + 1
     sm, mu, sig, kap, pw, q = model.base_head_params(_batch(n_out))
-    assert [t.shape for t in (sm, mu, sig, kap, pw, q)] == [(3, n_cls), (3, 1), (3, 1), (3, n_cls), (3, n_cls),
+    assert [t.shape for t in (sm, mu, sig, kap, pw, q)] == [(3, n_cls), (3,), (3,), (3, n_cls), (3, n_cls),
                                                            (3, n_cls)]
     assert (q >= 0.25).all() and (q <= 4.0).all() and (pw >= 0.1).all() and (pw <= 10.0).all()
     out = LEGOLtng(_config(base_head_lik=False)).base_head_params(_batch(n_out))
@@ -308,7 +308,7 @@ def test_lik_loss_terms_are_the_per_unit_means() -> None:
     ref = torch.stack((-energy_logp(Energy(s, q), u)[c].mean(),
                        -(angles_logp(Angles(kap, pw), wm, eps=1e-3)
                          + angles_logp(Angles(kap, pw), wp, eps=1e-3))[valid].mean(),
-                       -torch.distributions.Normal(mu[ok, 0], sig[ok, 0]).log_prob(y).mean().double()))
+                       -torch.distributions.Normal(mu[ok], sig[ok]).log_prob(y).mean().double()))
     assert torch.allclose(got, ref, rtol=1e-6, atol=0)
 
 
@@ -335,7 +335,7 @@ def test_params_read_the_head_columns_in_their_documented_order() -> None:
         h.rd.bias.copy_(b[2 * n:2 * n + 2])
         h.ra.bias.copy_(b[2 * n + 2:])
     sm, mu, sig, kap, pw, q = model.base_head_params(_batch(torch.tensor([1, 2])))
-    got = torch.cat((sm.log(), q.log(), mu, sig.log(), kap.log(), pw.log()), -1)
+    got = torch.cat((sm.log(), q.log(), mu[:, None], sig.log()[:, None], kap.log(), pw.log()), -1)
     assert torch.allclose(got, b.expand_as(got), atol=1e-6)
 
 
@@ -363,7 +363,7 @@ def test_lik_head_standardises_energy_chord_log_t_and_drops_a_constant_one() -> 
         h.std.copy_(torch.tensor([0.3, 0.2, torch.inf]))   # log t constant on the training set
     cont, out_set = torch.rand(16, 3), torch.rand(16, 1 + n)
     species = torch.nn.functional.one_hot(torch.arange(16) % n, n).float()
-    out = lambda c: torch.cat(h(c, species, out_set), -1)
+    out = lambda c: torch.cat([v.reshape(16, -1) for v in h(c, species, out_set)], -1)   # E_dep's are (B,)
     moved = lambda col: cont.clone().index_fill_(1, torch.tensor([col]), 9.0)
     assert torch.equal(out(cont), out(moved(2))), "the constant log t column must not reach the head"
     assert not torch.allclose(out(cont), out(moved(1))), "the chord column must reach the head"

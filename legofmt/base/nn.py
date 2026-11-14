@@ -42,7 +42,6 @@ class BaseHead(nn.Module):
         super().__init__()
         trunk, group = hidden
         n_in = 3 + 1 + n_cls   # cont + out_set
-        self.n_cls = n_cls
         self.l0 = nn.Linear(n_in + n_cls, trunk)
         self.k0 = nn.Linear(n_cls * n_in, trunk, bias=False)   # every input times the primary's one-hot
         nn.init.uniform_(self.k0.weight, -n_in**-0.5, n_in**-0.5)  # fan-in of the nonzero block
@@ -66,7 +65,7 @@ class BaseHead(nn.Module):
 
         Returns:
             ``BaseParams``: the energy and angle parameters (B, n_cls), one column per outgoing class, and E_dep's
-            (B, 1).
+            (B,).
         """
         B = len(cont)
         with ieee_fp32(), torch.autocast(cont.device.type, enabled=False):
@@ -80,7 +79,7 @@ class BaseHead(nn.Module):
             energy, e_dep, angles = self.re(self.ge(h)), self.rd(self.gd(h)), self.ra(self.ga(h))
 
         log_sm, log_q     = energy[B:].chunk(2, -1)   # the energy group: from the blind pass
-        mu, log_sig       = e_dep[:B].chunk(2, -1)
+        mu, log_sig       = e_dep[:B].unbind(-1)
         log_kappa, log_pw = angles[:B].chunk(2, -1)
         return BaseParams(   # each parameter inside its distribution's range
             sm_scale = torch.exp(log_sm.clamp(-8, 8)),         # s      in [e^-8, e^8]

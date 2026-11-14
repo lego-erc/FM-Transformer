@@ -5,7 +5,8 @@ checkpoints still run unchanged:
     base_dist    ``iso`` (isotropic momentum and position directions), ``iso_pos`` (isotropic positions only)
     tanh_theta   off: a wrapped-normal polar angle; on without a shape exponent (configs without ``ang_shape``)
     bs_frac      > 0: a share of the events drawn about the antipode
-    iso          the fully isotropic start of inverse-mask events (``mask_conf.p_forward`` < 1)
+    iso          the fully isotropic start of inverse-mask events (``mask_conf.p_forward`` < 1); ``x0_inverse_mask``
+                 is ``BaseDist.gen_base_wrapper`` for a batch that holds any
 
 ``GenerateBase`` derives from ``LegacySampler``: its ``__call__`` hands every draw that is not the recipe's to the one
 here, and ``rd_scale`` / ``poles`` / ``iso_dirs`` / ``iso`` stay reachable on it (``lego_eval`` tests for ``iso_dirs``).
@@ -61,6 +62,27 @@ def sample_iso(n: tuple, mpct, device=None, rng=None, elem=None, stream: int = 0
     phi = 2 * torch.pi * rand(0)
     theta = torch.acos(2 * rand(1) - 1)
     return _GEOM.to_cc(torch.stack((theta, phi), dim=-1)).flatten(-2)
+
+
+def x0_inverse_mask(model, ds_t, rng):
+    """Samples ``x_0`` for a batch with inverse-mask events, which generate the incoming particle from the outgoing set.
+
+    An inverse-mask event starts from the isotropic sample (``LegacySampler.iso``), drawn first; a forward event
+    from the head's prior, as in ``BaseDist.gen_base_wrapper``, which hands such a batch here.
+
+    Args:
+        model: the ``LEGOLtng``.
+        ds_t:  the batch (``DataStruct``).
+        rng:   as in ``gen_base_wrapper``.
+
+    Returns:
+        ``x_0`` (B, N, 7).
+    """
+    data, m, fwd = ds_t.f.model_in, ds_t.m.full, ds_t.m.fwd   # fwd: the incoming slot conditions
+    x0 = model.gen_base.iso(m.shape, data.device, rng=rng)
+    if fwd.any():
+        x0 = torch.where(fwd.view(-1, 1, 1), model._draw_prior(ds_t, rng), x0)
+    return torch.where((m == 1).unsqueeze(-1), x0, data)
 
 
 class LegacySampler:

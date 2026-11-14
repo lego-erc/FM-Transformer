@@ -18,7 +18,7 @@ module for ``__init__`` to assign. The mixin reads from ``LEGOLtng``: ``rc``, ``
 
 Configs without ``base_conf.base_head_lik`` (moment head, no head) run through :mod:`legofmt.legacy.base_nn`, an
 E_dep token without the plain ``model_conf.edep_whiten`` through :mod:`legofmt.legacy.edep_token`, sampler options
-other than the recipe's through :mod:`legofmt.legacy.gen_base`.
+other than the recipe's and inverse-mask events (``mask_conf.p_forward < 1``) through :mod:`legofmt.legacy.gen_base`.
 """
 
 from itertools import chain, islice, repeat
@@ -35,6 +35,7 @@ from legofmt.cfm.geom_encoder import x0_gcm2
 from legofmt.data.struct import DataStruct
 from legofmt.geometry.geom_trafos import cuboid_chord
 from legofmt.legacy.base_nn import build_legacy_base_head
+from legofmt.legacy.gen_base import x0_inverse_mask
 
 
 def build_base_head(rc, gen_base) -> nn.Module | None:
@@ -77,12 +78,12 @@ class BaseDist:
                          rng=None) -> Tensor:
         """Samples ``x_0`` for a batch: the data on conditioning cells, a draw of the base on generated ones.
 
-        Forward events draw the head's prior, inverse-mask events an isotropic sample. The E_dep cell is in the
-        flow's unit (``edep_whiten.py``); ``solve`` starts from it as it is. ``lego_eval`` calls this.
+        Every event draws the head's prior. The E_dep cell is in the flow's unit (``edep_whiten.py``); ``solve``
+        starts from it as it is. ``lego_eval`` calls this.
 
         Args:
             ds_t:        the batch, a ``DataStruct`` or the three tensors it is built from.
-            all_forward: treat every event as forward.
+            all_forward: treat every event as forward, whatever its mask.
             rng:         keys every draw on the event and an outgoing slot's (species, rank)
                 (``legofmt.rng.EventRNG``); None: torch's noise.
 
@@ -91,14 +92,9 @@ class BaseDist:
         """
         if not isinstance(ds_t, DataStruct):
             ds_t = DataStruct(*ds_t)
-        data, m, fwd = ds_t.f.model_in, ds_t.m.full, ds_t.m.fwd   # fwd: the incoming slot conditions
-        if all_forward or fwd.all():
-            x0 = self._draw_prior(ds_t, rng)
-        else:   # inverse-mask events get the isotropic sample, drawn first
-            x0 = self.gen_base.iso(m.shape, data.device, rng=rng)
-            if fwd.any():
-                x0 = torch.where(fwd.view(-1, 1, 1), self._draw_prior(ds_t, rng), x0)
-        return torch.where((m == 1).unsqueeze(-1), x0, data)
+        if not (all_forward or ds_t.m.fwd.all()): return x0_inverse_mask(self, ds_t, rng)   # mask_conf.p_forward < 1
+        x0 = self._draw_prior(ds_t, rng)
+        return torch.where((ds_t.m.full == 1).unsqueeze(-1), x0, ds_t.f.model_in)
 
     def _draw_prior(self, ds_t: DataStruct, rng) -> Tensor:
         """Samples the head's prior for every event of ``ds_t``.
@@ -131,7 +127,7 @@ class BaseDist:
     def _slot_prior(self, ds_t: DataStruct) -> BaseParams:
         """Gathers the head's per-class parameters onto the outgoing slots of ``ds_t``.
 
-        Returns ``BaseParams`` with the energy and angle parameters (B, n_out); E_dep's stay (B, 1).
+        Returns ``BaseParams`` with the energy and angle parameters (B, n_out); E_dep's stay (B,).
         """
         p   = self.base_head_params(ds_t)
         idx = self._species_idx(ds_t.f.out_pid, p.kappa.shape[-1])
@@ -142,7 +138,7 @@ class BaseDist:
         """Evaluates the base head on the events of ``ds_t``.
 
         Returns ``BaseParams`` with the energy and angle parameters (B, n_cls), one column per outgoing class, and
-        E_dep's (B, 1).
+        E_dep's (B,).
         """
         return self.base_head(*self._head_inputs(ds_t))
 
@@ -241,5 +237,4 @@ class BaseDist:
         ``edep_whiten.py``. Returns a copy of ``f``.
         """
         _, mu, sig, _, _, _ = self.base_head_params(ds_t)   # by position: a legacy head returns a plain tuple
-        return whiten_edep(f, ds_t.m.full[:, 1] == 1, mu.reshape(-1), sig.reshape(-1), self.gen_base.e_dep_max,
-                           inverse)
+        return whiten_edep(f, ds_t.m.edep == 1, mu, sig, self.gen_base.e_dep_max, inverse)

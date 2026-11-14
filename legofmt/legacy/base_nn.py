@@ -101,7 +101,7 @@ class LegacyBaseDist:
             with torch.autocast(x.device.type, enabled=False):
                 out = self.base_head(x)
         n_ang   = n_cls if bc.get("ang_species", False) else 1
-        return (out[..., 0:1].exp(), out[..., 1:2], out[..., 2:3].exp(),
+        return (out[..., 0:1].exp(), out[..., 1], out[..., 2].exp(),
                 out[..., 3:3 + n_ang].exp().clamp_min(1e-3),  # kap: divisor in sample()
                 out[..., 3 + n_ang:].exp().clamp(0.1, 10.0) if out.shape[-1] > 3 + n_ang else None, None)
 
@@ -121,8 +121,7 @@ class LegacyBaseDist:
         ed_t = ds_t.f.edep
         w    = fwd.float() * (ed_t > 0)
         ly   = torch.logit((ed_t.float() / self.gen_base.e_dep_max).clamp(1e-4, 1 - 1e-4))
-        mu1, sig1 = mu.squeeze(-1), sig.squeeze(-1)
-        l_edep = ((sig1.log() + (ly - mu1) ** 2 / (2 * sig1 ** 2))
+        l_edep = ((sig.log() + (ly - mu) ** 2 / (2 * sig ** 2))
                   * w).sum() / w.sum().clamp(min=1)
 
         if not self.gen_base.tanh_theta:

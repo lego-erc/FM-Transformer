@@ -134,7 +134,7 @@ class BaseParams(NamedTuple):
     """The three distributions' parameters for a batch.
 
     One column per outgoing class ``(B, n_cls)`` as the head returns them, or gathered onto the outgoing slots
-    ``(B, n_out)``; E_dep's are per event ``(B, 1)``.
+    ``(B, n_out)``; E_dep's are per event ``(B,)``.
     """
     sm_scale: Tensor   # energy s
     edep_mu:  Tensor   # E_dep mu
