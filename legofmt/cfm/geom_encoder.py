@@ -1,10 +1,20 @@
-"""K summary tokens of a layered stack, in the flow's hidden width (model_args.geom_encoder).
+"""K summary tokens of a layered stack, in the flow's hidden width (``model_args.geom_encoder``).
 
-One token per layer, beam side first: [thickness mm, density g/cm3, Z, A] -> log t, log rho, Z/100, log A,
-log(t/X0), log(t/lambda_I), log(rho t), plus Fourier features of the cumulative depth at the layer centre in X0 and
-in lambda_I (physical depth rather than the layer index, so stacks of different layer counts line up). K learned
-summary tokens are prepended, a small bidirectional x-transformers Encoder runs over [summary; layers], and the
-summary outputs are projected to h_dim through a zero-initialised read-out, so an untrained encoder adds nothing.
+```
+layer      [t mm, rho g/cm3, Z, A], beam side first
+
+features   log t, log rho, Z / 100, log A, log(t / X0), log(t / lambda_I), log(rho t)          the material
+           sin, cos of 2 pi c_X0 / p and of 2 pi c_lam / (p / 10)                             the depth c of the
+           c_X0 / 30, c_lam / 3                                                               layer's centre
+
+encoder    h      = Encoder([summary_1 .. summary_K | inp(features)])
+           tokens = out(h_1 .. h_K)
+```
+
+``c_X0`` / ``c_lam`` is the cumulative depth in radiation / interaction lengths: physical depth rather than the layer
+index, so stacks of different layer counts line up; ``p`` are ``N_FREQ`` periods from 0.2 to 60 X0. The summary
+tokens are learned, the encoder is a small bidirectional x-transformers ``Encoder``, and ``out`` starts at zero, so
+an untrained encoder adds nothing.
 
 The stack is fixed per model (it comes from the config), so the layer features are a non-persistent buffer and the
 encoder runs once per vector-field call on a batch of one.
@@ -21,7 +31,7 @@ N_FREQ = 8
 
 def x0_gcm2(Z: Tensor, A: Tensor) -> Tensor:
     """Computes the radiation length (Dahl's fit), in g/cm2; the base head uses it too (base/interface.py)."""
-    return 716.4 * A / (Z * (Z + 1) * torch.log(287.0 / Z.sqrt()))
+    return 716.4 * A / (Z * (Z + 1) * torch.log(287.0 / torch.sqrt(Z)))
 
 
 def x0_mm(rho: Tensor, Z: Tensor, A: Tensor) -> Tensor:
@@ -37,15 +47,23 @@ def lambda_mm(rho: Tensor, A: Tensor) -> Tensor:
 def layer_features(layers: Tensor) -> Tensor:
     """Builds the encoder's features (Lg, 7 + 4 * N_FREQ + 2) from the layers (Lg, 4) = [t, rho, Z, A]."""
     t, rho, Z, A = layers.unbind(-1)
-    tx0, tlam = t / x0_mm(rho, Z, A), t / lambda_mm(rho, A)
-    cx0, clam = tx0.cumsum(0) - tx0 / 2, tlam.cumsum(0) - tlam / 2
-    per = torch.logspace(*torch.tensor([0.2, 60.0], dtype=torch.float64).log10().tolist(), N_FREQ, dtype=layers.dtype)
-    ph_x0, ph_lam = 2 * torch.pi * cx0[:, None] / per, 2 * torch.pi * clam[:, None] / (per / 10)
-    return torch.cat([torch.stack([t.log(), rho.log(), Z / 100, A.log(), tx0.log(), tlam.log(), (rho * t).log()], -1),
-                      ph_x0.sin(), ph_x0.cos(), ph_lam.sin(), ph_lam.cos(), cx0[:, None] / 30, clam[:, None] / 3], -1)
+    t_x0   = t / x0_mm(rho, Z, A)          # the layer's thickness in radiation lengths
+    t_lam  = t / lambda_mm(rho, A)         # and in interaction lengths
+    c_x0   = t_x0.cumsum(0) - t_x0 / 2     # the depth of the layer's centre
+    c_lam  = t_lam.cumsum(0) - t_lam / 2
+    period = torch.logspace(*torch.tensor([0.2, 60.0], dtype=torch.float64).log10().tolist(), N_FREQ,
+                            dtype=layers.dtype)
+    ph_x0  = 2 * torch.pi * c_x0[:, None] / period
+    ph_lam = 2 * torch.pi * c_lam[:, None] / (period / 10)
+    material = torch.stack([torch.log(t), torch.log(rho), Z / 100, torch.log(A),
+                            torch.log(t_x0), torch.log(t_lam), torch.log(rho * t)], -1)
+    return torch.cat([material, torch.sin(ph_x0), torch.cos(ph_x0), torch.sin(ph_lam), torch.cos(ph_lam),
+                      c_x0[:, None] / 30, c_lam[:, None] / 3], -1)
 
 
 class GeomEncoder(nn.Module):
+    """The encoder of a layered stack into ``tokens`` summary tokens of width ``h_dim``."""
+
     def __init__(self, layers, h_dim: int, *, tokens: int = 4, dim: int = 128, depth: int = 3, heads: int = 4) -> None:
         super().__init__()
         feats = layer_features(torch.as_tensor(layers, dtype=torch.float64)).float()

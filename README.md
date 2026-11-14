@@ -396,8 +396,8 @@ default `odeint_conf.amp`) and `x_transformers_version` (the qk-norm scale above
 
 | Path | Purpose |
 |---|---|
-| `legofmt/cfm/cfm_trafo_x.py` | `CFMTrafo_x`: vector field. Per-(mask, type, pdgid) conditional linear embedding, `x-transformers` Encoder conditioned on sinusoidal `t` (and `d`) embeddings, mirrored output projection. |
-| `legofmt/cfm/project_model.py`, `legofmt/cfm/solvers.py`, `legofmt/cfm/path_sampler.py` | `ProjectModel` keeps state/velocity on the manifold; `Solvers` mixin (`solve`, hand-unrolled euler / midpoint / rk4 steps, `log_likelihood`, `forward`); `ProductPathSampler` (the CondOT geodesic per factor, closed form). |
+| `legofmt/cfm/cfm_trafo_x.py`, `legofmt/cfm/packed_cond.py` | `CFMTrafo_x`: vector field. Per-(mask, type, pdgid) conditional linear embedding, `x-transformers` Encoder conditioned on sinusoidal `t` (and `d`) embeddings, mirrored output projection; the packed form of that condition for the adaptive norms. Superseded options (`time_cond: false`, per-token times, `dim_in_out`, `grad_ckpt`) are in `legofmt/legacy/cfm_trafo_x.py`. |
+| `legofmt/cfm/project_model.py`, `legofmt/cfm/solvers.py`, `legofmt/cfm/path_sampler.py` | `ProjectModel` keeps state/velocity on the manifold; `Solvers` mixin (`solve`, hand-unrolled euler / midpoint / rk4 steps, `log_likelihood`, `forward`); `ProductPathSampler` (the CondOT geodesic per factor, closed form). Any other solver `method` runs through flow_matching's `ODESolver` (`legofmt/legacy/solvers.py`). |
 | `legofmt/cfm/edep_ae.py`, `legofmt/cfm/geom_encoder.py` | `EdepLayerAE`, the per-layer E_dep autoencoder (`model_conf.edep_ae`); `GeomEncoder`, the layered-stack summary tokens (`model_args.geom_encoder`). |
 | `legofmt/main/modules.py` | `LEGOLtng`: construction, Lightning hooks, data split, optimizer wiring. Behaviour lives in the mixins `TrainStep` / `BaseDist` / `Solvers`. |
 | `legofmt/main/train_step.py` | `TrainStep`: training step, per-cell uncertainty weighting, `t` and mask sampling, flow-map loss gating. |

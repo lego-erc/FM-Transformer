@@ -1,16 +1,27 @@
-"""Manifold-projection wrapper around the flow's vector field (:class:`~legofmt.cfm.cfm_trafo_x.CFMTrafo_x`).
+"""The vector field on the manifold: ``ProjectModel`` wraps the field (:class:`~legofmt.cfm.cfm_trafo_x.CFMTrafo_x`)
+between two projections.
 
-``LEGOLtng`` assigns it as ``self.model``, which is where the state_dict keys ``model.vf.*`` come from.
+```
+x_p = proj_M(x)                  the state, onto the manifold
+v   = proj_T(x_p, field(x_p))    the field's output, onto the tangent space at x_p
+```
+
+on every attended token; padding passes through both as it is. The field sees ``x_p`` detached unless
+``no_detach``: the path's ``x_t`` carries no graph in training, a solve that is differentiated (density design) and
+``log_likelihood`` set the flag.
+
+``LEGOLtng`` assigns the wrapper as ``self.model``, which is where the state_dict keys ``model.vf.*`` come from.
 """
 
 import torch
 from torch import Tensor, nn
 
 from legofmt.geometry.product_manifold import ProductManifold
+from legofmt.legacy.cfm_trafo_x import pin_per_token
 
 
 class ProjectModel(nn.Module):
-    """Projection Wrapper for Riemannian FM Model."""
+    """The field between the projection onto the manifold and the projection onto its tangent space."""
 
     def __init__(self, vf: nn.Module, manifold: ProductManifold, **kwargs) -> None:
         super().__init__()
@@ -22,8 +33,7 @@ class ProjectModel(nn.Module):
         """Projects ``x`` onto the manifold.
 
         The network sees the projected value on every ``attn_mask`` slot (off-manifold conditioning filler never reaches
-        it), detached unless ``no_detach`` -- which ``log_likelihood`` sets. Returns ``(x_proj, x_att)``: the
-        projection, and what the network sees.
+        it), detached unless ``no_detach``. Returns ``(x_proj, x_att)``: the projection, and what the network sees.
         """
         x_proj = self.manifold.projx(x)
         x_att  = torch.where(attn_mask.unsqueeze(-1), x_proj, x)
@@ -44,8 +54,19 @@ class ProjectModel(nn.Module):
     ) -> Tensor:
         """Evaluates the field at ``x`` projected onto the manifold; the velocity comes back in its tangent space.
 
-        With the field's latent token (``model_args.lat_dim``) pass the latent ``z`` (B, K) and get ``(v, v_z)``; ``z``
-        is Euclidean and not projected.
+        Args:
+            x:         (B, L, in_dim), the state.
+            t:         the time: a scalar, or one per event (B, 1).
+            mask:      (B, L), 1 on generated tokens.
+            attn_mask: (B, L) bool, False on padding.
+            types:     (1, L), each position's type.
+            pdgids:    (B, L, 1), each token's species index.
+            d:         the step size, shaped like ``t``; None: 0, the instantaneous velocity. Read only by a field
+                with ``step_cond``.
+            z:         (B, K), the field's latent (``model_args.lat_dim``); Euclidean, not projected.
+
+        Returns:
+            ``v`` (B, L, in_dim); with ``z`` ``(v, v_z)``.
         """
         x_proj, x_att = self._prep_x(x, attn_mask)
         t = torch.atleast_2d(t)
@@ -53,10 +74,7 @@ class ProjectModel(nn.Module):
             d = torch.zeros_like(t) if d is None else torch.atleast_2d(d)
         else:
             d = None  # the field ignores it
-        if t.shape[-1] != 1 or (d is not None and d.shape[-1] != 1):  # per token: pin the conditions here
-            t = torch.where(mask == 1, t.expand_as(attn_mask), 1.0)  # conditions get t=1
-            if d is not None:
-                d = torch.where(mask == 1, d.expand_as(attn_mask), 0.0)  # and are not transported
+        if t.shape[-1] != 1 or (d is not None and d.shape[-1] != 1): t, d = pin_per_token(t, d, mask, attn_mask)
         out = self.vf(x_att, mask, attn_mask, types, pdgids, t=t, d=d, **({} if z is None else {"z": z}))
         v, v_z = (out, None) if z is None else out
         v = torch.where(attn_mask.unsqueeze(-1), self.manifold.proju(x_proj, v), v)
@@ -69,4 +87,5 @@ def uncompiled(module: nn.Module) -> nn.Module:
 
 
 def is_compiled(module: nn.Module) -> bool:
+    """Returns whether ``module`` is a ``torch.compile`` wrapper."""
     return hasattr(module, "_orig_mod")

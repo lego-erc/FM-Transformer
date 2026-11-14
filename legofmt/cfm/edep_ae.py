@@ -1,6 +1,14 @@
 """Per-layer E_dep autoencoder (``model_conf.edep_ae``): K latents per event for the flow, and a factorised
 stochastic decoder back to the n_layers deposits.
 
+```
+encode    z = (enc(log(E + offset)) - z_mu) / z_sd            E: the deposits per layer [MeV], z: K latents
+
+decode    a_l, (log w, mu, log sig)_lm = dec(z, log E_tot)    per layer l and mixture component m
+          P(E_l = 0)             = sigmoid(a_l)
+          p(log E_l | E_l > 0)   = sum_m w_lm N(mu_lm, sig_lm^2)
+```
+
 The flow generates the K standardised latents as one extra token of the field (``model_args.lat_dim``).
 After the solve, ``sample`` draws every layer from its own zero-deposit probability and log-E Gaussian mixture,
 given the latents and the event's total, and rescales the draw to that total. A deterministic decoder cannot do
@@ -29,6 +37,8 @@ def _mlp(n_in: int, n_out: int, hidden: int, depth: int) -> nn.Sequential:
 
 
 class EdepLayerAE(nn.Module):
+    """The autoencoder: an MLP encoder to K latents and an MLP decoder to each layer's mixture."""
+
     def __init__(self, n_layers: int, K: int, hidden: int = 512, n_mix: int = 8) -> None:
         super().__init__()
         self.n_layers, self.K, self.n_mix = n_layers, K, n_mix
@@ -44,6 +54,10 @@ class EdepLayerAE(nn.Module):
         return (self.enc(torch.log(E + LOG_OFFSET)) - self.z_mu) / self.z_sd
 
     def _head(self, z: Tensor, tot: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Decodes latents (B, K) and totals (B, 1) into each layer's ``(a, log w, mu, log sig)``.
+
+        ``a`` is (B, n_layers), the mixture's parameters (B, n_layers, n_mix); ``log sig`` is held in [-7, 3].
+        """
         M = self.n_mix
         h = self.dec(torch.cat([z * self.z_sd + self.z_mu, torch.log(tot)], -1))
         h = h.view(-1, self.n_layers, 1 + 3 * M)
@@ -54,11 +68,11 @@ class EdepLayerAE(nn.Module):
 
         Every event needs a deposit.
         """
-        a, lw, mu, ls = self._head(self.encode(E), E.sum(-1, keepdim=True))
-        v = torch.log(E.clamp(min=1e-12))[..., None]
-        logn = -0.5 * ((v - mu) / ls.exp()) ** 2 - ls - _HALF_LOG_2PI
-        cont = torch.logsumexp(lw + logn, -1) - v[..., 0]          # density of E, not of log E
-        return -torch.where(E <= 0, F.logsigmoid(a), F.logsigmoid(-a) + cont).mean()
+        a, log_w, mu, log_sig = self._head(self.encode(E), E.sum(-1, keepdim=True))
+        log_e = torch.log(E.clamp(min=1e-12))[..., None]
+        log_n = -0.5 * ((log_e - mu) / torch.exp(log_sig)) ** 2 - log_sig - _HALF_LOG_2PI
+        log_p = torch.logsumexp(log_w + log_n, -1) - log_e[..., 0]          # density of E, not of log E
+        return -torch.where(E <= 0, F.logsigmoid(a), F.logsigmoid(-a) + log_p).mean()
 
     @torch.no_grad()
     def sample(self, z: Tensor, tot: Tensor, rng=None) -> Tensor:
@@ -73,15 +87,17 @@ class EdepLayerAE(nn.Module):
             (B, n_layers) deposits [MeV].
         """
         z, tot = z.float(), tot.float().reshape(-1, 1)
-        a, lw, mu, ls = self._head(z, tot.clamp(min=1e-6))
+        a, log_w, mu, log_sig = self._head(z, tot.clamp(min=1e-6))
         layer = torch.arange(a.shape[-1], device=a.device)
-        k = (torch.distributions.Categorical(logits=lw).sample() if rng is None
-             else rng.categorical(lw.softmax(-1), AE_MIX, layer))[..., None]
-        v = mu.gather(-1, k)[..., 0] + ls.gather(-1, k)[..., 0].exp() * (
-            torch.randn_like(a) if rng is None else rng.normal(AE_NORM, layer).to(a))
+        # the noise: a mixture component, a normal and a uniform per layer
+        k = (torch.distributions.Categorical(logits=log_w).sample() if rng is None
+             else rng.categorical(log_w.softmax(-1), AE_MIX, layer))[..., None]
+        n = torch.randn_like(a) if rng is None else rng.normal(AE_NORM, layer).to(a)
         u = torch.rand_like(a) if rng is None else rng.uniform(AE_ZERO, layer).to(a)
-        E = torch.where(u < torch.sigmoid(a), torch.zeros_like(a), torch.minimum(v, self.log_e_max).exp())
-        dead = E.sum(-1) == 0
+
+        log_e = mu.gather(-1, k)[..., 0] + torch.exp(log_sig.gather(-1, k)[..., 0]) * n
+        E     = torch.where(u < torch.sigmoid(a), torch.zeros_like(a), torch.exp(torch.minimum(log_e, self.log_e_max)))
+        dead  = E.sum(-1) == 0                    # nothing drawn anywhere: the total goes to the likeliest layer
         E[dead, a[dead].argmin(-1)] = 1.0
         return torch.where(tot > 0, E * tot / E.sum(-1, keepdim=True), torch.zeros_like(E))
 

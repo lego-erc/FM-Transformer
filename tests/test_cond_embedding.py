@@ -31,7 +31,7 @@ def _reference(vf, x, mask, types, pdgids, h):
 
 def _module(vf, x, mask, types, pdgids, h):
     """(embedding, output projection) the way the module computes them."""
-    oh = vf._one_hot(mask, types, pdgids, x.shape[0])
+    oh = vf._one_hot(mask, types, pdgids)
     return vf._embed(x, oh), vf._project_out(h, mask, oh)
 
 
