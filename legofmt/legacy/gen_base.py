@@ -1,4 +1,4 @@
-"""Sampler options superseded by the recipe's draw (:mod:`legofmt.base_dist.gen_base`), kept so older configs and
+"""Sampler options superseded by the recipe's draw (:mod:`legofmt.base.gen_base`), kept so older configs and
 checkpoints still run unchanged:
 
     scale_dist   ``trunc_norm`` (the default of a config without the key), ``uniform``, ``logit_norm``
@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as F
 
 from legofmt import rng as R
-from legofmt.base_dist.base_dists import Angles, Energy
+from legofmt.base.base_dists import Angles, Energy
 from legofmt.geometry.geom_trafos import GeomTrafos
 
 _GEOM = GeomTrafos()
@@ -76,15 +76,25 @@ class LegacySampler:
             raise ValueError(f"base_dist must be 'poles', 'iso', or 'iso_pos', got {self.base_dist!r}")
 
     def is_recipe(self) -> bool:
-        """Whether a draw is the one ``GenerateBase.__call__`` spells out."""
+        """Returns whether the options are the recipe's, the draw ``GenerateBase.__call__`` spells out."""
         return (self.scale_dist == "sm_norm" and self.base_dist == "poles" and bool(self.tanh_theta)
                 and self.bs_frac == 0 and self.ang_pow is not None)
 
-    def __call__(self, shape, incoming_rt, rng=None, elem=None):
-        """``rng`` (legofmt.rng.EventRNG) keys the draws per event, ``elem`` (B, n_out) per slot."""
+    def __call__(self, ds_t, rng=None):
+        """Samples ``x_0`` for a batch with any option but the recipe's.
+
+        Joins the data's prefix and incoming token with a draw per outgoing slot (``poles`` / ``iso_dirs``), then
+        writes ``z ~ N(0, 1)`` on the E_dep cell. Arguments and result as in ``GenerateBase.__call__``.
+        """
+        f, shape = ds_t.f, ds_t.f.out_pid.shape
+        elem = None if rng is None else R.species_rank_ids(f.out_pid.long())
         if self.base_dist == "iso":
-            return self.iso_dirs(shape, incoming_rt=incoming_rt, rng=rng, elem=elem)
-        return self.poles(shape, incoming_rt=incoming_rt, iso_pos=(self.base_dist == "iso_pos"), rng=rng, elem=elem)
+            tokens = self.iso_dirs(shape, incoming_rt=f.in_cc, rng=rng, elem=elem)
+        else:
+            tokens = self.poles(shape, incoming_rt=f.in_cc, iso_pos=(self.base_dist == "iso_pos"), rng=rng, elem=elem)
+        x0 = torch.cat((f.non_cc, tokens), dim=1)
+        x0[:, 1, 0] = R.Noise(x0.shape[:1], x0.device, rng).normal(R.EDEP).to(x0)
+        return x0
 
     def rd_scale(self, shape, e_in, rng=None, elem=None):
         """Energy prior for the outgoing slots per scale_dist; returns (B, n_out, 1)."""
@@ -99,7 +109,7 @@ class LegacySampler:
         elif self.scale_dist == "uniform":
             u = torch.rand((*shape, 1), device=e_in.device) if u is None else u
         elif self.scale_dist == "sm_norm":
-            u = Energy(self.sm_scale, self.sm_pow).sample(normal())
+            u = Energy(self.sm_scale, self.sm_pow).sample(normal()[..., 0])[..., None]   # parameters: per slot
         elif self.scale_dist == "logit_norm":
             u = torch.sigmoid(normal())  # smooth, symmetric on (0,1)
         else:
@@ -123,7 +133,7 @@ class LegacySampler:
 
     def iso_dirs(self, shape, incoming_rt, rng=None, elem=None, **kwargs):
         # naive base: isotropic momentum/position directions; energy scale from
-        # rd_scale (per scale_dist), E_dep token from insert_add.
+        # rd_scale (per scale_dist), E_dep token from __call__.
         e_sc = self.rd_scale(shape, torch.ones_like(incoming_rt[..., 0:1]), rng=rng, elem=elem)
         p_ = sample_iso(shape, 1, device=incoming_rt.device, rng=rng, elem=elem, stream=R.BASE_MOM)
         x  = sample_iso(shape, 1, device=incoming_rt.device, rng=rng, elem=elem, stream=R.BASE_POS)

@@ -10,9 +10,11 @@ from flow_matching.utils.manifolds import Manifold, Sphere
 
 
 def sphere_logmap(x, y):
-    """``Sphere.logmap`` with the angle from ``atan2(|u|, x.y)``: flow_matching's
-    ``acos(x.y)`` keeps few digits of small angles in fp32 (median relative error
-    2% at 1e-3 rad, 15% at 3e-4), the scale of one short flow-map step."""
+    """Computes ``Sphere.logmap`` with the angle from ``atan2(|u|, x.y)``.
+
+    flow_matching's ``acos(x.y)`` keeps few digits of small angles in fp32 (median relative error 2% at 1e-3 rad, 15% at
+    3e-4), the scale of one short flow-map step.
+    """
     u  = (y - x) - (x * (y - x)).sum(-1, keepdim=True) * x
     su = u.norm(dim=-1, keepdim=True)
     th = torch.atan2(su, (x * y).sum(-1, keepdim=True))
@@ -20,9 +22,11 @@ def sphere_logmap(x, y):
 
 
 def sphere_expmap(x, u):
-    """``Sphere.expmap`` with its arithmetic (bit-identical), differentiable at ``u = 0`` (every conditioning token of a
-    solve): the division sees 1 where the velocity is below EPS, so the unused branch of the ``where`` carries no
-    ``0/0`` (``norm``'s backward is 0 at a zero norm)."""
+    """Computes ``Sphere.expmap`` with its arithmetic (bit-identical), differentiable at ``u = 0``.
+
+    ``u = 0`` is every conditioning token of a solve. The division sees 1 where the velocity is below EPS, so the unused
+    branch of the ``where`` carries no ``0/0`` (``norm``'s backward is 0 at a zero norm).
+    """
     n = u.norm(dim=-1, keepdim=True)
     big = n > Sphere.EPS[n.dtype]
     nu = torch.where(big, n, torch.ones_like(n))

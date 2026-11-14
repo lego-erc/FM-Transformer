@@ -9,9 +9,10 @@ scored as a censored mass.
 import torch
 from torch import Tensor, nn
 
-from legofmt.base_dist.base_dists import Angles, BaseParams, Edep, Energy
-from legofmt.base_dist.nn import ieee_fp32
+from legofmt.base.base_dists import Angles, BaseParams, Edep, Energy
+from legofmt.base.nn import ieee_fp32
 from legofmt.data.struct import DataStruct
+from legofmt.numerics import safe_acos
 
 # Weight of a uniform outlier component in the energy and angle densities; without it far-tail units dominate a fit.
 _OUTLIER = 1e-3
@@ -24,9 +25,20 @@ _E_RANGE = (1e-4, 1 - 1e-4)
 
 
 def head_nll(ds_t: DataStruct, fwd: Tensor, p: BaseParams, e_dep_max: float) -> Tensor:
-    """The head's loss: per-unit mean NLLs (3,), float64, of the forward events' data under the per-slot prior ``p``.
-    Energy per continuum slot (u > 0; the atom at 0 is the flow's), both angles per outgoing slot (momentum and
-    position, each about the incoming one), E_dep per deposit event."""
+    """Computes the head's loss: the mean NLL of the forward events' data under their prior.
+
+    Energy is scored per continuum slot (u > 0; the atom at 0 is the flow's), both angles per outgoing slot
+    (momentum and position, each about the incoming one), E_dep per deposit event.
+
+    Args:
+        ds_t:      the batch.
+        fwd:       (B,) bool, the forward events.
+        p:         the prior per outgoing slot (``BaseDist._slot_prior``).
+        e_dep_max: the deposit's cap, the unit of ``E / e_dep_max``.
+
+    Returns:
+        (3,) float64: the mean NLL of energy, angles and E_dep, each over its own units.
+    """
     f         = ds_t.f
     slot      = ds_t.am.out_p & fwd.unsqueeze(-1)   # the outgoing particles of forward events
     continuum = slot & (f.out_energy > 0)
@@ -41,15 +53,17 @@ def head_nll(ds_t: DataStruct, fwd: Tensor, p: BaseParams, e_dep_max: float) -> 
 
 
 def energy_logp(dist: Energy, u: Tensor, eps: float = _OUTLIER) -> Tensor:
-    """``log p(u)`` as a fit scores it: mixed with an ``eps`` uniform outlier."""
+    """Returns ``log p(u)`` as a fit scores it: mixed with an ``eps`` uniform outlier."""
     u = u.double().clamp(*_U_RANGE)
     return _with_outlier(_float64(dist).log_density(u), eps)
 
 
 def angles_logp(dist: Angles, w: Tensor, eps: float = _OUTLIER) -> Tensor:
-    """``log p(w)`` as a fit scores it: mixed with an ``eps`` uniform outlier, and for ``w < W0`` the censored
-    mass ``P(w < W0)`` in its place. Float32 directions round such an angle to 0, and exact zeros would
-    otherwise reward ever larger pw."""
+    """Returns ``log p(w)`` as a fit scores it: mixed with an ``eps`` uniform outlier, censored below ``W0``.
+
+    For ``w < W0`` the censored mass ``P(w < W0)`` takes the density's place. Float32 directions round such an
+    angle to 0, and exact zeros would otherwise reward ever larger pw.
+    """
     w, dist   = w.double(), _float64(dist)
     log_p     = _with_outlier(dist.log_density(w.clamp(*_W_RANGE)), eps)
     mass0     = dist.cdf(w.new_tensor(_W0))
@@ -58,30 +72,30 @@ def angles_logp(dist: Angles, w: Tensor, eps: float = _OUTLIER) -> Tensor:
 
 
 def edep_logp(dist: Edep, edep: Tensor, e_dep_max: float) -> Tensor:
-    """``log p(x)`` of a deposit as a fit scores it."""
+    """Returns ``log p(x)`` of a deposit ``edep`` as a fit scores it, ``x = logit(edep / e_dep_max)``."""
     frac = (edep.float() / e_dep_max).clamp(*_E_RANGE)
     return dist.log_density(torch.logit(frac))
 
 
 def angle_w(dirs: Tensor, axis: Tensor) -> Tensor:
-    """``w`` of unit directions ``dirs`` (B, n, 3) about each event's ``axis`` (B, 3)."""
+    """Computes ``w = theta / pi`` (B, n) of unit directions ``dirs`` (B, n, 3) about each event's ``axis`` (B, 3)."""
     axis = torch.nn.functional.normalize(axis, dim=-1).unsqueeze(1)
-    cos  = (dirs * axis).sum(-1).clamp(-1, 1)   # rounding can push a product of unit vectors past +-1
-    return torch.acos(cos) / torch.pi
+    return safe_acos((dirs * axis).sum(-1)) / torch.pi
 
 
 def _with_outlier(log_p: Tensor, eps: float) -> Tensor:
-    """``log((1 - eps) p + eps)``: the density ``p`` on (0, 1) mixed with a uniform one."""
+    """Mixes the density ``p`` on (0, 1) with a uniform one: returns ``log((1 - eps) p + eps)``."""
     eps = log_p.new_tensor(eps)
     return torch.logaddexp(log_p + torch.log1p(-eps), torch.log(eps))
 
 
 def _float64(dist):
+    """Casts a distribution's parameters to float64."""
     return type(dist)(*(v.double() for v in dist))
 
 
 def fit_head(head: nn.Module, nll_of, batches, steps: int, lr: float | None = None) -> float:
-    """Fit ``head`` and freeze it. ``nll_of(batch)`` is the batch's loss, or None to skip the batch.
+    """Fits ``head`` on ``batches`` and freezes it.
 
     Recipe (2026-11 study): Adam, grad clip 1, IEEE fp32, and at step k the learning rate
 
@@ -89,8 +103,21 @@ def fit_head(head: nn.Module, nll_of, batches, steps: int, lr: float | None = No
     lr_k = lr * min(1, (k + 1) / warm) * (0.01 + 0.99 * (1 + cos(pi k / steps)) / 2),    warm = steps // 50
     ```
 
-    a linear warmup times a cosine from ``lr`` (default 3e-3) down to lr / 100. A non-finite loss raises. Returns
-    the final NLL."""
+    a linear warmup times a cosine from ``lr`` down to lr / 100.
+
+    Args:
+        head:    the network to fit.
+        nll_of:  ``nll_of(batch)`` is the batch's loss, or None to skip the batch.
+        batches: the training batches, one step each.
+        steps:   the schedule's length.
+        lr:      the peak learning rate; None: 3e-3.
+
+    Returns:
+        The final NLL.
+
+    Raises:
+        RuntimeError: a non-finite loss.
+    """
     opt  = torch.optim.Adam(head.parameters(), lr=3e-3 if lr is None else lr)
     warm = max(1, steps // 50)
 

@@ -20,22 +20,22 @@ N_FREQ = 8
 
 
 def x0_gcm2(Z: Tensor, A: Tensor) -> Tensor:
-    """Radiation length (Dahl's fit), in g/cm2; also the base head's (base_dist/interface.py)."""
+    """Computes the radiation length (Dahl's fit), in g/cm2; the base head uses it too (base/interface.py)."""
     return 716.4 * A / (Z * (Z + 1) * torch.log(287.0 / Z.sqrt()))
 
 
 def x0_mm(rho: Tensor, Z: Tensor, A: Tensor) -> Tensor:
-    """Radiation length, in mm."""
+    """Computes the radiation length, in mm."""
     return x0_gcm2(Z, A) / rho * 10.0
 
 
 def lambda_mm(rho: Tensor, A: Tensor) -> Tensor:
-    """Nuclear interaction length, lambda_I ~ 35 A^(1/3) g cm^-2 (PDG approximation), in mm."""
+    """Computes the nuclear interaction length, lambda_I ~ 35 A^(1/3) g cm^-2 (PDG approximation), in mm."""
     return 35.0 * A ** (1.0 / 3.0) / rho * 10.0
 
 
 def layer_features(layers: Tensor) -> Tensor:
-    """(Lg, 4) [t, rho, Z, A] -> (Lg, 7 + 4 * N_FREQ + 2)."""
+    """Builds the encoder's features (Lg, 7 + 4 * N_FREQ + 2) from the layers (Lg, 4) = [t, rho, Z, A]."""
     t, rho, Z, A = layers.unbind(-1)
     tx0, tlam = t / x0_mm(rho, Z, A), t / lambda_mm(rho, A)
     cx0, clam = tx0.cumsum(0) - tx0 / 2, tlam.cumsum(0) - tlam / 2
@@ -59,6 +59,6 @@ class GeomEncoder(nn.Module):
         nn.init.zeros_(self.out.bias)
 
     def forward(self) -> Tensor:
-        """(1, K, h_dim)."""
+        """Encodes the geometry into its summary tokens (1, K, h_dim)."""
         h = torch.cat([self.summary[None], self.inp(self.feats)], dim=1)
         return self.out(self.enc(h)[:, :self.K])

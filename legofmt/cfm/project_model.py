@@ -19,9 +19,12 @@ class ProjectModel(nn.Module):
         self.no_detach = kwargs.get("no_detach", False)
 
     def _prep_x(self, x: Tensor, attn_mask: Tensor) -> tuple[Tensor, Tensor]:
-        """Project ``x`` onto the manifold. The network sees the projected value on
-        every ``attn_mask`` slot (off-manifold conditioning filler never reaches it),
-        detached unless ``no_detach`` -- which ``log_likelihood`` sets."""
+        """Projects ``x`` onto the manifold.
+
+        The network sees the projected value on every ``attn_mask`` slot (off-manifold conditioning filler never reaches
+        it), detached unless ``no_detach`` -- which ``log_likelihood`` sets. Returns ``(x_proj, x_att)``: the
+        projection, and what the network sees.
+        """
         x_proj = self.manifold.projx(x)
         x_att  = torch.where(attn_mask.unsqueeze(-1), x_proj, x)
         if not self.no_detach:
@@ -39,8 +42,11 @@ class ProjectModel(nn.Module):
         d: Tensor | None = None,
         z: Tensor | None = None,
     ) -> Tensor:
-        """With the field's latent token (``model_args.lat_dim``) pass the latent ``z`` (B, K) and get
-        ``(v, v_z)``; ``z`` is Euclidean and not projected."""
+        """Evaluates the field at ``x`` projected onto the manifold; the velocity comes back in its tangent space.
+
+        With the field's latent token (``model_args.lat_dim``) pass the latent ``z`` (B, K) and get ``(v, v_z)``; ``z``
+        is Euclidean and not projected.
+        """
         x_proj, x_att = self._prep_x(x, attn_mask)
         t = torch.atleast_2d(t)
         if getattr(self.vf, "step_cond", False):
@@ -58,7 +64,7 @@ class ProjectModel(nn.Module):
 
 
 def uncompiled(module: nn.Module) -> nn.Module:
-    """The module underneath a ``torch.compile`` wrapper, or the module itself."""
+    """Returns the module underneath a ``torch.compile`` wrapper, or the module itself."""
     return getattr(module, "_orig_mod", module)
 
 

@@ -12,9 +12,9 @@ from torch.utils.data import DataLoader, Subset, random_split
 
 import lightning as ltng
 
-from legofmt.base_dist import ot_coupling
-from legofmt.base_dist.interface import BaseDist, build_base_head
-from legofmt.base_dist.gen_base import GenerateBase
+from legofmt.base import ot_coupling
+from legofmt.base.interface import BaseDist, build_base_head
+from legofmt.base.gen_base import GenerateBase
 from legofmt.legacy.base_nn import LegacyBaseDist
 from legofmt.legacy.edep_token import LegacyEdepToken
 
@@ -165,8 +165,10 @@ class LEGOLtng(TrainStep, LegacyEdepToken, LegacyBaseDist, BaseDist, Solvers, lt
 
     @torch.no_grad()
     def convert_pdgids(self, pdgids: Tensor) -> Tensor:
-        """Raw pdgids -> 1-based indices into ``pdgids_template``; NaN, 0, ions
-        (>= 1e8) and ids outside the vocabulary map to the unknown/pad index 0."""
+        """Maps raw pdgids to 1-based indices into ``pdgids_template``.
+
+        NaN, 0, ions (>= 1e8) and ids outside the vocabulary map to the unknown/pad index 0.
+        """
         template  = self.pdgids_template.to(pdgids.device)
         pos       = torch.searchsorted(template, pdgids.contiguous()).clamp_max(len(template) - 1)
         unknown   = torch.isnan(pdgids) | (pdgids == 0) | (pdgids >= 1e8) | (template[pos] != pdgids)

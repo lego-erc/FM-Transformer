@@ -20,9 +20,11 @@ class TrainStep:
     """Training-step mixin for :class:`~legofmt.main.modules.LEGOLtng`."""
 
     def _shift_overflow_targets(self, ds_t: DataStruct) -> DataStruct:
-        """On a clone, write ``-overflow_delta`` into the zero-valued outgoing-energy
-        and E_dep cells, a target outside ``[0, 1]``. An outgoing 0 is the full-energy
-        atom (E_out >= E_in; the column stores ``1 - log ratio``), an E_dep 0 no deposit."""
+        """Writes ``-overflow_delta`` into the zero-valued outgoing-energy and E_dep cells of a clone.
+
+        The target lies outside ``[0, 1]``. An outgoing 0 is the full-energy atom (E_out >= E_in; the column stores ``1
+        - log ratio``), an E_dep 0 no deposit.
+        """
         f = ds_t.f.full.clone()
         delta = self.rc.overflow_delta
         op = _F(f).out_p
@@ -32,8 +34,11 @@ class TrainStep:
         return DataStruct(f, ds_t.m.full, ds_t.am.full)
 
     def reduce_loss(self, sq: Tensor, ds_t: DataStruct, sq_lat: Tensor | None = None) -> tuple[Tensor, dict]:
-        """The weighted training loss, and the scalars the caller should log. ``sq_lat`` is the squared error of
-        the ``model_conf.edep_ae`` latent's velocity, its own cell."""
+        """Reduces the squared errors ``sq`` to the weighted training loss.
+
+        ``sq_lat`` is the squared error of the ``model_conf.edep_ae`` latent's velocity, its own cell. Returns the loss
+        and the scalars the caller should log.
+        """
         g        = ((ds_t.m.full == 1) & (ds_t.am.full == 1)).unsqueeze(-1)
         loss_lat = None if sq_lat is None else sq_lat.mean()
         denom    = g.sum().clamp(min=1)
@@ -70,8 +75,10 @@ class TrainStep:
 
     @torch.no_grad()
     def _sample_mask(self, ds_t: DataStruct) -> Tensor:
-        """Per-event coin flip (``mask_conf.p_forward``) between the data mask and its
-        inverse (generate the incoming from the outgoing set); scalar tokens stay conditioning."""
+        """Samples each event's mask: the data mask or its inverse, a coin flip with ``mask_conf.p_forward``.
+
+        The inverse generates the incoming from the outgoing set; scalar tokens stay conditioning.
+        """
         if not self.rc.mask_conf:
             return ds_t.m.full
         fwd = ds_t.m.full
@@ -81,8 +88,11 @@ class TrainStep:
         return torch.where(pick.unsqueeze(-1), fwd, inv.long())
 
     def _sample_t(self, ds_t: DataStruct) -> Tensor:
-        """Training-time ``t`` per event: logit-normal (``sm_norm``) or SD3 mode sampling
-        (``sd3``; scale 0 is uniform); ``t_dist_shift`` applies ``t ** (1/shift)``."""
+        """Samples the training-time ``t`` per event.
+
+        Logit-normal (``sm_norm``) or SD3 mode sampling (``sd3``; scale 0 is uniform); ``t_dist_shift`` applies ``t **
+        (1/shift)``.
+        """
         if self.rc.t_dist == "sm_norm":
             t = torch.sigmoid(self.rc.t_dist_scale * torch.randn_like(ds_t.f.d))
         elif self.rc.t_dist == "sd3":
@@ -96,9 +106,11 @@ class TrainStep:
 
     @torch.no_grad()
     def _teacher_transport(self, ds_t: DataStruct, base: Tensor, **solve_kwargs) -> Tensor:
-        """The reflow teacher's transport of ``base`` on the generated slots, the data
-        elsewhere. The E_dep token is generated but its direction columns are the
-        (1,1,1) filler; transporting them gave that token an off-manifold target."""
+        """Returns the reflow teacher's transport of ``base`` on the generated slots, the data elsewhere.
+
+        The E_dep token is generated but its direction columns are the (1,1,1) filler; transporting them gave that token
+        an off-manifold target.
+        """
         tgt = self.reflow_teacher.solve(ds_t, x_init=base, **solve_kwargs)
         tgt = torch.where((ds_t.m.full == 1).unsqueeze(-1), tgt, ds_t.f.model_in)
         tgt[:, :self.rc.n_prefix, 1:] = ds_t.f.non_cc[..., 1:]
@@ -132,9 +144,11 @@ class TrainStep:
     def _flow_map_loss(
         self, loss: Tensor, base: Tensor, ds_t: DataStruct, pdgid_idx: Tensor, model=None, z=None,
     ) -> Tensor:
-        """Add ``fac * (lv_flow + every * exp(-lv_flow) * one_step_euler)`` on firing
-        steps and the barrier alone otherwise, so the per-step expectation equals
-        the ungated Kendall term; validation evaluates it every step with ``every=1``."""
+        """Adds the flow-map term to ``loss``.
+
+        ``fac * (lv_flow + every * exp(-lv_flow) * one_step_euler)`` on firing steps and the barrier alone otherwise, so
+        the per-step expectation equals the ungated Kendall term; validation evaluates it every step with ``every=1``.
+        """
         fac = self.rc.one_step_euler_fac
         if fac <= 0:
             return loss

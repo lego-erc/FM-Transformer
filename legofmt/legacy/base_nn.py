@@ -1,4 +1,4 @@
-"""Base-distribution paths superseded by ``base_conf.base_head_lik`` (:mod:`legofmt.base_dist.interface`), kept so older
+"""Base-distribution paths superseded by ``base_conf.base_head_lik`` (:mod:`legofmt.base.interface`), kept so older
 configs and checkpoints still run unchanged: the moment-matched MLP head and no learned head at all.
 
 ``build_legacy_base_head`` is reached from ``interface.build_base_head`` for every config without ``base_head_lik``.
@@ -171,7 +171,7 @@ class LegacyBaseDist:
                 pw  = None if pw is None else pw.gather(1, idx)
             if learn:
                 self._base_head_loss = self._base_moment_loss(ds_t, fwd, s, mu, sig, kap, pw)
-        self.gen_base.sm_scale = keep(s).unsqueeze(-1)
+        self.gen_base.sm_scale = keep(s)
         self.gen_base.edep_mu  = keep(mu)
         self.gen_base.edep_sig = keep(sig)
         self.gen_base.kappa    = keep(kap)

@@ -30,11 +30,21 @@ class Solvers:
     """Sampling / likelihood mixin for :class:`~legofmt.main.modules.LEGOLtng`."""
 
     def chunked(self, fn, *tensors, split_size=None, dim=0, cat_dim=None, buckets=None):
-        """Apply ``fn`` in ``split_size`` chunks along ``dim`` and concatenate along
-        ``cat_dim`` (``-3`` is the batch axis of both a ``(B, L, C)`` solution and a
-        ``(T, B, L, C)`` intermediates stack). With ``buckets`` every chunk is padded
-        to the smallest bucket that holds it, so a compiled ``fn`` only ever sees
-        ``len(buckets)`` batch shapes."""
+        """Applies ``fn`` in chunks along ``dim`` and concatenates the results.
+
+        Args:
+            fn:         called on each chunk of ``tensors``.
+            tensors:    split alike along ``dim``.
+            split_size: the chunk size; None: one chunk.
+            dim:        the axis to split.
+            cat_dim:    the axis to concatenate along; None: ``dim``. ``-3`` is the batch axis of both a ``(B, L, C)``
+                solution and a ``(T, B, L, C)`` intermediates stack.
+            buckets:    pad every chunk to the smallest bucket that holds it, so a compiled ``fn`` only ever sees
+                ``len(buckets)`` batch shapes.
+
+        Returns:
+            The concatenated results.
+        """
         cat_dim = dim if cat_dim is None else cat_dim
         if split_size is None or split_size >= tensors[0].shape[dim]:
             return self._bucketed(fn, tensors, dim, cat_dim, buckets)
@@ -101,7 +111,10 @@ class Solvers:
 
     @torch.no_grad()
     def solve(self, *args, **kwargs) -> Tensor:
-        """``_solve`` under ``torch.no_grad``: every sampling caller; ``_solve`` keeps the graph (density design)."""
+        """Runs ``_solve`` under ``torch.no_grad``: every sampling caller.
+
+        ``_solve`` keeps the graph (density design).
+        """
         return self._solve(*args, **kwargs)
 
     def _solve(
@@ -175,14 +188,16 @@ class Solvers:
         return self._edep_whiten(sols, ds_t, inverse=True)
 
     def _field(self, x: Tensor, t, z: Tensor | None, **kw) -> tuple[Tensor, Tensor | None]:
-        """The velocity, and that of the ``model_conf.edep_ae`` latent ``z`` (``None`` without it)."""
+        """Evaluates the velocity, and that of the ``model_conf.edep_ae`` latent ``z`` (``None`` without it)."""
         return (self.model(x, t, **kw), None) if z is None else self.model(x, t, z=z, **kw)
 
     def _steps(self, method: str, x: Tensor, time_grid: Tensor, return_intermediates: bool = False,
                z: Tensor | None = None, **extras):
-        """Manifold ``euler`` / ``midpoint`` / ``rk4`` steps on the ``mask == 1`` slots, the ``model_conf.edep_ae``
-        latent ``z`` integrated alongside. Returns the final state (or the stack of every step's), paired with the
-        latent's when there is one."""
+        """Integrates ``x`` along ``time_grid`` with manifold ``euler`` / ``midpoint`` / ``rk4`` steps.
+
+        Only the ``mask == 1`` slots move; the ``model_conf.edep_ae`` latent ``z`` is integrated alongside. Returns the
+        final state (or the stack of every step's), paired with the latent's when there is one.
+        """
         xs, zs = [x], [z]
         man = self.model.manifold
         gen = (extras["mask"] == 1).unsqueeze(-1)
@@ -249,8 +264,16 @@ class Solvers:
         return self._forward(batch, _batch_idx, rng=rng)
 
     def _forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None, rng=None) -> tuple:
-        """``forward`` without ``torch.no_grad`` (the density design differentiates through it). ``rng``
-        (legofmt.rng.EventRNG, one key per row of ``batch``) keys every random draw on its event."""
+        """Generates a batch: ``forward`` without ``torch.no_grad`` (the density design differentiates through it).
+
+        Args:
+            batch:      the conditions, a ``DataStruct`` or the three tensors it is built from.
+            _batch_idx: unused.
+            rng:        keys every random draw on its event (``legofmt.rng.EventRNG``, one key per row of ``batch``).
+
+        Returns:
+            ``(sols, mask, attn_mask)``: the samples (B, L, 8), pdgids last, and the batch's two masks.
+        """
         self._to_eval()
 
         cfg = self.rc.odeint_conf

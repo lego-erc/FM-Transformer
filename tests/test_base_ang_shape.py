@@ -12,7 +12,7 @@ import math
 import pytest
 import torch
 
-from legofmt.base_dist.interface import build_base_head
+from legofmt.base.interface import build_base_head
 from legofmt.legacy.base_nn import LegacyBaseDist
 from legofmt.data.struct import DataStruct
 from legofmt.legacy.gen_base import sample_dirs

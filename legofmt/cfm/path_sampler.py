@@ -19,8 +19,14 @@ class ProductPathSampler:
         self.manifold = p_man
 
     def sample(self, bases, data, t):
-        """``t`` is one time per event, broadcast over the sequence; it is returned
-        as ``(B, 1)``, the per-event form the vector field conditions on."""
+        """Evaluates the geodesic from ``bases`` to ``data`` at time ``t``: the point ``x_t`` and its velocity ``dx_t``.
+
+        ``t`` is one time per event, broadcast over the sequence; it is returned as ``(B, 1)``, the per-event form the
+        vector field conditions on.
+
+        Returns:
+            ``PathSample`` with ``x_0``, ``x_1``, ``x_t``, ``dx_t`` and ``t``.
+        """
         t_b = t.view(-1, *[1] * (bases.dim() - 1))
         x_t, dx_t = [], []
         for man, x0, x1 in zip(self.manifold.manifolds,

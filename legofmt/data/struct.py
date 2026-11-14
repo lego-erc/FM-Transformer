@@ -18,8 +18,10 @@ _COND_SCALARS: tuple[str, ...] = ("Density",)
 
 
 def set_layout(cond_scalars) -> None:
-    """Set the process-global slot layout. Called by resolve_*_config and
-    DataPrep, so constructing a model or a loader re-points every _F accessor."""
+    """Sets the process-global slot layout.
+
+    Called by resolve_*_config and DataPrep, so constructing a model or a loader re-points every _F accessor.
+    """
     global _COND_SCALARS
     _COND_SCALARS = tuple(cond_scalars)
 
@@ -33,8 +35,10 @@ def n_prefix() -> int:
 
 
 def cond_slot(name: str) -> int:
-    """Token index of a conditioning scalar: cond_scalars[0] is token 0, the rest
-    are shifted by one because token 1 is the generated E_dep."""
+    """Returns the token index of a conditioning scalar.
+
+    cond_scalars[0] is token 0, the rest are shifted by one because token 1 is the generated E_dep.
+    """
     if name not in _COND_SCALARS:
         raise ValueError(f"{name!r} not in cond_scalars {_COND_SCALARS}")
     i = _COND_SCALARS.index(name)

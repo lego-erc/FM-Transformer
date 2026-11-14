@@ -26,26 +26,37 @@ from itertools import chain, islice, repeat
 import torch
 from torch import Tensor, nn
 
-from legofmt.base_dist.base_dists import BaseParams
-from legofmt.base_dist.edep_whiten import whiten_edep
-from legofmt.base_dist.nn import BaseHead
-from legofmt.base_dist.nn_fit import fit_head, head_nll
-from legofmt.base_dist.ot_coupling import ot_couple
+from legofmt.base.base_dists import BaseParams
+from legofmt.base.edep_whiten import whiten_edep
+from legofmt.base.nn import BaseHead
+from legofmt.base.nn_fit import fit_head, head_nll
+from legofmt.base.ot_coupling import ot_couple
 from legofmt.cfm.geom_encoder import x0_gcm2
 from legofmt.data.struct import DataStruct
 from legofmt.geometry.geom_trafos import cuboid_chord
 from legofmt.legacy.base_nn import build_legacy_base_head
-from legofmt.rng import species_rank_ids
 
 
 def build_base_head(rc, gen_base) -> nn.Module | None:
-    """The base head for ``LEGOLtng.__init__`` to assign as ``base_head``: fresh (fitted in ``setup``), or loaded from
-    ``base_conf.base_head`` and frozen. ``resolve_legoltng_config`` has checked the config. Configs without
-    ``base_head_lik`` get the legacy moment head, or ``None`` (no head)."""
+    """Constructs the base head that ``LEGOLtng.__init__`` assigns as ``base_head``.
+
+    The head is fresh (``setup`` fits it), or loaded from ``base_conf.base_head`` and frozen. Configs without
+    ``base_head_lik`` get the legacy moment head, or no head. ``resolve_legoltng_config`` has checked the config.
+
+    Args:
+        rc:       the resolved config.
+        gen_base: the sampler; a fresh head starts at its constants ``sm_scale`` and ``kappa``.
+
+    Returns:
+        The head, or None (no head).
+
+    Raises:
+        ValueError: ``base_conf.base_head`` does not load into the head.
+    """
     base_conf = rc.config.get("base_conf") or {}
     if not base_conf.get("base_head_lik", False): return build_legacy_base_head(rc, gen_base)
     head  = BaseHead(len(rc.pdgids_template) + 1, base_conf.get("base_head_hidden", [256, 256]),
-                        float(gen_base.sm_scale), float(gen_base.kappa))
+                     float(gen_base.sm_scale), float(gen_base.kappa))
     saved = base_conf.get("base_head")
     if saved is None:
         return head
@@ -64,61 +75,87 @@ class BaseDist:
 
     def gen_base_wrapper(self, ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]", all_forward: bool = False,
                          rng=None) -> Tensor:
-        """Draw ``x_0``: the data on conditioning cells; on generated cells the head's prior for forward events and
-        an isotropic sample for inverse-mask events (``all_forward``: treat every event as forward). The E_dep cell
-        is in the flow's unit (``edep_whiten.py``); ``solve`` starts from it as it is. ``lego_eval`` calls this.
-        ``rng`` (legofmt.rng.EventRNG) keys every draw on the event and an outgoing slot's (species, rank)."""
+        """Samples ``x_0`` for a batch: the data on conditioning cells, a draw of the base on generated ones.
+
+        Forward events draw the head's prior, inverse-mask events an isotropic sample. The E_dep cell is in the
+        flow's unit (``edep_whiten.py``); ``solve`` starts from it as it is. ``lego_eval`` calls this.
+
+        Args:
+            ds_t:        the batch, a ``DataStruct`` or the three tensors it is built from.
+            all_forward: treat every event as forward.
+            rng:         keys every draw on the event and an outgoing slot's (species, rank)
+                (``legofmt.rng.EventRNG``); None: torch's noise.
+
+        Returns:
+            ``x_0`` (B, N, 7).
+        """
         if not isinstance(ds_t, DataStruct):
             ds_t = DataStruct(*ds_t)
         data, m, fwd = ds_t.f.model_in, ds_t.m.full, ds_t.m.fwd   # fwd: the incoming slot conditions
         if all_forward or fwd.all():
-            x0 = self._draw_prior(ds_t, data, rng)
+            x0 = self._draw_prior(ds_t, rng)
         else:   # inverse-mask events get the isotropic sample, drawn first
             x0 = self.gen_base.iso(m.shape, data.device, rng=rng)
             if fwd.any():
-                x0 = torch.where(fwd.view(-1, 1, 1), self._draw_prior(ds_t, data, rng), x0)
+                x0 = torch.where(fwd.view(-1, 1, 1), self._draw_prior(ds_t, rng), x0)
         return torch.where((m == 1).unsqueeze(-1), x0, data)
 
-    def _draw_prior(self, ds_t: DataStruct, data: Tensor, rng) -> Tensor:
-        """A draw of the head's prior for every event: the outgoing slots, in training their OT coupling to the
-        data, then the E_dep token (a standard normal)."""
+    def _draw_prior(self, ds_t: DataStruct, rng) -> Tensor:
+        """Samples the head's prior for every event of ``ds_t``.
+
+        In training the outgoing slots are OT-coupled to the data (``model_conf.ot_coupling``). Returns ``x_0``
+        (B, N, 7); ``rng`` as in ``gen_base_wrapper``.
+        """
         self._set_prior(ds_t)
-        elem  = None if rng is None else species_rank_ids(ds_t.f.out_pid.long())
-        prior = torch.cat((ds_t.f.non_cc, self.gen_base(ds_t.m.out_p.shape, ds_t.f.in_cc, rng=rng, elem=elem)), dim=1)
+        prior = self.gen_base(ds_t, rng)
         if self.rc.ot_coupling and self.model.training:
-            prior = ot_couple(prior, ds_t, data, self.rc.manifold)
-        return self.gen_base.insert_add(prior, rng=rng)
+            prior = ot_couple(prior, ds_t, self.rc.manifold)
+        return prior
 
     def _set_prior(self, ds_t: DataStruct) -> None:
-        """Hand the sampler this batch's prior (``lego_eval`` reads ``gen_base.edep_mu`` / ``edep_sig`` back). With
-        grad mode on (density design) the frozen head keeps its graph to the inputs, so the draw is reparameterized
-        in them."""
+        """Sets the sampler's parameters to this batch's prior, per outgoing slot.
+
+        ``lego_eval`` reads ``gen_base.edep_mu`` / ``edep_sig`` back. With grad mode on (density design) the frozen
+        head keeps its graph to the inputs, so the draw is reparameterized in them.
+        """
         p = self._slot_prior(ds_t)
         if self.model.training and next(self.base_head.parameters()).requires_grad:
             p = BaseParams(*(v.detach() for v in p))   # a head not fitted yet: the flow's loss does not train it
-        self.gen_base.sm_scale = p.sm_scale.unsqueeze(-1)
+        self.gen_base.sm_scale = p.sm_scale
         self.gen_base.edep_mu  = p.edep_mu
         self.gen_base.edep_sig = p.edep_sig
         self.gen_base.kappa    = p.kappa
         self.gen_base.ang_pow  = p.ang_pow
-        self.gen_base.sm_pow   = p.sm_pow.unsqueeze(-1)
+        self.gen_base.sm_pow   = p.sm_pow
 
     def _slot_prior(self, ds_t: DataStruct) -> BaseParams:
-        """``base_head_params`` with each per-class column gathered onto the outgoing slots, ``(B, n_out)``."""
+        """Gathers the head's per-class parameters onto the outgoing slots of ``ds_t``.
+
+        Returns ``BaseParams`` with the energy and angle parameters (B, n_out); E_dep's stay (B, 1).
+        """
         p   = self.base_head_params(ds_t)
         idx = self._species_idx(ds_t.f.out_pid, p.kappa.shape[-1])
         return BaseParams(p.sm_scale.gather(1, idx), p.edep_mu, p.edep_sig,
                           p.kappa.gather(1, idx), p.ang_pow.gather(1, idx), p.sm_pow.gather(1, idx))
 
     def base_head_params(self, ds_t: DataStruct) -> BaseParams:
-        """The head's prior for each event of ``ds_t``, one column per outgoing class."""
+        """Evaluates the base head on the events of ``ds_t``.
+
+        Returns ``BaseParams`` with the energy and angle parameters (B, n_cls), one column per outgoing class, and
+        E_dep's (B, 1).
+        """
         return self.base_head(*self._head_inputs(ds_t))
 
     def _head_inputs(self, ds_t: DataStruct) -> tuple[Tensor, Tensor, Tensor]:
-        """What the head reads off an event, ``(cont, species, out_set)``: ``cont`` (B, 3) = (E, chord, log t) of the
-        incoming particle and the block (t = ``Size*Density/X0``), the primary's species one-hot (B, n_cls), and the
-        outgoing set (B, 1 + n_cls) = log1p of (multiplicity, count per class). The outgoing set is fixed before the
-        flow runs; E_dep is bimodal in it, which one logit-normal cannot hold."""
+        """Builds the head's inputs from the events of ``ds_t``.
+
+        The outgoing set is fixed before the flow runs; E_dep is bimodal in it, which one logit-normal cannot hold.
+
+        Returns:
+            cont:    (B, 3), (E, chord, log t) of the incoming particle and the block, t = ``Size*Density/X0``.
+            species: (B, n_cls), the primary's one-hot.
+            out_set: (B, 1 + n_cls), log1p of (multiplicity, count per class).
+        """
         f, n_cls = ds_t.f, len(self.pdgids_template) + 1
         species  = nn.functional.one_hot(self._species_idx(f.in_pid, n_cls), n_cls).float()
         t        = f.cond("Size") * f.cond("Density") / x0_gcm2(f.cond("Z"), f.cond("A"))
@@ -131,15 +168,25 @@ class BaseDist:
         return torch.cat((f.in_energy, chord, torch.log(t).unsqueeze(-1)), dim=-1), species, out_set
 
     def _species_idx(self, pid: Tensor, n_cls: int) -> Tensor:
-        """Class index in ``[0, n_cls)`` of raw pdgids (of indices with ``pdgid_is_idx``)."""
+        """Maps raw pdgids (with ``pdgid_is_idx``: indices) to class indices in ``[0, n_cls)``."""
         return (pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)).long().clamp(0, n_cls - 1)
 
     # ---- fitting the head: once, before the flow trains --------------------
 
     def pretrain_base(self, batches, lr: float | None = None, steps: int | None = None) -> float:
-        """Fit the head alone on ``batches`` by likelihood (``nn_fit.fit_head``; ``steps`` is its schedule length,
-        required), then it is frozen: the flow never trains it. Nothing is drawn, so the random stream stays where
-        it was. Returns the final NLL."""
+        """Fits the head alone on ``batches`` by likelihood, then freezes it.
+
+        The flow never trains the head. Nothing is drawn, so the random stream stays where it was. The loss is
+        ``nn_fit.head_nll`` over the forward events, the recipe ``nn_fit.fit_head``.
+
+        Args:
+            batches: the training batches (``DataStruct``), one step each.
+            lr:      the peak learning rate; None: the recipe's.
+            steps:   the schedule's length (its warmup and cosine), required.
+
+        Returns:
+            The final NLL.
+        """
         if steps is None:
             raise ValueError("base_head_lik pretraining needs steps (its warmup and cosine).")
 
@@ -155,9 +202,12 @@ class BaseDist:
         return fit_head(self.base_head, nll, batches, steps, lr)
 
     def _pretrain_base_if_needed(self) -> None:
-        """``setup`` calls this. Rank 0 fits the head on its device (the data stays on the CPU, moved per batch) and
+        """Fits the head before the flow trains, unless it is frozen already.
+
+        ``setup`` calls this. Rank 0 fits the head on its device (the data stays on the CPU, moved per batch) and
         broadcasts the weights; every rank ends with the head frozen. A head that is frozen already (loaded from the
-        config, or a resumed run) is left alone."""
+        config, or a resumed run) is left alone.
+        """
         head, n = self.base_head, self.rc.base_pretrain_batches
         if not (n and getattr(self, "_trainer", None) and next(head.parameters()).requires_grad):
             return
@@ -185,9 +235,11 @@ class BaseDist:
     # ---- the flow's E_dep token in units of the prior -------------------------
 
     def _edep_whiten(self, f: Tensor, ds_t: DataStruct, inverse: bool = False) -> Tensor:
-        """A copy of ``f`` with the generated E_dep token in units of each event's prior (``inverse``: back to a
-        deposit), see ``edep_whiten.py``. The prior comes from the frozen head on ``ds_t``, so any sub-batch is
-        consistent."""
+        """Whitens the generated E_dep token of ``f`` into units of each event's prior (``inverse``: back to a deposit).
+
+        The prior comes from the frozen head on ``ds_t``, so any sub-batch is consistent; the map is
+        ``edep_whiten.py``. Returns a copy of ``f``.
+        """
         _, mu, sig, _, _, _ = self.base_head_params(ds_t)   # by position: a legacy head returns a plain tuple
         return whiten_edep(f, ds_t.m.full[:, 1] == 1, mu.reshape(-1), sig.reshape(-1), self.gen_base.e_dep_max,
                            inverse)

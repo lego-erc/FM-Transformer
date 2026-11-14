@@ -150,7 +150,7 @@ class InvModel(nn.Module):
         return self.proj_in_(torch.cat((x[..., :-6], self.geom_trafos.to_cuboid(x[..., -6:], d=self.pos_scale)), -1))
 
     def forward(self, out_tok, out_pid_idx, out_mask, edep):
-        """Incoming-PID logits from the outgoing set's tokens, pids, mask and E_dep."""
+        """Predicts the incoming-PID logits from the outgoing set's tokens, pids, mask and E_dep."""
         tok = self.proj_in(out_tok) + self.embd_out_(out_pid_idx)
         out = self.model(
             tok, mask=out_mask, condition=self.proj_cond_(edep.unsqueeze(-1)),
@@ -275,7 +275,7 @@ class MultModel(LightningModule):
         self._opt_eval()
 
     def _teacher_logits(self, in_tok, counts, pdgid_in_idx):
-        """The teacher-forced pass over the count slots: ``(logits (B, S, P), out_f, in_embd)``."""
+        """Runs the teacher-forced pass over the count slots: ``(logits (B, S, P), out_f, in_embd)``."""
         in_embd = self.proj_in(in_tok) + self.embd_pp_(pdgid_in_idx)
         in_seq = torch.cat(
             (in_embd.unsqueeze(1), self.embd_in_(counts[:, : self.rc.max_seq_len - 1] + self._in_offsets)),
@@ -285,10 +285,12 @@ class MultModel(LightningModule):
         return torch.einsum("bsh,shp->bsp", out_f, self.proj_out_w) + self.proj_out_b, out_f, in_embd
 
     def log_prob(self, in_tok, counts, pdgid_in_idx, pt_mask=None):
-        """log P of a ``forward`` draw, ``(B,)``: the count slots' log-probabilities (teacher-forced) unless the
-        pass-through token fired, plus the head's Bernoulli term for the species it covers (``pt_mask`` as
-        ``sample_passthrough`` drew it). Differentiable in ``in_tok``: the score-function term of density design's
-        gradient."""
+        """Returns log P of a ``forward`` draw, ``(B,)``.
+
+        The count slots' log-probabilities (teacher-forced) unless the pass-through token fired, plus the head's
+        Bernoulli term for the species it covers (``pt_mask`` as ``sample_passthrough`` drew it). Differentiable in
+        ``in_tok``: the score-function term of density design's gradient.
+        """
         if self.rc.sym_aug:
             raise NotImplementedError("log_prob under sym_aug: proj_in draws a new cube transform per call, so the "
                                       "counts would be scored under another one than they were sampled with")
@@ -335,7 +337,7 @@ class MultModel(LightningModule):
 
     @torch.no_grad()
     def passthrough_prob(self, in_tok: torch.Tensor, pdgid_in_idx: torch.Tensor, rng=None) -> torch.Tensor:
-        """P("this particle did not interact"), 0 outside the neutrals the head covers."""
+        """Returns P("this particle did not interact"), 0 outside the neutrals the head covers."""
         if self.pt_head is None:
             return torch.zeros(in_tok.shape[0], device=in_tok.device)
         in_embd = self.proj_in(in_tok, rng, SYM_PT) + self.embd_pp_(pdgid_in_idx)
@@ -344,8 +346,11 @@ class MultModel(LightningModule):
         return self.pt_head(pt_in).squeeze(-1).sigmoid() * self._pt_pdgid_allowed[pdgid_in_idx]
 
     def sample_passthrough(self, in_tok: torch.Tensor, pdgid_in_idx: torch.Tensor, rng=None) -> torch.Tensor:
-        """Bernoulli draw of "this particle did not interact", masked to neutrals. A keyed draw (``rng``, a
-        legofmt.rng.EventRNG) evaluates the head in eval mode: dropout would be randomness no key covers."""
+        """Samples the Bernoulli "this particle did not interact", masked to neutrals.
+
+        A keyed draw (``rng``, a legofmt.rng.EventRNG) evaluates the head in eval mode: dropout would be randomness no
+        key covers.
+        """
         if rng is not None:
             self._opt_eval()
             self.eval()
@@ -392,14 +397,12 @@ class MultModel(LightningModule):
 
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
-        """Free-running per-species counts, not the loss.
+        """Validates on free-running per-species counts, not on the loss.
 
-        The loss saturates at the data's irreducible entropy while the sampled
-        counts are still several percent off, so only a rollout metric tracks
-        the thing that is actually wrong. ``force_eager`` keeps the 19 decode
-        shapes out of the dynamo cache the compiled training step lives in. It runs in
-        fp32, like GenerateOut: under bf16-mixed the count logits (|logit| up to ~100)
-        moved per-species counts by up to 3.7%, the size of the errors being tracked.
+        The loss saturates at the data's irreducible entropy while the sampled counts are still several percent off, so
+        only a rollout metric tracks the thing that is actually wrong. ``force_eager`` keeps the 19 decode shapes out of
+        the dynamo cache the compiled training step lives in. It runs in fp32, like GenerateOut: under bf16-mixed the
+        count logits (|logit| up to ~100) moved per-species counts by up to 3.7%, the size of the errors being tracked.
         """
         in_tok, counts, pdgid_in_idx = batch[:3]
         with torch.compiler.set_stance("force_eager"), torch.autocast(in_tok.device.type, enabled=False):
@@ -428,9 +431,11 @@ class MultModel(LightningModule):
 
     @torch.no_grad()
     def forward(self, batch: tuple, pt_mask: torch.Tensor | None = None, rng=None):
-        """Inference only: a 3-D batch[0] runs InvModel (outgoing set -> incoming
-        PID index), a 2-D one decodes counts autoregressively with a KV cache;
-        puts the module in eval mode. ``rng`` (legofmt.rng.EventRNG) keys the draws per event."""
+        """Runs inference: InvModel on a 3-D ``batch[0]``, an autoregressive count decode on a 2-D one.
+
+        InvModel maps an outgoing set to the incoming PID index; the counts are decoded with a KV cache. Puts the module
+        in eval mode. ``rng`` (legofmt.rng.EventRNG) keys the draws per event.
+        """
         self._opt_eval()
         self.eval()
         if batch[0].dim() == 3:

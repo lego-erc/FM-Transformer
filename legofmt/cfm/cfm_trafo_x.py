@@ -26,12 +26,15 @@ from legofmt.cfm.geom_encoder import GeomEncoder
 
 
 def _per_event_gammas(attn_layers: nn.Module) -> bool:
-    """Let the adaptive norms / layer-scales take a packed ``(B, 3, D)`` condition: row 0
-    the conditioning tokens' condition, row 1 the generated tokens', row 2's first ``L``
-    entries the generated-token selector. Their ``to_gamma`` matmuls then run on 2 rows
-    per event instead of ``L``: ~10% of a training step and of a solve (plate-Si config,
-    H100). Any other condition goes through the original forward. Patches nothing and
-    returns False when something else would consume the condition."""
+    """Patches the adaptive norms / layer-scales of ``attn_layers`` to take a packed ``(B, 3, D)`` condition.
+
+    Row 0 is the conditioning tokens' condition, row 1 the generated tokens', row 2's first ``L`` entries the
+    generated-token selector. Their ``to_gamma`` matmuls then run on 2 rows per event instead of ``L``: ~10% of a
+    training step and of a solve (plate-Si config, H100). Any other condition goes through the original forward.
+
+    Returns:
+        Whether it patched: False, with nothing patched, when something else would consume the condition.
+    """
     mods = [m for m in attn_layers.modules() if isinstance(m, (AdaptiveRMSNorm, AdaptiveLayerScale))]
     other = any(type(m).__name__.startswith("Adaptive") for m in attn_layers.modules() if m not in mods)
     if not mods or other or type(getattr(attn_layers, "adaptive_mlp", nn.Identity())).__name__ != "Identity":
@@ -165,9 +168,11 @@ class CFMTrafo_x(nn.Module):
             self.global_cond = nn.Parameter(torch.zeros(1, h_dim))
 
     def _one_hot(self, mask: Tensor, types: Tensor, pdgids: Tensor, batch: int) -> Tensor:
-        """``(B, L, nvtypes + ntypes + npdgids)`` one-hot over the three conditioning
-        vocabularies, so the index-selected linear maps become one matmul.
-        ``pdgids`` arrives as ``_F.pdgids``, i.e. ``(B, L, 1)``."""
+        """Builds the one-hot over the three conditioning vocabularies.
+
+        The index-selected linear maps become one matmul on it. ``pdgids`` arrives as ``_F.pdgids``, i.e. ``(B, L, 1)``.
+        Returns ``(B, L, nvtypes + ntypes + npdgids)``.
+        """
         n = mask.shape[1]
         return torch.cat((
             F.one_hot(mask.reshape(batch, n).long(), self.nvtypes),
@@ -176,14 +181,14 @@ class CFMTrafo_x(nn.Module):
         ), dim=-1).to(self.cond_w_mask.dtype)
 
     def _embed(self, x: Tensor, oh: Tensor) -> Tensor:
-        """Mean of the mask-, type- and pdgid-conditional up-projections of ``x``."""
+        """Embeds ``x``: the mean of its mask-, type- and pdgid-conditional up-projections."""
         w  = torch.cat((self.cond_w_mask[:, 0], self.cond_w_types[:, 0], self.cond_w_pdgids[:, 0]))
         b  = torch.cat((self.cond_bi_mask, self.cond_bi_types, self.cond_bi_pdgids))
         xo = (oh.unsqueeze(-1) * x.unsqueeze(-2)).flatten(-2)  # (B, L, K * in_dim)
         return (xo @ w.transpose(1, 2).reshape(-1, self.h_dim) + oh @ b) / 3
 
     def _project_out(self, h: Tensor, mask: Tensor, oh: Tensor) -> Tensor:
-        """Mean of the three conditional down-projections; zero on conditioning slots."""
+        """Projects ``h`` out: the mean of the three conditional down-projections, zero on conditioning slots."""
         w   = torch.cat((self.cond_w_mask[:, 1], self.cond_w_types[:, 1], self.cond_w_pdgids[:, 1]))
         b   = torch.cat((self.cond_bo_mask, self.cond_bo_types, self.cond_bo_pdgids))
         out = (h @ w.permute(1, 0, 2).reshape(self.h_dim, -1)).view(*h.shape[:-1], -1, self.in_dim)
@@ -208,10 +213,13 @@ class CFMTrafo_x(nn.Module):
         d: Tensor | None = None,
         z: Tensor | None = None,
     ) -> Tensor:
-        """``t`` / ``d`` per token ``(B, L)`` are used as given. Per event ``(B or 1, 1)``
-        they condition the generated (``mask == 1``) tokens, and the conditioning tokens
-        get ``t = 1, d = 0`` -- the values ``ProjectModel`` pins them to. With ``lat_dim`` the
-        latent ``z`` (B, lat_dim) is one more generated token, prepended, and ``(v, v_z)`` is returned."""
+        """Predicts the velocity ``v`` of every token.
+
+        ``t`` / ``d`` per token ``(B, L)`` are used as given. Per event ``(B or 1, 1)`` they condition the generated
+        (``mask == 1``) tokens, and the conditioning tokens get ``t = 1, d = 0`` -- the values ``ProjectModel`` pins
+        them to. With ``lat_dim`` the latent ``z`` (B, lat_dim) is one more generated token, prepended, and ``(v, v_z)``
+        is returned.
+        """
         B, L = x.shape[:2]
         K = 0 if self.geom is None else self.geom.K
         n_lat = int(self.lat_dim > 0)

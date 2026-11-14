@@ -18,7 +18,8 @@ import torch
 import torch.nn.functional as F
 
 from legofmt import rng as R
-from legofmt.base_dist.base_dists import Angles, Energy
+from legofmt.base.base_dists import Angles, Energy
+from legofmt.data.struct import _F
 from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.legacy.gen_base import LegacySampler
 
@@ -26,16 +27,30 @@ _GEOM = GeomTrafos()
 
 
 def sample_directions(angles, axis, noise, stream=0):
-    """Unit directions ``(*noise.shape, 3)`` about ``axis``: the polar angle ``theta = pi w`` with ``w`` drawn from
-    ``angles``, the azimuth ``phi`` uniform. Keyed noise draws them from ``stream`` and ``stream + 1``."""
+    """Samples unit directions about ``axis``.
+
+    The polar angle to the axis is ``theta = pi w`` with ``w`` drawn from ``angles``; the azimuth ``phi`` is uniform.
+
+    Args:
+        angles: the distribution of ``w`` (``Angles``).
+        axis:   unit vectors (..., 3), broadcast against the noise: (B, 1, 3) is one axis per event.
+        noise:  the draws (``rng.Noise``), one per direction.
+        stream: the draw site of keyed noise: ``theta`` reads ``stream``, ``phi`` reads ``stream + 1``.
+
+    Returns:
+        Unit vectors ``(*noise.shape, 3)``.
+    """
     theta = torch.pi * angles.sample(noise.normal(stream).to(axis))
     phi   = 2 * torch.pi * noise.uniform(stream + 1).to(theta)
     return _GEOM.direction_about(axis, theta, phi)
 
 
 class GenerateBase(LegacySampler):
-    """Draws ``x_0``: ``__call__`` the outgoing slots, ``insert_add`` the E_dep cell. Holds the distributions'
-    parameters between ``interface._set_prior`` and the draw (``lego_eval`` reads ``edep_mu`` / ``edep_sig`` back)."""
+    """The sampler of ``x_0`` for a batch.
+
+    Holds the distributions' parameters between ``interface._set_prior`` and the draw (``lego_eval`` reads
+    ``edep_mu`` / ``edep_sig`` back).
+    """
 
     def __init__(self, config: dict):
         base_conf = config.get("base_conf") or {}
@@ -48,23 +63,32 @@ class GenerateBase(LegacySampler):
         self.edep_mu   = 0.0                                          # E_dep mu
         self.edep_sig  = 1.0                                          # E_dep sig
 
-    def __call__(self, shape, incoming_rt, rng=None, elem=None):
-        """``(B, 1 + n_out, 7)``: the incoming token as given, then a draw (energy, momentum, position) for each of
-        the ``shape`` = (B, n_out) outgoing slots. Without ``rng`` the noise is torch's; ``rng`` (legofmt.rng.EventRNG)
-        keys it per event, ``elem`` (B, n_out) per slot."""
-        if not self.is_recipe(): return super().__call__(shape, incoming_rt, rng, elem)   # any other option
-        noise  = R.Noise(shape, incoming_rt.device, rng, elem)
-        in_mom = F.normalize(incoming_rt[..., 1:4], dim=-1)
-        in_pos = incoming_rt[..., -3:]
-        angles = Angles(self.kappa, self.ang_pow)
-        energy = Energy(self.sm_scale, self.sm_pow).sample(noise.normal(R.BASE_E)[..., None]).to(incoming_rt)
-        pos    = sample_directions(angles, in_pos, noise, R.BASE_POS)   # torch's stream: position before momentum
-        mom    = sample_directions(angles, in_mom, noise, R.BASE_MOM)
-        outgoing = torch.cat((energy, mom, pos), dim=-1)
-        return torch.cat((incoming_rt, outgoing), dim=1)
+    def __call__(self, ds_t, rng=None):
+        """Samples ``x_0`` for a batch.
 
-    def insert_add(self, base, rng=None):
-        """Fills the E_dep token's energy cell with ``z ~ N(0, 1)``, in place: the flow carries E_dep in units of the
-        event's prior (``edep_whiten.py``), where the prior is the standard normal."""
-        base[:, 1, 0] = R.Noise(base.shape[:1], base.device, rng).normal(R.EDEP).to(base)
-        return base
+        Copies the batch and writes a draw on its E_dep token and on every outgoing slot. The conditioning tokens
+        (the scalars, the incoming particle) stay the data's.
+
+        Args:
+            ds_t: the batch (``DataStruct``).
+            rng:  keys the noise on the event and on an outgoing slot's (species, rank) (``legofmt.rng.EventRNG``);
+                None: torch's noise.
+
+        Returns:
+            ``x_0`` (B, N, 7).
+        """
+        if not self.is_recipe(): return super().__call__(ds_t, rng)   # any other option
+        f      = ds_t.f
+        slot   = R.Noise.per_slot(f.out_pid, rng)
+        event  = R.Noise(f.edep.shape, f.edep.device, rng)
+        energy = Energy(self.sm_scale, self.sm_pow)
+        angles = Angles(self.kappa, self.ang_pow)
+        in_mom = F.normalize(f.in_mom, dim=-1)[:, None]   # (B, 1, 3): an event's axis, for all its slots
+        in_pos = f.in_pos[:, None]
+
+        x0 = _F(f.model_in.clone())
+        x0.out_energy[:] = energy.sample(slot.normal(R.BASE_E))
+        x0.out_pos[:]    = sample_directions(angles, in_pos, slot, R.BASE_POS)   # torch's noise: position first
+        x0.out_mom[:]    = sample_directions(angles, in_mom, slot, R.BASE_MOM)
+        x0.edep[:]       = event.normal(R.EDEP)
+        return x0.full

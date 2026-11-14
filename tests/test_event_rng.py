@@ -9,7 +9,7 @@ import copy
 import pytest
 import torch
 
-from legofmt.base_dist.gen_base import GenerateBase
+from legofmt.base.gen_base import GenerateBase
 from legofmt.cfm.edep_ae import EdepLayerAE
 from legofmt.data.struct import DataStruct, set_layout
 from legofmt.main.generate import GenerateOut

@@ -6,8 +6,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from legofmt.base_dist.base_dists import Angles
-from legofmt.base_dist.gen_base import sample_directions
+from legofmt.base.base_dists import Angles
+from legofmt.base.gen_base import sample_directions
 from legofmt.data.struct import DataStruct
 from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.legacy.gen_base import sample_dirs

@@ -37,21 +37,26 @@ from legofmt.geometry.product_manifold import ProductManifold
 # ---------------------------------------------------------------------------
 
 def rename_ntokens(model_args: dict) -> None:
-    """Pre-refactor checkpoints spelled ``max_seq_l`` as ``ntokens``."""
+    """Renames ``ntokens`` to ``max_seq_l`` in place: pre-refactor checkpoints spelled it ``ntokens``."""
     if "ntokens" in model_args:
         model_args["max_seq_l"] = model_args.pop("ntokens")
 
 
 def apply_legacy_projection_in_out(model_args: dict, state_dict: dict) -> None:
-    """Legacy checkpoints carry ``vf.project_in/out`` linears; rebuild them by
-    setting ``dim_in_out`` so ``load_state_dict`` finds matching layers."""
+    """Sets ``dim_in_out`` for a legacy checkpoint, in place.
+
+    Legacy checkpoints carry ``vf.project_in/out`` linears; with ``dim_in_out`` set the model rebuilds them, so
+    ``load_state_dict`` finds matching layers.
+    """
     if any(k.startswith("vf.project_in.") for k in state_dict):
         model_args["dim_in_out"] = model_args["h_dim"]
 
 
 def migrate_legacy_mult_heads(state_dict: dict, max_seq_len: int) -> dict:
-    """Pre-fusion checkpoints stored per-position ModuleLists (``embd_in_.{i}``,
-    ``proj_out_.{i}``); remap them onto the fused single-table layout."""
+    """Remaps a pre-fusion checkpoint's per-position ModuleLists onto the fused single-table layout.
+
+    Pre-fusion checkpoints stored ``embd_in_.{i}`` and ``proj_out_.{i}``.
+    """
     has_legacy_proj = "proj_out_.0.weight" in state_dict
     has_legacy_embd = "embd_in_.0.weight" in state_dict
     if not (has_legacy_proj or has_legacy_embd):
@@ -82,7 +87,7 @@ LEGACY_PARAM_RENAME: dict[str, str] = {
 
 
 def legacy_param_rename(state_dict, prefix, *_) -> None:
-    """``load_state_dict`` pre-hook remapping the pre-refactor parameter names."""
+    """Remaps the pre-refactor parameter names; a ``load_state_dict`` pre-hook."""
     renames = {
         k: prefix + LEGACY_PARAM_RENAME[suf]
         for k in list(state_dict)
@@ -100,9 +105,11 @@ def legacy_param_rename(state_dict, prefix, *_) -> None:
 
 
 def load_legacy_base_head(head: nn.Sequential, hs: dict) -> None:
-    """A ``base_head`` saved with fewer outputs than the current one: copy the
-    rows that exist and leave the rest at their init values. Call under
-    torch.no_grad(): it copies into parameter slices in place."""
+    """Loads a ``base_head`` saved with fewer outputs than the current one.
+
+    Copies the rows that exist and leaves the rest at their init values. Call under torch.no_grad(): it copies into
+    parameter slices in place.
+    """
     n_old = hs["2.weight"].shape[0]
     head[0].load_state_dict({"weight": hs["0.weight"], "bias": hs["0.bias"]})
     head[-1].weight[:n_old].copy_(hs["2.weight"])
@@ -122,7 +129,7 @@ XT_QK_NORM_FIX = Version("2.25.5")
 
 
 def qk_norm_scale_compat(model_args: dict, additional: dict) -> None:
-    """Cube attn_qk_norm_scale for checkpoints stamped before the x-transformers 2.25.5 fix."""
+    """Cubes attn_qk_norm_scale for checkpoints stamped before the x-transformers 2.25.5 fix."""
     saved = additional.get("x_transformers_version")
     old_ckpt = saved is None or Version(saved) < XT_QK_NORM_FIX
     if model_args.get("attn_qk_norm") and old_ckpt and XT_VERSION >= XT_QK_NORM_FIX:
@@ -142,12 +149,12 @@ FP32_ATTN_QK_SCALE = 100
 
 
 def needs_fp32_attention(model_args: dict) -> bool:
-    """True when attn_qk_norm_scale > 100 (pre-2.25.5 checkpoints), which need the fp32 attention kernel."""
+    """Returns whether attn_qk_norm_scale > 100 (pre-2.25.5 checkpoints), which needs the fp32 attention kernel."""
     return bool(model_args.get("attn_qk_norm")) and model_args.get("attn_qk_norm_scale", 10) > FP32_ATTN_QK_SCALE
 
 
 def fp32_attention(module: nn.Module) -> None:
-    """Run every ``Attend`` in fp32 even under autocast (see ``needs_fp32_attention``)."""
+    """Makes every ``Attend`` of ``module`` run in fp32 even under autocast (see ``needs_fp32_attention``)."""
     def _wrap(fwd):
         def forward(q, k, v, *args, **kwargs):
             with torch.autocast(q.device.type, enabled=False):
@@ -160,13 +167,12 @@ def fp32_attention(module: nn.Module) -> None:
 
 
 def dynamic_shape_attention() -> None:
-    """Make ``torch.compile(dynamic=True)`` actually symbolic in batch and length.
+    """Makes ``torch.compile(dynamic=True)`` actually symbolic in batch and length.
 
-    x-transformers masks ``Attention``'s output with
-    ``einx.where('b n, b n d, -> b n d', mask, out, 0.)``, and einx traces per
-    concrete shape, so dynamo specialises both dims and compiles one graph per
-    bucket shape. Replacing that one pattern by the equivalent ``torch.where``
-    leaves a single graph. Module-global, idempotent."""
+    x-transformers masks ``Attention``'s output with ``einx.where('b n, b n d, -> b n d', mask, out, 0.)``, and einx
+    traces per concrete shape, so dynamo specialises both dims and compiles one graph per bucket shape. Replacing that
+    one pattern by the equivalent ``torch.where`` leaves a single graph. Module-global, idempotent.
+    """
     import types
     import x_transformers.x_transformers as xt
 
@@ -196,7 +202,7 @@ MANIFOLD_EVAL_NS: dict[str, Any] = {
 
 
 def build_manifold_from_string(spec: str) -> ProductManifold:
-    """Eval the legacy string manifold spec, with a DeprecationWarning."""
+    """Evaluates the legacy string manifold spec, with a DeprecationWarning."""
     warnings.warn(
         "String manifold specs are deprecated; use a list of factor dicts "
         "([{'name': 'euclidean', 'dim': 3}, ...]).",

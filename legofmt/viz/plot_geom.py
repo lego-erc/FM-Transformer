@@ -32,8 +32,10 @@ class PlotGeom:
         arr_c: str = "y",
         lims: float = 1.4,
     ) -> plt.Axes:
-        """Quiver + scatter of (mom, pos) 6-vectors, or scatter only for bare
-        3-vectors; incoming is drawn at -pos."""
+        """Plots (mom, pos) 6-vectors as quiver + scatter, or bare 3-vectors as scatter only.
+
+        ``incoming`` is drawn at -pos.
+        """
         if coord.shape[-1] == 6:
             vec, pts = coord.movedim(-1, 0).split(3, 0)
             ax.quiver(*pts.cpu().numpy(), *vec.cpu().numpy(), length=arr_l, normalize=True, arrow_length_ratio=arr_lr,

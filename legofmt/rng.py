@@ -18,7 +18,7 @@ BASE_MOM, BASE_POS, ISO_E, ISO_MOM, ISO_POS = 20, 22, 24, 26, 28
 
 
 def _mix(z):
-    """SplitMix64's finaliser on int64 (wrapping multiplies, logical shifts)."""
+    """Applies SplitMix64's finaliser to int64 (wrapping multiplies, logical shifts)."""
     srl = lambda x, n: (x >> n) & ((1 << (64 - n)) - 1)
     z = z + -0x61C8864680B583EB                     # 0x9E3779B97F4A7C15 as int64
     z = (z ^ srl(z, 30)) * -0x40A7B892E31B1A47      # 0xBF58476D1CE4E5B9
@@ -27,8 +27,16 @@ def _mix(z):
 
 
 def species_rank_ids(pid: torch.Tensor) -> torch.Tensor:
-    """(B, n) species per slot -> (B, n) ids (species, rank within the species), unique per row: a slot keeps its id
-    when a particle of another species is added, whatever the slot order."""
+    """Maps each slot's species to the id (species, rank within the species), unique within an event.
+
+    A slot keeps its id when a particle of another species is added, whatever the slot order.
+
+    Args:
+        pid: (B, n) int64, the species per slot.
+
+    Returns:
+        (B, n) int64 ids.
+    """
     order = pid.argsort(dim=1, stable=True)
     s = pid.gather(1, order)
     idx = torch.arange(s.shape[1], device=s.device).expand_as(s)
@@ -49,13 +57,13 @@ class EventRNG:
         self.keys, self.seed = keys, int(seed)
 
     def sub(self, rows) -> "EventRNG":
-        """The same randomness for a subset / reordering of the events."""
+        """Returns the same randomness for the subset / reordering ``rows`` of the events."""
         out = object.__new__(EventRNG)
         out.keys, out.seed = self.keys[rows], self.seed
         return out
 
     def uniform(self, stream: int, elem=0) -> torch.Tensor:
-        """float64 in (0, 1)."""
+        """Samples uniforms in (0, 1), float64, at the draw site ``stream`` and the elements ``elem``."""
         k = self.keys
         t = lambda v: torch.as_tensor(v, dtype=torch.int64, device=k.device)
         h = _mix(_mix(_mix(t(self.seed)) + k) + _mix(t(stream)))
@@ -65,14 +73,19 @@ class EventRNG:
         return ((z >> 11) & ((1 << 53) - 1)).double().add_(0.5).mul_(2.0 ** -53)
 
     def normal(self, stream: int, elem=0) -> torch.Tensor:
+        """Samples standard normals, float64; arguments as in ``uniform``."""
         return torch.special.ndtri(self.uniform(stream, elem))
 
     def randint(self, high: int, stream: int, elem=0) -> torch.Tensor:
+        """Samples integers in ``[0, high)``; ``stream`` and ``elem`` as in ``uniform``."""
         return (self.uniform(stream, elem) * high).long()
 
     def categorical(self, probs: torch.Tensor, stream: int, elem=0) -> torch.Tensor:
-        """Inverse-CDF draws from unnormalised ``probs (B, ..., K)``: one per row of ``probs`` (``elem`` shaped like
-        its leading dims), or ``n`` per event for 2-D ``probs`` and 1-D ``elem``. Zero-weight columns are never hit."""
+        """Samples class indices from unnormalised ``probs`` (B, ..., K) by the inverse CDF.
+
+        One index per row of ``probs`` (``elem`` shaped like its leading dims), or ``n`` per event for 2-D ``probs``
+        and 1-D ``elem``. Zero-weight columns are never hit.
+        """
         cdf = probs.double().cumsum(-1)
         u = self.uniform(stream, elem).to(cdf.device)
         one = u.dim() == probs.dim() - 1
@@ -84,17 +97,24 @@ class EventRNG:
 class Noise:
     """One call site's draws for ``shape`` cells, so that the site reads the same with and without ``rng``: torch's
     draw (float32 on ``device``) without, the keyed one at the ids ``elem`` (float64) with. ``stream`` names a keyed
-    draw; torch's stream is consumed in call order."""
+    draw; torch's generator is consumed in call order."""
 
     def __init__(self, shape, device, rng: EventRNG | None = None, elem=0):
         self.shape, self.device, self.rng, self.elem = shape, device, rng, elem
 
+    @classmethod
+    def per_slot(cls, pid: torch.Tensor, rng: EventRNG | None = None) -> "Noise":
+        """Constructs the noise for one draw per slot of ``pid`` (B, n), keyed on the slot's (species, rank)."""
+        return cls(pid.shape, pid.device, rng, None if rng is None else species_rank_ids(pid.long()))
+
     def normal(self, stream: int) -> torch.Tensor:
+        """Samples a standard normal per cell."""
         if self.rng is None:
             return torch.randn(self.shape, device=self.device)
         return self.rng.normal(stream, self.elem)
 
     def uniform(self, stream: int) -> torch.Tensor:
+        """Samples a uniform on the unit interval per cell."""
         if self.rng is None:
             return torch.rand(self.shape, device=self.device)
         return self.rng.uniform(stream, self.elem)

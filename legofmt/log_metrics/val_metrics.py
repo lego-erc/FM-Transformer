@@ -58,8 +58,10 @@ def event_summary(mom, e, pos, pdgid, active, e_dep):
 
 
 def standardize(a, b):
-    """Z-score both sets by their pooled mean/std: an over-dispersed model inflates
-    sigma and reports a smaller W1, and each run gets its own normaliser."""
+    """Standardizes both sets by their pooled mean/std (z-score).
+
+    An over-dispersed model inflates sigma and reports a smaller W1, and each run gets its own normaliser.
+    """
     anchor = torch.cat([a, b], dim=0)
     mu = anchor.mean(dim=0)
     sigma = anchor.std(dim=0).clamp(min=1e-8)
@@ -93,13 +95,16 @@ def w1_per_feature(X, Y):
 
 
 def edep_by_primary(edep_real, edep_fake, pdgid_in, n_out) -> dict:
-    """E_dep accuracy split by incoming species: W1 per primary, and the generated / true mean on the events with a
-    secondary (``n_out >= 2``; a ratio, not W1, because the error is a scale error and a ratio reads as a percentage).
+    """Computes the E_dep accuracy split by incoming species.
+
+    W1 per primary, and the generated / true mean on the events with a secondary (``n_out >= 2``; a ratio, not W1,
+    because the error is a scale error and a ratio reads as a percentage).
 
     Nothing else here resolves the primary: ``event_summary`` tags *outgoing* e-/e+/gamma and pools every gun, so a
     defect of one primary averages away. On rp_fm_had_base_180926 (2026-09-18) E_dep was within 1% for e-/e+/gamma at
     every multiplicity but +15% for protons and +20% for neutrons once ``n_out >= 4``, and no logged metric moved: the
-    hadronic error lives where a nuclear interaction happened, which the E_dep prior cannot see."""
+    hadronic error lives where a nuclear interaction happened, which the E_dep prior cannot see.
+    """
     out = {}
     for pid, tag in PRIMARY_TAGS.items():
         sel = pdgid_in == pid
@@ -113,9 +118,11 @@ def edep_by_primary(edep_real, edep_fake, pdgid_in, n_out) -> dict:
 
 
 def edep_layer_metrics(real: torch.Tensor, fake: torch.Tensor) -> dict:
-    """Per-layer E_dep in MeV, ``(B, n_layers)``, from the ``model_conf.edep_ae`` decoder against the truth:
-    medians over the layers that saw a deposit of the generated / true mean and spread, and the ratio of the
-    mean energy-weighted depth (in layers)."""
+    """Compares per-layer E_dep from the ``model_conf.edep_ae`` decoder against the truth.
+
+    Both are in MeV, ``(B, n_layers)``. Returns medians over the layers that saw a deposit of the generated / true mean
+    and spread, and the ratio of the mean energy-weighted depth (in layers).
+    """
     live = real.mean(0) > 0
     l = torch.arange(real.shape[1], device=real.device, dtype=real.dtype)
     depth = lambda E: ((E * l).sum(1) / E.sum(1).clamp(min=1e-12))[E.sum(1) > 0].mean()
@@ -157,8 +164,10 @@ class ShowerValMetrics:
 
     @staticmethod
     def _generate(lego, ds_t):
-        """Generate with the ``odeint_conf`` solver settings, canonicalising the
-        directions first when ``canon_sym`` is on, exactly as ``Solvers.forward``."""
+        """Generates with the ``odeint_conf`` solver settings.
+
+        The directions are canonicalised first when ``canon_sym`` is on, exactly as ``Solvers.forward``.
+        """
         cfg = lego.rc.odeint_conf
         sym = getattr(lego, "sym", None)
         if sym is not None:

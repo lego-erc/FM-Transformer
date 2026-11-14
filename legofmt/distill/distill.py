@@ -12,8 +12,10 @@ from torch import Tensor
 
 
 def one_step_euler_loss(lego, base: Tensor, ds_t, pdgid_idx: Tensor, model=None, z=None) -> Tensor:
-    """fp32 wrapper: the loss is ~5e-5 and bf16 autocast inflates it ~390x, so
-    the ladder runs outside autocast."""
+    """Computes the ``one_step_euler`` loss in fp32.
+
+    The loss is ~5e-5 and bf16 autocast inflates it ~390x, so the ladder runs outside autocast.
+    """
     with torch.autocast(base.device.type, enabled=False):
         z = None if z is None else tuple(a.float() for a in z)
         model = lego.model if model is None else model
@@ -21,8 +23,11 @@ def one_step_euler_loss(lego, base: Tensor, ds_t, pdgid_idx: Tensor, model=None,
 
 
 def _one_step_euler_loss_fp32(lego, base: Tensor, ds_t, pdgid_idx: Tensor, model, z=None) -> Tensor:
-    """``z`` = (base, target) of the ``model_conf.edep_ae`` latent: it takes the same two teacher half-steps
-    (Euclidean) and its error joins the mean as K more cells."""
+    """Computes the ``one_step_euler`` loss; ``one_step_euler_loss`` calls it outside autocast.
+
+    ``z`` = (base, target) of the ``model_conf.edep_ae`` latent: it takes the same two teacher half-steps (Euclidean)
+    and its error joins the mean as K more cells.
+    """
     mask, am = ds_t.m.full, ds_t.am.full
     gen = (mask == 1).unsqueeze(-1)
     g   = gen & am.unsqueeze(-1)

@@ -1,4 +1,4 @@
-"""E_dep tokens superseded by the plain ``model_conf.edep_whiten`` (:mod:`legofmt.base_dist.edep_whiten`), kept so older
+"""E_dep tokens superseded by the plain ``model_conf.edep_whiten`` (:mod:`legofmt.base.edep_whiten`), kept so older
 configs and checkpoints still run unchanged:
 
     not whitened   the flow carries the deposit itself, and the base draws it as ``e_dep_max sigmoid(mu + sig z)``
@@ -50,9 +50,9 @@ def whiten_edep_options(f: Tensor, generated: Tensor, mu: Tensor, sig: Tensor, e
 class LegacyEdepToken:
     """``BaseDist`` methods for an E_dep token that is not whitened or is whitened with an option."""
 
-    def _draw_prior(self, ds_t: DataStruct, data: Tensor, rng) -> Tensor:
+    def _draw_prior(self, ds_t: DataStruct, rng) -> Tensor:
         """The E_dep draw as a deposit, ``e_dep_max sigmoid(mu + sig z)``, where ``BaseDist`` leaves ``z``."""
-        x0 = super()._draw_prior(ds_t, data, rng)
+        x0 = super()._draw_prior(ds_t, rng)
         if _plain(self.rc):
             return x0
         mu, sig = self.gen_base.edep_mu, self.gen_base.edep_sig

@@ -22,7 +22,7 @@ from legofmt.main.modules import LEGOLtng
 
 
 def _teacher_from_state(config: dict, state_dict: dict) -> nn.Module:
-    """Frozen, ``torch.compile``'d velocity teacher from a config + vf state dict."""
+    """Constructs the frozen, ``torch.compile``'d velocity teacher from a config + vf state dict."""
     conf = copy.deepcopy(config)
     conf["model_conf"]["reflow_path"] = None  # teacher must not chain-load its own teacher
     teacher = LEGOLtng({"config": conf, "state_dict": state_dict})
@@ -32,7 +32,7 @@ def _teacher_from_state(config: dict, state_dict: dict) -> nn.Module:
 
 
 def _build_reflow_teacher(reflow_path: str | None) -> nn.Module | None:
-    """Teacher loaded from a checkpoint path; ``None`` if path unset/missing."""
+    """Loads the teacher from a checkpoint path; ``None`` if the path is unset or missing."""
     if reflow_path is None:
         return None
     if not Path(reflow_path).is_file():
@@ -68,7 +68,7 @@ class LEGOLtngDirect(LEGOLtng):
         return ProjectModelDirect(CFMTrafo_x(**rc.model_args, time_cond=False), rc.manifold)
 
     def _reflow_target(self, ds_t: DataStruct, base: Tensor) -> Tensor:
-        """The teacher's transport of ``base``, or the data target without one."""
+        """Returns the teacher's transport of ``base``, or the data target without a teacher."""
         if self.reflow_teacher is None:
             return ds_t.f.model_in
         return self._teacher_transport(ds_t, base, **self.rc.reflow_kwargs)
@@ -87,7 +87,7 @@ class LEGOLtngDirect(LEGOLtng):
 
     def _solve(self, ds_t: "DataStruct | tuple[Tensor, Tensor, Tensor]", x_init: Tensor | None = None,
                split_size: int | None = None, **_kw) -> Tensor:
-        """One forward; the inherited no_grad ``solve`` and ``_solve_by_length`` both dispatch here."""
+        """Solves with one forward; the inherited no_grad ``solve`` and ``_solve_by_length`` both dispatch here."""
         ds_t, pdgids_idx = self._prep_solve(ds_t)
         if x_init is None:
             x_init = self.gen_base_wrapper(ds_t)

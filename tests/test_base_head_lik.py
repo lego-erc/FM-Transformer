@@ -12,10 +12,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from legofmt.base_dist.base_dists import Angles, Energy
-from legofmt.base_dist.nn import BaseHead
-from legofmt.base_dist.nn_fit import angles_logp, energy_logp, head_nll
-from legofmt.base_dist.gen_base import GenerateBase, sample_directions
+from legofmt.base.base_dists import Angles, Energy
+from legofmt.base.nn import BaseHead
+from legofmt.base.nn_fit import angles_logp, energy_logp, head_nll
+from legofmt.base.gen_base import GenerateBase, sample_directions
 from legofmt.data.struct import DataStruct
 from legofmt.main.modules import LEGOLtng
 from legofmt.rng import Noise
@@ -99,11 +99,12 @@ def test_sm_pow_one_draws_bitwise_what_sm_norm_drew() -> None:
 
 def test_rd_scale_draws_with_per_slot_scale_and_shape() -> None:
     gb = GenerateBase({"base_conf": {"scale_dist": "sm_norm"}})
-    gb.sm_scale, gb.sm_pow = torch.rand(64, 5, 1) + 0.1, torch.rand(64, 5, 1) * 2 + 0.3
+    gb.sm_scale, gb.sm_pow = torch.rand(64, 5) + 0.1, torch.rand(64, 5) * 2 + 0.3
     torch.manual_seed(3)
     got = gb.rd_scale((64, 5), torch.ones(64, 1))
     torch.manual_seed(3)
-    assert torch.equal(got, 1 - torch.tanh(torch.randn(64, 5, 1).abs().pow(gb.sm_pow) * gb.sm_scale))
+    s, q = gb.sm_scale[..., None], gb.sm_pow[..., None]
+    assert torch.equal(got, 1 - torch.tanh(torch.randn(64, 5, 1).abs().pow(q) * s))
 
 
 # ------------------------------------------------------------------ construction and loading
@@ -192,9 +193,9 @@ def test_fit_base_head_hands_the_sampler_per_slot_scale_and_shape() -> None:
     model.gen_base_wrapper(ds)
     idx = model._species_idx(ds.f.out_p[..., -1], sm.shape[-1])
     gb = model.gen_base
-    assert gb.sm_scale.shape == (3, 2, 1) and gb.sm_pow.shape == (3, 2, 1)
-    assert torch.equal(gb.sm_scale.squeeze(-1), sm.gather(1, idx))
-    assert torch.equal(gb.sm_pow.squeeze(-1), q.gather(1, idx))
+    assert gb.sm_scale.shape == (3, 2) and gb.sm_pow.shape == (3, 2)
+    assert torch.equal(gb.sm_scale, sm.gather(1, idx))
+    assert torch.equal(gb.sm_pow, q.gather(1, idx))
     assert torch.equal(gb.kappa, kap.gather(1, idx)) and torch.equal(gb.ang_pow, pw.gather(1, idx))
 
 
@@ -395,7 +396,7 @@ def test_lik_pretraining_lr_schedule_and_clip(monkeypatch) -> None:
 
 def test_a_moment_head_resets_the_energy_shape() -> None:
     model = LEGOLtng(_config(base_head_lik=False)).eval()
-    model.gen_base.sm_pow = torch.full((3, 2, 1), 2.0)        # left by a lik head on the same sampler
+    model.gen_base.sm_pow = torch.full((3, 2), 2.0)           # left by a lik head on the same sampler
     model.gen_base_wrapper(_batch(torch.tensor([1, 2, 2])))
     assert model.gen_base.sm_pow == 1.0
 

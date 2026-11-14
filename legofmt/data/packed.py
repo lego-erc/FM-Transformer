@@ -26,7 +26,7 @@ def is_packed(obj) -> bool:
 
 
 def _mask(am: Tensor, n_prefix: int) -> Tensor:
-    """The loss mask ``m``: ``am`` minus the prefix and incoming tokens, plus the E_dep token (slot 1)."""
+    """Builds the loss mask ``m``: ``am`` minus the prefix and incoming tokens, plus the E_dep token (slot 1)."""
     m = am.long()
     m[..., :n_prefix + 1] = 0
     m[..., 1] = 1
@@ -34,7 +34,7 @@ def _mask(am: Tensor, n_prefix: int) -> Tensor:
 
 
 def _merge_tokens(tokens: list[Tensor], name: str) -> Tensor:
-    """The one known template token of several parts; all-NaN means unknown (a part with no such token)."""
+    """Returns the one known template token of several parts; all-NaN means unknown (a part with no such token)."""
     known = [r for r in tokens if not torch.isnan(r).all()]
     for r in known[1:]:
         if not torch.equal(r[1:], known[0][1:]):
@@ -114,7 +114,7 @@ class PackedData:
         return self.tokens[self.offsets[:-1]]
 
     def species_counts(self, ptypes: Tensor) -> Tensor:
-        """Outgoing particles of each species per event, ``(N, len(ptypes))``."""
+        """Counts the outgoing particles of each species per event, ``(N, len(ptypes))``."""
         ptypes = torch.as_tensor(ptypes)
         if (ptypes == 0).any():
             raise ValueError("pdgid 0 is the padding's: a padded file would count its padded tokens")
@@ -134,7 +134,10 @@ class PackedData:
                           None if self.edep_layers is None else self.edep_layers[idx])
 
     def unpack(self, idx=slice(None)) -> tuple:
-        """The padded ``(f, m, am[, edep_layers])`` of events ``idx`` (any index of the event axis), at full ``L``."""
+        """Pads the events ``idx`` (any index of the event axis) to full ``L``.
+
+        Returns ``(f, m, am[, edep_layers])``.
+        """
         P, L = self.n_prefix, self.L
         start = self.offsets[:-1][idx]
         lens = self.offsets[1:][idx] - start
@@ -151,8 +154,10 @@ class PackedData:
         return out if self.edep_layers is None else out + (self.edep_layers[idx],)
 
     def norm_e(self, prep) -> None:
-        """``prep.norm_e`` in place, on the only tokens it touches (prefix, incoming, edep_layers) of
-        all events at once, as the padded file gets it."""
+        """Applies ``prep.norm_e`` in place to all events at once, as the padded file gets it.
+
+        Only the tokens it touches are built: prefix, incoming, edep_layers.
+        """
         N, P = len(self), self.n_prefix
         v = torch.empty(N, P + 1, 8)
         v[:, :P] = self.prefix_token

@@ -40,7 +40,7 @@ class EdepLayerAE(nn.Module):
         self.register_buffer("log_e_max", torch.full((n_layers,), float("inf")))
 
     def encode(self, E: Tensor) -> Tensor:
-        """(B, n_layers) MeV -> (B, K) standardised latents."""
+        """Encodes per-layer deposits (B, n_layers) [MeV] into standardised latents (B, K)."""
         return (self.enc(torch.log(E + LOG_OFFSET)) - self.z_mu) / self.z_sd
 
     def _head(self, z: Tensor, tot: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
@@ -50,7 +50,10 @@ class EdepLayerAE(nn.Module):
         return h[..., 0], F.log_softmax(h[..., 1:1 + M], -1), h[..., 1 + M:1 + 2 * M], h[..., 1 + 2 * M:].clamp(-7, 3)
 
     def nll(self, E: Tensor) -> Tensor:
-        """Mean per-layer negative log-likelihood of (B, n_layers) deposits; every event needs a deposit."""
+        """Returns the mean per-layer negative log-likelihood of deposits (B, n_layers).
+
+        Every event needs a deposit.
+        """
         a, lw, mu, ls = self._head(self.encode(E), E.sum(-1, keepdim=True))
         v = torch.log(E.clamp(min=1e-12))[..., None]
         logn = -0.5 * ((v - mu) / ls.exp()) ** 2 - ls - _HALF_LOG_2PI
@@ -59,8 +62,16 @@ class EdepLayerAE(nn.Module):
 
     @torch.no_grad()
     def sample(self, z: Tensor, tot: Tensor, rng=None) -> Tensor:
-        """(B, K) standardised latents, (B,) totals [MeV] -> (B, n_layers) deposits that sum to the totals; ``rng``
-        (legofmt.rng.EventRNG) keys the draws per event and layer."""
+        """Samples per-layer deposits that sum to each event's total.
+
+        Args:
+            z:   (B, K) standardised latents.
+            tot: (B,) totals [MeV].
+            rng: keys the draws per event and layer (``legofmt.rng.EventRNG``); None: torch's noise.
+
+        Returns:
+            (B, n_layers) deposits [MeV].
+        """
         z, tot = z.float(), tot.float().reshape(-1, 1)
         a, lw, mu, ls = self._head(z, tot.clamp(min=1e-6))
         layer = torch.arange(a.shape[-1], device=a.device)
@@ -76,8 +87,15 @@ class EdepLayerAE(nn.Module):
 
 
 def build_edep_ae(spec: dict) -> EdepLayerAE:
-    """``spec`` = ``{"config", "state_dict"}`` (scripts/train_edep_ae.py's output, which a flow checkpoint stashes
-    in ``model_conf.edep_ae``); frozen."""
+    """Constructs the per-layer E_dep autoencoder from ``spec``, frozen.
+
+    Args:
+        spec: ``{"config", "state_dict"}``, scripts/train_edep_ae.py's output, which a flow checkpoint stashes in
+            ``model_conf.edep_ae``.
+
+    Returns:
+        The autoencoder, frozen and in eval mode.
+    """
     ae = EdepLayerAE(**spec["config"])
     ae.load_state_dict(spec["state_dict"])
     ae.requires_grad_(False)

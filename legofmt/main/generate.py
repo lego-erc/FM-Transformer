@@ -27,14 +27,16 @@ _EDEP_EXCESS_MEV = {11: 0.0, -11: 1.022, 22: 0.0, 2212: 0.0, 2112: 10.0, 211: 15
 
 
 def _balance_energy(sols: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor, pen, dp) -> None:
-    """Close the kinetic balance E_in = E_dep + sum E_out + 2 m_e (n_e+ out - n_e+ in) per event in place, keeping
-    the generated E_dep. e+-/gamma in: every outgoing energy is scaled to that budget, and an absorbed one (nothing
-    leaves) deposits the budget. Hadron in: only a survivor (the leading outgoing particle is the incoming species,
-    with > 90% of E_in or with nothing but gammas / e+- beside it) changes, to the budget minus the others; a nuclear
-    interaction, whose Geant4 balance is open (fragments, binding), is left alone. The second rule is what a thick
-    block needs: a 1 GeV p / pi+ crossing the 108.8 mm W/Si stack keeps 72-81%, and Geant4 closes those events
-    exactly (residual 0.00 MeV to q90). Only valid where the data's own balance closes (the 0.1 MeV-cutoff
-    plates, not a 10 MeV cutoff), hence opt-in."""
+    """Closes each event's kinetic balance in place, keeping the generated E_dep.
+
+    The balance is E_in = E_dep + sum E_out + 2 m_e (n_e+ out - n_e+ in). e+-/gamma in: every outgoing energy is scaled
+    to that budget, and an absorbed one (nothing leaves) deposits the budget. Hadron in: only a survivor (the leading
+    outgoing particle is the incoming species, with > 90% of E_in or with nothing but gammas / e+- beside it) changes,
+    to the budget minus the others; a nuclear interaction, whose Geant4 balance is open (fragments, binding), is left
+    alone. The second rule is what a thick block needs: a 1 GeV p / pi+ crossing the 108.8 mm W/Si stack keeps 72-81%,
+    and Geant4 closes those events exactly (residual 0.00 MeV to q90). Only valid where the data's own balance closes
+    (the 0.1 MeV-cutoff plates, not a 10 MeV cutoff), hence opt-in.
+    """
     s = _F(sols)
     e, pid = s.out_p[..., 0], s.out_p[..., -1]                        # (B, K) slots; per event (B, 1)
     e_in, pid_in = e_in.double()[:, None], pid_in[:, None]
@@ -56,10 +58,12 @@ def _balance_energy(sols: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor
 
 
 def _exit_outward(sols: torch.Tensor) -> None:
-    """Mirror, in place, the momentum component of an outgoing particle that points into the face its exit position
-    is on (the face is the dominant axis of the position direction, which is that of x / cuboid_dim). Position and
-    direction are separate channels, so the flow can emit a particle leaving through +z while moving -z; Geant4 never
-    does, and a chain hands such a particle to the next slab moving away from it."""
+    """Mirrors, in place, an outgoing momentum component that points into the face the particle exits through.
+
+    The face is the one its exit position is on: the dominant axis of the position direction, which is that of x /
+    cuboid_dim. Position and direction are separate channels, so the flow can emit a particle leaving through +z while
+    moving -z; Geant4 never does, and a chain hands such a particle to the next slab moving away from it.
+    """
     out = _F(sols).out_p
     u, m = out[..., 4:7], out[..., 1:4]
     ax = u.abs().nan_to_num(-1.0).argmax(-1, keepdim=True)
@@ -69,7 +73,7 @@ def _exit_outward(sols: torch.Tensor) -> None:
 
 
 def _rng_kw(rng, rows=None) -> dict:
-    """``rng=`` for a call only when keyed, so stubs and subclasses without the argument keep working."""
+    """Returns ``rng=`` for a call only when keyed, so stubs and subclasses without the argument keep working."""
     return {} if rng is None else {"rng": rng if rows is None else rng.sub(rows)}
 
 
@@ -131,13 +135,23 @@ class GenerateOut(torch.nn.Module):
         self.dp = DataPrep(flow_conf)   # the E_dep token's normalisation (edep_log_min), for the E_in ceiling
 
     def __call__(self, cond: torch.Tensor, prepped: bool = False, passthrough: bool = True, rng=None):
-        """``cond`` is ``[B, n_cond + 7] = [*cond_scalars, mom * E_MeV (3), pos (3), pdgid]``;
-        the momentum must be energy-scaled. ``prepped=True`` skips the ray-trace and
-        the energy split. ``passthrough=False`` never fires the pass-through token: the
-        interacting branch, for a caller that drew the pass-through itself (``passthrough_prob``).
-        ``rng`` (legofmt.rng.EventRNG, one unique key per event) makes every random draw a function of
-        the event's key: independent of the batch, and shared by two models run on the same keys.
-        Returns ``(sols, mask, attn_mask)`` in the ``(B, L, 8)`` layout."""
+        """Generates the outgoing particles and E_dep of a batch of incoming particles.
+
+        Args:
+            cond:        ``[B, n_cond + 7] = [*cond_scalars, mom * E_MeV (3), pos (3), pdgid]``; the momentum must be
+                energy-scaled.
+            prepped:     skip the ray-trace and the energy split.
+            passthrough: False never fires the pass-through token: the interacting branch, for a caller that drew the
+                pass-through itself (``passthrough_prob``).
+            rng:         makes every random draw a function of the event's key: independent of the batch, and shared by
+                two models run on the same keys (``legofmt.rng.EventRNG``, one unique key per event).
+
+        Returns:
+            ``(sols, mask, attn_mask)`` in the ``(B, L, 8)`` layout.
+
+        Raises:
+            ValueError: ``rng`` does not hold one key per event.
+        """
         if rng is not None and len(rng.keys) != len(cond):
             raise ValueError(f"rng needs one key per event: {len(rng.keys)} keys for {len(cond)} events")
         if rng is not None:  # keys on the events' device: rows are subset by device masks, draws meet device params
@@ -181,10 +195,12 @@ class GenerateOut(torch.nn.Module):
         return sols, mask, attn_mask
 
     def _clamp_edep(self, edep: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor) -> torch.Tensor:
-        """The E_dep token capped at E_in + the species' excess on the log token (a wall token is capped by
-        construction): the training data's largest excess (model_conf.edep_excess_mev), or for checkpoints from
-        before it the hand-set _EDEP_EXCESS_MEV; out of place, so the density design can differentiate
-        through it."""
+        """Caps the E_dep token at E_in + the species' excess, out of place.
+
+        Only the log token is capped (a wall token is capped by construction). The excess is the training data's largest
+        (model_conf.edep_excess_mev), or for checkpoints from before it the hand-set _EDEP_EXCESS_MEV. Out of place, so
+        the density design can differentiate through it.
+        """
         log_token = ~self.dp.edep_wall_mask(pid_in)
         for pid, excess in (self.dp.edep_excess_mev or _EDEP_EXCESS_MEV).items():
             hit = (pid_in == pid) & log_token
@@ -201,17 +217,25 @@ class GenerateOut(torch.nn.Module):
         return torch.cat((cond[:, :nc], e, dir_, pos, cond[:, nc + 6:]), dim=-1)
 
     def passthrough_prob(self, cond: torch.Tensor, prepped: bool = False) -> torch.Tensor:
-        """P(the incoming particle passes through unchanged): the probability the pass-through
-        token's draw uses, 0 for species the head does not cover. ``cond`` as for ``__call__``."""
+        """Returns P(the incoming particle passes through unchanged).
+
+        The probability the pass-through token's draw uses, 0 for species the head does not cover. ``cond`` as for
+        ``__call__``.
+        """
         return self.gen_mult.passthrough_prob(*self._mult_in(self._model_cond(cond, prepped)))
 
     def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None, passthrough=True,
                             rng=None):
-        """Geant4-shaped entry point: broadcast the per-gun arguments to ``B * n`` events
-        and return ``{per_event, per_particle, per_voxel}`` in *model* normalisation
-        (``per_event["E_dep"]`` is the normalised scalar, not MeV, always on the log/linear ``norm_edep`` scale that
-        callers decode with ``edep_log_min``: a ``model_conf.edep_wall`` token is re-encoded on it here).
-        ``rng`` as in ``__call__``, with ``B * n`` keys (gun-major, as ``repeat_interleave`` orders the events)."""
+        """Generates events from Geant4-shaped arguments.
+
+        Broadcasts the per-gun arguments to ``B * n`` events. ``rng`` as in ``__call__``, with ``B * n`` keys
+        (gun-major, as ``repeat_interleave`` orders the events).
+
+        Returns:
+            ``{per_event, per_particle, per_voxel}`` in *model* normalisation: ``per_event["E_dep"]`` is the normalised
+                scalar, not MeV, always on the log/linear ``norm_edep`` scale that callers decode with ``edep_log_min``
+                (a ``model_conf.edep_wall`` token is re-encoded on it here).
+        """
         sols, _, _ = self(self._g4_cond(n, pos, mom, energy, density, size, pdgids, Z, A), passthrough=passthrough,
                           **_rng_kw(rng))
         s = _F(sols)
@@ -232,7 +256,7 @@ class GenerateOut(torch.nn.Module):
         return out
 
     def passthrough_prob_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None):
-        """``passthrough_prob`` with the arguments of ``gen_model_w_g4_args``."""
+        """Returns ``passthrough_prob`` for the arguments of ``gen_model_w_g4_args``."""
         return self.passthrough_prob(self._g4_cond(n, pos, mom, energy, density, size, pdgids, Z, A))
 
     def _g4_cond(self, n, pos, mom, energy, density, size, pdgids, Z, A):
@@ -276,21 +300,26 @@ class GenerateOut(torch.nn.Module):
         return mult_in, pdgid_in_idx
 
     def gen_batch(self, cond: torch.Tensor, passthrough: bool = True, rng=None):
-        """Sample per-pdgid counts, truncate to ``max_seq_l``, and build the padded
-        ``(cond_fm, mask, attn_mask)`` triple the flow consumes."""
+        """Samples per-pdgid counts and builds the padded ``(cond_fm, mask, attn_mask)`` triple the flow consumes.
+
+        The counts are truncated to ``max_seq_l``.
+        """
         return self.build_batch(cond, *self.sample_counts(cond, passthrough, **_rng_kw(rng)), **_rng_kw(rng))
 
     def sample_counts(self, cond: torch.Tensor, passthrough: bool = True,
                       rng=None) -> tuple[torch.Tensor, torch.Tensor]:
-        """The multiplicity model's draw for ``cond`` (model layout): pass-through flags and raw per-slot counts (as
-        ``MultModel.forward`` returns them; ``MultModel.log_prob`` scores them)."""
+        """Samples the multiplicity model for ``cond`` (model layout).
+
+        Returns the pass-through flags and the raw per-slot counts (as ``MultModel.forward`` returns them;
+        ``MultModel.log_prob`` scores them).
+        """
         mult_in, pdgid_in_idx = self._mult_in(cond)
         pt_mask = (self.gen_mult.sample_passthrough(mult_in, pdgid_in_idx, **_rng_kw(rng)) if passthrough
                    else torch.zeros(len(cond), dtype=torch.bool, device=cond.device))
         return pt_mask, self.gen_mult((mult_in, None, pdgid_in_idx), pt_mask=pt_mask, **_rng_kw(rng))
 
     def build_batch(self, cond: torch.Tensor, pt_mask: torch.Tensor, counts: torch.Tensor, rng=None):
-        """The padded ``(cond_fm, mask, attn_mask)`` triple for a draw, truncated to ``max_seq_l``."""
+        """Builds the padded ``(cond_fm, mask, attn_mask)`` triple for a draw, truncated to ``max_seq_l``."""
         mult = counts[:, self.ptype_idx] * self.ptype_in_mask
 
         max_particles = self.max_seq_l - (self.n_prefix + 1)

@@ -22,7 +22,7 @@ class CubeTrace:
         return self.project_particles_cc(*args, **kwargs)
 
     def get_time(self, p, x):
-        """Ray parameter t at which x + p*t first exits the cuboid of shape ``cuboid_dim`` through x."""
+        """Returns the ray parameter t at which x + p*t first exits the cuboid of shape ``cuboid_dim`` through x."""
         p_sign = torch.where(p > 0, 1.0, -1.0).to(p.dtype)
         d = self.cuboid_dim.to(x)
         x_abs_max = (x.abs() / d).max(dim=-1, keepdim=True).values * d
@@ -30,7 +30,7 @@ class CubeTrace:
         return ((x_abs_max * p_sign - x) / p_).min(-1, keepdim=True).values
 
     def project_particles_cc(self, cc):
-        """Advance the position by p*get_time(p, x); momentum passes through unchanged."""
+        """Advances the position by p*get_time(p, x); momentum passes through unchanged."""
         p, x = cc.split(3, -1)
         t = self.get_time(p, x)
         return torch.cat((p, x + p * t), -1)

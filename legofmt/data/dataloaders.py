@@ -39,7 +39,7 @@ class GetLEGOData:
         return self.dataset_cutoff(*args, **kwargs)
 
     def dataset_compact(self, data):
-        """Concatenate the incoming and outgoing per-particle tensors into one padded token axis."""
+        """Concatenates the incoming and outgoing per-particle tensors into one padded token axis."""
         pp = data.get("per_particle")
         return torch.cat((pp["Incoming"], pp["Outgoing"]), dim=-2).to(self.dtype), data.get("per_event")
 
@@ -48,9 +48,11 @@ class GetLEGOData:
         data: dict,
         n_events: (int | None) = None,
     ) -> tuple[Tensor, Tensor, Tensor, dict]:
-        """Drop particles below cutoff_mev (kinetic energy when energy_kin, else |p|;
-        the incoming token included), compact survivors to the front, drop events with
-        fewer than min_particles outgoing; padding is NaN."""
+        """Drops the particles below ``cutoff_mev`` and the events left with fewer than ``min_particles`` outgoing.
+
+        The cut is on the kinetic energy when ``energy_kin``, else on |p|, the incoming token included. Survivors are
+        compacted to the front; padding is NaN.
+        """
         dataset, data_add = self.dataset_compact(data)
         e_valid = dataset[..., 0] if self.energy_kin else dataset[..., 1:4].norm(dim=-1)
         mask_valid = e_valid >= self.cutoff_mev
@@ -157,8 +159,12 @@ class LEGODataset(Dataset):
 
 
 def _dataset_file(directory: str) -> str:
-    """The directory's packed file if it has one, else its padded one. A packed file next to a
-    padded one whose meta.json lacks ``"format": "packed"`` is stale (a padded writer ran since)."""
+    """Returns the directory's packed file if it has one, else its padded one.
+
+    Raises:
+        ValueError: the packed file is stale: it sits next to a padded one whose meta.json lacks ``"format": "packed"``
+            (a padded writer ran since).
+    """
     packed, padded = directory + "/data_packed.pt", directory + "/data_prepped.pt"
     if not os.path.exists(packed):
         return padded
@@ -201,24 +207,23 @@ class LengthBucketBatchSampler(DistributedSampler):
 
 
 def loader_seed(dl_conf: dict) -> int:
-    """The shuffle seed, identical on every DDP rank: ``dl_conf.seed`` (scripts/train.py
-    sets it from ``run.data_seed``), else Lightning's global seed, else 0."""
+    """Returns the shuffle seed, identical on every DDP rank.
+
+    ``dl_conf.seed`` (scripts/train.py sets it from ``run.data_seed``), else Lightning's global seed, else 0.
+    """
     return int(dl_conf.get("seed", os.environ.get("PL_GLOBAL_SEED", 0)))
 
 
 def make_loader(dataset, *, bs, shuffle, num_workers=4, batched_sampler=False, batch_sampler=None, seed=0):
-    """The worker plumbing both LightningModules share.
+    """Constructs a DataLoader with the worker plumbing both LightningModules share.
 
-    ``batched_sampler`` hands the dataset a tensor of indices per call
-    (``batch_size=None``, no default collate), which is how ``LEGODataset`` is
-    read; the plain path is torch's per-item fetch and collate. Workers only
-    move CPU-side indexing off the training loop.
+    ``batched_sampler`` hands the dataset a tensor of indices per call (``batch_size=None``, no default collate), which
+    is how ``LEGODataset`` is read; the plain path is torch's per-item fetch and collate. Workers only move CPU-side
+    indexing off the training loop.
 
-    The shuffle draws from its own ``seed``-ed generator: under DDP, Lightning's
-    ``DistributedSamplerWrapper`` hands each rank every W-th batch of the list
-    that rank built, so per-rank RNG states (unseeded runs, or rank 0's base-head
-    pretraining) gave overlapping shards -- a quarter of every epoch never seen
-    on 2 GPUs.
+    The shuffle draws from its own ``seed``-ed generator: under DDP, Lightning's ``DistributedSamplerWrapper`` hands
+    each rank every W-th batch of the list that rank built, so per-rank RNG states (unseeded runs, or rank 0's base-head
+    pretraining) gave overlapping shards -- a quarter of every epoch never seen on 2 GPUs.
     """
     common = dict(
         num_workers=num_workers,

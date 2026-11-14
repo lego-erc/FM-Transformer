@@ -92,7 +92,7 @@ class BatchedMuon(torch.optim.Optimizer):
             )
 
     def _adamw_update(self, group, ps, grads, lr) -> None:
-        """1-D params (gates, biases, scales): plain AdamW."""
+        """Updates 1-D params (gates, biases, scales) with plain AdamW."""
         b1, b2 = group["betas"]
         st = group["step"]
         exp_avg    = [self.state[p].setdefault("exp_avg", torch.zeros_like(p)) for p in ps]
@@ -107,8 +107,10 @@ class BatchedMuon(torch.optim.Optimizer):
 
 
 def muon_factory(params, **kw):
-    """Muon for ``ndim >= 2`` weights, AdamW for the rest: 1-D gates and
-    log-variances must not be orthogonalised, which would discard their magnitude."""
+    """Constructs Muon for ``ndim >= 2`` weights and AdamW for the rest.
+
+    1-D gates and log-variances must not be orthogonalised, which would discard their magnitude.
+    """
     ps = list(params)
     return BatchedMuon([
         {"params": [p for p in ps if p.ndim >= 2], "use_muon": True},
@@ -122,9 +124,11 @@ def schedulefree_adamw(params, **kw):
 
 
 def warmup_cosine(opt, total_steps, warmup_frac=0.05, eta_min=1e-6):
-    """Linear warmup over ``warmup_frac`` then cosine to ``eta_min``. ``total_steps``
-    must be an upper bound on the real step count: past ``T_max`` the cosine rises
-    back toward the peak LR."""
+    """Constructs a linear warmup over ``warmup_frac``, then a cosine to ``eta_min``.
+
+    ``total_steps`` must be an upper bound on the real step count: past ``T_max`` the cosine rises back toward the peak
+    LR.
+    """
     n = max(1, int(warmup_frac * total_steps))
     return SequentialLR(opt, milestones=[n], schedulers=[
         LinearLR(opt, start_factor=1e-3, end_factor=1.0, total_iters=n),
@@ -153,7 +157,7 @@ def build_optimizer(params, opt_conf):
 
 
 def opt_is_schedulefree(opt) -> bool:
-    """Whether ``opt`` needs the explicit train/eval switch schedule-free carries."""
+    """Returns whether ``opt`` needs the explicit train/eval switch schedule-free carries."""
     return callable(getattr(opt, "train", None))
 
 

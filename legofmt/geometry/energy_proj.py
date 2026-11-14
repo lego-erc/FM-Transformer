@@ -31,11 +31,11 @@ class EnergyProjections:
         return mom / norm.clamp_min(eps), self.to_scalar_e(norm, eps)
 
     def to_scalar_e(self, e_mev: Tensor, eps: float = 1e-8) -> Tensor:
-        """to_scalar's energy half: MeV magnitude -> the bounded [0, 1] log scalar."""
+        """Converts an MeV magnitude to the bounded [0, 1] log scalar: ``to_scalar``'s energy half."""
         return (torch.log(e_mev.clamp_min(eps) / self.cutoff) / self.log_range).clamp(0.0, 1.0)
 
     def from_scalar(self, dir_: Tensor, e: Tensor) -> Tensor:
-        """Inverse of to_scalar: bounded scalar + unit direction -> momentum vector."""
+        """Inverts ``to_scalar``: bounded scalar + unit direction -> momentum vector."""
         norm = self.cutoff * (self.max_energy / self.cutoff) ** e.clamp(0.0, 1.0)
         return dir_ * norm
 

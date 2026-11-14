@@ -105,8 +105,11 @@ class ResolvedLEGOConfig:
 
 
 def _edep_ae_spec(model_conf: dict) -> dict | None:
-    """``model_conf.edep_ae``: ``{path: <scripts/train_edep_ae.py output>}`` is loaded once and replaced by its
-    ``{"config", "state_dict"}`` (the path kept), so the saved flow config carries the autoencoder."""
+    """Loads the autoencoder that ``model_conf.edep_ae`` names into the config.
+
+    ``{path: <scripts/train_edep_ae.py output>}`` is loaded once and replaced by its ``{"config", "state_dict"}`` (the
+    path kept), so the saved flow config carries the autoencoder. Returns the spec, or None without the key.
+    """
     spec = model_conf.get("edep_ae")
     if spec is not None and "state_dict" not in spec:
         spec = {**torch.load(spec["path"], map_location="cpu", weights_only=False), "path": spec["path"]}
@@ -126,7 +129,7 @@ def _amp_dtype(precision) -> "torch.dtype | None":
 
 
 def _unpack(full_config: dict) -> tuple[dict, dict | None]:
-    """A deep copy of a checkpoint dict or a bare config, as (config, state_dict or None)."""
+    """Returns a deep copy of a checkpoint dict or a bare config, as (config, state_dict or None)."""
     full = copy.deepcopy(full_config)
     return full.get("config", full), full.get("state_dict")
 
@@ -207,7 +210,7 @@ _RENAMED_KEYS = {
 
 
 def migrate_loss_weight_keys(model_conf: dict) -> dict:
-    """Rewrite the pre-2026-09 ``uncert_*`` keys and drop the removed t-bin axis."""
+    """Rewrites the pre-2026-09 ``uncert_*`` keys and drops the removed t-bin axis."""
     for old, new in _RENAMED_KEYS.items():
         if old in model_conf:
             model_conf.setdefault(new, model_conf.pop(old))

@@ -16,7 +16,7 @@ import itertools
 
 import torch
 
-from legofmt.base_dist import ot_coupling
+from legofmt.base import ot_coupling
 from legofmt.data.struct import DataStruct
 from legofmt.main.modules import LEGOLtng
 from test_helpers import _fake_batch, _tiny_config
