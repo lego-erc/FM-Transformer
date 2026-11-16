@@ -101,8 +101,8 @@ def test_tokens_change_the_field() -> None:
 
 
 def test_packed_and_per_token_conditions_agree() -> None:
-    """Per-event t uses the packed (B, 3, D) adaptive-norm condition; its generated-token selector must skip the K
-    prefix tokens. A per-token t equal to it (conditioning tokens at t = 1) takes the unpacked path."""
+    """Per-event t uses the per-event (B, 3, D) adaptive-norm condition; its generated-token selector must skip the K
+    prefix tokens. A per-token t equal to it (conditioning tokens at t = 1) takes the per-token path."""
     m = _model()
     _wake(m)
     ds = _fake_batch()

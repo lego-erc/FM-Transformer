@@ -37,7 +37,7 @@ from torch import Tensor, nn
 from x_transformers import ContinuousTransformerWrapper, Encoder
 
 from legofmt.cfm.geom_encoder import GeomEncoder
-from legofmt.cfm.packed_cond import pack_condition, per_event_gammas
+from legofmt.cfm.event_cond import per_event_condition, per_event_gammas
 from legofmt.compat import fp32_attention, legacy_param_rename, needs_fp32_attention
 from legofmt.legacy.cfm_trafo_x import LegacyField
 
@@ -117,7 +117,7 @@ class CFMTrafo_x(LegacyField):
         )
         if needs_fp32_attention(kwargs):
             fp32_attention(self.vf)
-        self._packed_cond = time_cond and per_event_gammas(self.vf.attn_layers)
+        self._per_event_cond = time_cond and per_event_gammas(self.vf.attn_layers)
 
         # token embedding and read-out: per value of the mask, the type and the pdgid a linear map in ([:, 0]: W, bi: b)
         # and one out ([:, 1]: V, bo: a)
@@ -250,6 +250,6 @@ class CFMTrafo_x(LegacyField):
         h, emb, gen, attn_mask = seq
 
         h = self.vf.attn_layers(self.vf.emb_dropout(h), mask=attn_mask,
-                                condition=pack_condition(emb, c_con, c_gen, gen) if self._packed_cond else emb)
+                                condition=per_event_condition(emb, c_con, c_gen, gen) if self._per_event_cond else emb)
         v = self._project_out(h[:, -L:], mask, oh)
         return (v, self.lat_out(h[:, 0])) if self.lat_dim else v

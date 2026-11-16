@@ -1,4 +1,4 @@
-"""Per-event (packed) conditioning reproduces the per-token computation.
+"""Per-event conditioning reproduces the per-token computation.
 
 ``to_gamma`` is zero-initialised, so at init every condition gives the same gamma
 and any packing bug is invisible; the weights are randomised here first.
@@ -20,7 +20,7 @@ def _vf(step_cond: bool) -> CFMTrafo_x:
     with torch.no_grad():
         for p in vf.parameters():
             p.add_(0.3 * torch.randn_like(p))
-    assert vf._packed_cond
+    assert vf._per_event_cond
     return vf.eval()
 
 

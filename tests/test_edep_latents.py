@@ -106,8 +106,8 @@ def test_latent_token_and_particles_see_each_other() -> None:
 
 
 def test_packed_and_per_token_conditions_agree() -> None:
-    """Per-event t takes the packed (B, 3, D) adaptive-norm condition, whose selector must mark the latent token as
-    generated; a per-token t equal to it (conditioning tokens at t = 1) takes the unpacked path."""
+    """Per-event t takes the per-event (B, 3, D) adaptive-norm condition, whose selector must mark the latent token as
+    generated; a per-token t equal to it (conditioning tokens at t = 1) takes the per-token path."""
     m = _model()
     _wake(m)
     ds = _batch()
@@ -254,7 +254,7 @@ def _with_geometry() -> LEGOLtng:
 
 
 def test_latent_token_with_the_geometry_encoder() -> None:
-    """Both prepend tokens: [latent, geometry x K, sequence]. The packed selector marks the latent generated and the
+    """Both prepend tokens: [latent, geometry x K, sequence]. The per-event selector marks the latent generated and the
     geometry tokens conditioning, so it must agree with the per-token path; both feed the field."""
     m = _with_geometry()
     m.eval()

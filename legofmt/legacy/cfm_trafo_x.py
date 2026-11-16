@@ -81,7 +81,7 @@ class LegacyField(nn.Module):
                 gen   = (mask == 1).unsqueeze(-1)
                 c_gen = self._time_emb(t, d).expand(B, 1, -1)
                 cond  = torch.where(gen, c_gen, c_con)
-                if self._packed_cond and 3 != L + n_pre <= self.h_dim:
+                if self._per_event_cond and 3 != L + n_pre <= self.h_dim:
                     # the selector spans the whole sequence: the latent token is generated, the K geometry tokens
                     # are conditioning tokens
                     sel = F.pad(gen.squeeze(-1).to(cond.dtype), (n_pre, self.h_dim - L - n_pre))
