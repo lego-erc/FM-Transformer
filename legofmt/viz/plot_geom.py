@@ -4,17 +4,8 @@ import matplotlib.pyplot as plt
 import torch
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
-plt.rcParams.update(
-    {
-        "axes.labelpad": 8,
-        "font.serif": "Computer Modern",
-        "axes.labelsize": 14,
-        "axes.titlesize": 16,
-        "xtick.labelsize": 12,
-        "ytick.labelsize": 12,
-        "legend.fontsize": 12,
-    }
-)
+plt.rcParams.update({"axes.labelpad": 8, "font.serif": "Computer Modern", "axes.labelsize": 14, "axes.titlesize": 16,
+                     "xtick.labelsize": 12, "ytick.labelsize": 12, "legend.fontsize": 12})
 
 
 class PlotGeom:
@@ -45,49 +36,21 @@ class PlotGeom:
         3-vectors; incoming is drawn at -pos."""
         if coord.shape[-1] == 6:
             vec, pts = coord.movedim(-1, 0).split(3, 0)
-            ax.quiver(
-                *pts.cpu().numpy(),
-                *vec.cpu().numpy(),
-                length=arr_l,
-                normalize=True,
-                arrow_length_ratio=arr_lr,
-                linewidths=arr_lw,
-                color=arr_c,
-                zorder=3,
-                alpha=0.2,
-            )
+            ax.quiver(*pts.cpu().numpy(), *vec.cpu().numpy(), length=arr_l, normalize=True, arrow_length_ratio=arr_lr,
+                      linewidths=arr_lw, color=arr_c, zorder=3, alpha=0.2)
         else:
             pts = coord.movedim(-1, 0)
-
         ax.scatter(*pts.cpu().numpy(), color=arr_c, depthshade=True, zorder=3)
 
         if incoming is not None:
             vec_in, pts_in = incoming.split(3, -1)
-            ax.scatter(
-                *-pts_in.movedim(-1, 0).cpu().numpy(),
-                color="r",
-                depthshade=True,
-                zorder=3,
-            )
-            ax.quiver(
-                *-pts_in.movedim(-1, 0).cpu().numpy(),
-                *vec_in.movedim(-1, 0).cpu().numpy(),
-                length=1 * arr_l,
-                normalize=True,
-                arrow_length_ratio=0.0,
-                linewidths=2.0,
-                color="r",
-                zorder=3,
-            )
+            pts_in = -pts_in.movedim(-1, 0).cpu().numpy()
+            ax.scatter(*pts_in, color="r", depthshade=True, zorder=3)
+            ax.quiver(*pts_in, *vec_in.movedim(-1, 0).cpu().numpy(), length=arr_l, normalize=True,
+                      arrow_length_ratio=0.0, linewidths=2.0, color="r", zorder=3)
 
-        ax.set_xlim(-lims, lims)
-        ax.set_ylim(-lims, lims)
-        ax.set_zlim(-lims, lims)
-        ax.set_xlabel(r"$x$")
-        ax.set_ylabel(r"$y$")
-        ax.set_zlabel(r"$z$")
+        ax.set(xlim=(-lims, lims), ylim=(-lims, lims), zlim=(-lims, lims), xlabel=r"$x$", ylabel=r"$y$", zlabel=r"$z$")
         ax.set_box_aspect((1, 1, 1))
-
         return ax
 
     def plot_cube_with_points(
@@ -102,13 +65,8 @@ class PlotGeom:
         v = torch.tensor([-1, 1])
         vertices = torch.cartesian_prod(v, v, v)
         cc_edges = vertices[torch.combinations(torch.arange(8), r=2)]
-        cc_edges = cc_edges[cc_edges.diff(dim=1).squeeze(1).abs().sum(dim=-1) == 2.0]
+        cc_edges = cc_edges[cc_edges.diff(dim=1).squeeze(1).abs().sum(dim=-1) == 2.0]  # pairs one edge apart
 
         ax = self.do_ax()
-        ax.add_collection(
-            Line3DCollection(
-                cc_edges.cpu().numpy(), linestyles="--", colors="k", linewidths=1
-            )
-        )
-
+        ax.add_collection(Line3DCollection(cc_edges.cpu().numpy(), linestyles="--", colors="k", linewidths=1))
         return self.plot_points(ax, coords, incoming, arr_lw, arr_l, arr_lr, arr_c)

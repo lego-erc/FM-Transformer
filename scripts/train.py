@@ -34,6 +34,8 @@ from legofmt.main.modules import LEGOLtng
 from legofmt.mod_comps.config import migrate_loss_weight_keys
 from legofmt.multiplicity.model import MultModel
 
+if "OMP_NUM_THREADS" not in os.environ:
+    torch.set_num_threads(8)
 d_dtype = getattr(torch, run["dtype"])
 torch.set_default_dtype(d_dtype)
 torch.set_float32_matmul_precision(run["matmul_precision"])
@@ -58,10 +60,16 @@ if "adamw_betas" in config["opt_conf"]:
 dpath_prefix = os.environ.get("LEGO_DATA_DIR", "./data/")
 config["dl_conf"]["lds_args"]["data"] = dpath_prefix + config["dl_conf"]["lds_args"]["data"]
 
+if run.get("data_seed") is not None:  # the shuffle order, identical on every DDP rank
+    config["dl_conf"]["seed"] = int(run["data_seed"])
+
+# placeholder for construction: configure_optimizers replaces it with the trainer's exact count
 scheduler = config["opt_conf"].get("scheduler")
 if scheduler is not None and "total_steps" not in scheduler:
     bs = config["dl_conf"]["bs"]
-    scheduler["total_steps"] = epochs * int(run["dataset_size"] / (bs * len(devices) * nodes))
+    scheduler["total_steps"] = epochs * int(
+        run["dataset_size"] / (bs * len(devices) * nodes * run.get("accumulate_grad_batches", 1))
+    )
 
 if log_conf["comet"]:
     from lightning.pytorch.loggers import CometLogger
@@ -81,14 +89,10 @@ else:
     logger = False
 
 config["additional"]["epochs"] = epochs
-config["additional"]["precision"] = (
-    str(run["precision"]) + ", " + torch.get_float32_matmul_precision()
-)
+config["additional"]["precision"] = f"{run['precision']}, {torch.get_float32_matmul_precision()}"
 config["additional"]["comet_exp_key"] = getattr(logger, "_experiment_key", None) if logger else None
 try:
-    git_rev = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-    ).strip()
+    git_rev = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
 except (subprocess.CalledProcessError, FileNotFoundError):
     git_rev = None
 config["additional"]["git_rev"] = git_rev
@@ -100,6 +104,7 @@ if log_conf["comet"]:
 
 trainer = ltng.Trainer(
     max_epochs=epochs,
+    max_steps=run.get("max_steps") or -1,  # optimizer steps; whichever of the two ends first (and sets the LR schedule)
     accelerator="gpu",
     devices=devices,
     num_nodes=nodes,
@@ -109,24 +114,27 @@ trainer = ltng.Trainer(
     val_check_interval=run["val_check_interval"],
     limit_val_batches=run["limit_val_batches"],
     gradient_clip_val=run["gradient_clip_val"],
+    accumulate_grad_batches=run.get("accumulate_grad_batches", 1),
 )
 
 train_model = run["train_model"]
 if run.get("init_seed") is not None:
     ltng.seed_everything(int(run["init_seed"]), workers=True)
 compile_mode = run["compile"]  # false | model
-if train_model == "fm":
-    model = LEGOLtng(config)
-else:
-    model = MultModel(config)
+model = LEGOLtng(config) if train_model == "fm" else MultModel(config)
 
 resume_from = run.get("resume_from")
 if resume_from:
     prev = torch.load(resume_from, map_location="cpu", weights_only=False)
-    target = model.model.vf if train_model == "fm" else model
-    incompat = target.load_state_dict(prev["state_dict"], strict=False)
+    # a Lightning .ckpt holds the whole module (lv, base_head included), keyed through the compile wrapper
+    is_ltng = "pytorch-lightning_version" in prev
+    target = model.model.vf if train_model == "fm" and not is_ltng else model
+    sd = {k.replace("_orig_mod.", ""): v for k, v in prev["state_dict"].items()}
+    incompat = target.load_state_dict(sd, strict=False)
     assert not incompat.unexpected_keys, f"resume_from arch mismatch: {incompat}"
-    prev_mc = migrate_loss_weight_keys(prev["config"]["model_conf"])
+    if is_ltng and hasattr(model, "base_head"):  # keep the trained-against head: setup skips a frozen one
+        model.base_head.requires_grad_(False)
+    prev_mc = migrate_loss_weight_keys(prev["config"]["model_conf"]) if "config" in prev else {}
     for k, v in prev_mc.get("loss_weights", {}).items():
         if hasattr(model, k):
             getattr(model, k).data.copy_(v)
@@ -136,7 +144,12 @@ if compile_mode == "model":  # fm: the ProjectModel; mult: the count Decoder wra
 
 if run.get("data_seed") is not None:
     torch.manual_seed(int(run["data_seed"]))
-trainer.fit(model=model, ckpt_path=run.get("resume_ckpt"))  # Lightning checkpoint (optimizer, scheduler, epoch) to continue from
+# resume_ckpt: a Lightning checkpoint (optimizer, scheduler, epoch) to continue from. fit restores it only after
+# setup, so freeze the base head here: otherwise setup pretrains a new one that the restore then overwrites
+resume_ckpt = run.get("resume_ckpt")
+if resume_ckpt and hasattr(model, "base_head"):
+    model.base_head.requires_grad_(False)
+trainer.fit(model=model, ckpt_path=resume_ckpt)
 if not trainer.is_global_zero:  # one writer: concurrent torch.save to one path can corrupt it
     raise SystemExit(0)
 
@@ -144,9 +157,7 @@ model.rc.config["dl_conf"]["lds_args"]["data"] = "<dataset_path>"
 model.rc.config["dl_conf"]["data_path"] = None
 model.rc.config["additional"]["comet_exp_key"] = None
 if hasattr(model, "base_head"):
-    model.rc.config["base_conf"]["base_head"] = {
-        k: v.cpu() for k, v in model.base_head.state_dict().items()
-    }
+    model.rc.config["base_conf"]["base_head"] = {k: v.cpu() for k, v in model.base_head.state_dict().items()}
 # the learned loss weights live on the LightningModule, not in vf's state_dict:
 # keep them so resume_from does not restart every Kendall cell at weight 1.
 # Guarded: the mult model has neither the cells nor a model_conf to put them in.
@@ -155,27 +166,15 @@ if any(hasattr(model, k) for k in ("lv", "lv_flow")):
         k: getattr(model, k).detach().cpu() for k in ("lv", "lv_flow") if hasattr(model, k)
     }
 
-if run.get("ckpt_dir"):
-    ckpt_dir = run["ckpt_dir"]  # explicit dir -> save directly here, no flow/mult subdir
-else:
-    ckpt_base = os.environ.get("LEGO_CKPT_DIR", "./checkpoints/")
-    ckpt_dir = os.path.join(ckpt_base, "flow" if train_model == "fm" else "mult")
-ckpt_path = os.path.join(ckpt_dir, f"{name}.pt")
+# an explicit ckpt_dir is used as is; otherwise $LEGO_CKPT_DIR (or ./checkpoints/) plus flow/ or mult/
+ckpt_dir = run.get("ckpt_dir") or os.path.join(os.environ.get("LEGO_CKPT_DIR", "./checkpoints/"),
+                                               "flow" if train_model == "fm" else "mult")
 os.makedirs(ckpt_dir, exist_ok=True)
 
 model._opt_eval()
 if train_model == "fm":
-    vf = uncompiled(model.model).vf
-    state_dict = vf.state_dict()
+    state_dict = uncompiled(model.model).vf.state_dict()
 else:
-    if compile_mode == "model":
-        model.model = uncompiled(model.model)  # keep state_dict keys free of the compile wrapper
+    model.model = uncompiled(model.model)  # keep state_dict keys free of the compile wrapper
     state_dict = model.state_dict()
-
-torch.save(
-    {
-        "state_dict": state_dict,
-        "config": model.rc.config,
-    },
-    ckpt_path,
-)
+torch.save({"state_dict": state_dict, "config": model.rc.config}, os.path.join(ckpt_dir, f"{name}.pt"))

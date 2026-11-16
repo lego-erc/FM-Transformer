@@ -10,13 +10,13 @@ run:
   matmul_precision: medium
   dtype: float32
   epochs: 10
-  dataset_size: 16_000_000     # only used to compute scheduler total_steps
-  compile: model             # false | model (mult: ~2.8x faster training step)
+  dataset_size: 16_000_000     # placeholder for the scheduler at construction; fit uses the exact step count
+  compile: model             # false | model
   gradient_clip_val: 1.0
   val_check_interval: 0.2
   limit_val_batches: 4
   strategy: ddp
-  ckpt_dir: null             # base dir (null -> $LEGO_CKPT_DIR -> ./checkpoints/); flow|mult appended
+  ckpt_dir: null             # used as is; null -> $LEGO_CKPT_DIR (else ./checkpoints/) + flow/ or mult/
 
 logging:
   comet: true
@@ -39,10 +39,7 @@ config:
     h_dim: 128
     n_layers: 6
     n_heads: 6
-    bs: 4096
-    lr: 1.0e-3
-    weight_decay: 1.0e-2
-    warmup_steps: 0
+    bs: 4096                 # the loader's batch; must equal dl_conf.bs
     post_emb_norm: false
     use_abs_pos_emb: true
     canon_sym: false
@@ -84,7 +81,7 @@ config:
     adamw_betas: [0.9, 0.999]
     adamw_wd: 1.0e-2
     adamw_eps: 1.0e-8
-    scheduler:                # total_steps computed from run.* when absent
+    scheduler:                # total_steps = the trainer's exact step count
       cls: warmup_cosine
       warmup_frac: 0.1
       eta_min: 1.0e-6

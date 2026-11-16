@@ -65,7 +65,10 @@ if not dpath.is_dir():
     bad(f"data dir missing: {dpath}")
 else:
     ok(f"data dir {dpath}")
-    mp, pp = dpath / "meta.json", dpath / "data_prepped.pt"
+    mp = dpath / "meta.json"
+    pp = dpath / "data_packed.pt"           # what LEGODataset loads when the dir has both
+    if not pp.is_file():
+        pp = dpath / "data_prepped.pt"
     if not mp.is_file():
         bad(f"meta.json missing: {mp}")
     else:
@@ -73,19 +76,20 @@ else:
         ok(f"meta.json: ntokens={meta['ntokens']} species={len(meta['particles'])} "
            f"particles_in={meta.get('particles_in')} max_energy={meta.get('max_energy')}")
     if not pp.is_file():
-        bad(f"data_prepped.pt missing: {pp}")
+        bad(f"neither data_packed.pt nor data_prepped.pt in {dpath}")
     else:
         gb = pp.stat().st_size / 1e9
-        ok(f"data_prepped.pt {gb:.1f} GB")
+        ok(f"{pp.name} {gb:.1f} GB")
         nranks = len(run.get("devices", [0])) or 1
         need = gb * nranks
-        warn(f"LEGODataset torch.loads this per rank with no mmap: "
+        warn(f"LEGODataset torch.loads {pp.name} per rank with no mmap: "
              f"~{need:.0f} GB across {nranks} rank(s) -- size --mem accordingly")
 
 mc = config.get("model_conf", {})
 if meta and train_model == "fm" and "max_energy" in mc:
     if float(mc["max_energy"]) != float(meta.get("max_energy", -1)):
-        bad(f"max_energy {mc['max_energy']} != dataset's {meta.get('max_energy')}")
+        warn(f"max_energy {mc['max_energy']} != dataset's {meta.get('max_energy')}: fine for a MeV file "
+             "(norm_e normalises at load); a pre-split, already-normalised file must match")
     else:
         ok(f"max_energy matches dataset ({mc['max_energy']})")
 
@@ -124,20 +128,22 @@ if target.exists():
 
 # ---- schedule / walltime -------------------------------------------------
 sched = config.get("opt_conf", {}).get("scheduler")
+ts = None
 if sched is not None and "total_steps" not in sched and isinstance(dev, list):
     bs = config["dl_conf"]["bs"]
     ts = run["epochs"] * int(run["dataset_size"] / (bs * len(dev)))
-    ok(f"total_steps={ts} (epochs {run['epochs']} x dataset {run['dataset_size']} / (bs {bs} x {len(dev)}))")
+    ok(f"total_steps~{ts} (epochs {run['epochs']} x dataset {run['dataset_size']} / (bs {bs} x {len(dev)})); "
+       "fit replaces it with the trainer's exact step count")
 
 # ---- optional-dependency gates ------------------------------------------
 print("\n[deps]")
 if train_model == "fm" and mc.get("ot_coupling"):
     try:
-        import torch_lap_cuda_lib  # noqa: F401
-        ok("ot_coupling=True and torch_lap_cuda_lib importable")
+        import torch_linear_assignment  # noqa: F401
+        ok("ot_coupling=True and torch_linear_assignment importable")
     except ImportError:
-        bad("ot_coupling=True but torch_lap_cuda_lib missing -> on_fit_start raises. "
-            "Run `pixi run -e <env> install-lap` (needs __cuda: use a GPU node)")
+        bad("ot_coupling=True but torch_linear_assignment missing -> on_fit_start raises. "
+            "It is a pixi dependency: run `pixi install -e <env>`")
 if cfg.get("logging", {}).get("comet"):
     try:
         import comet_ml  # noqa: F401
@@ -154,9 +160,8 @@ if not FAIL:
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
     try:
         config["dl_conf"]["lds_args"]["data"] = str(dpath)
-        if sched is not None and "total_steps" not in sched and isinstance(dev, list):
-            sched["total_steps"] = run["epochs"] * int(
-                run["dataset_size"] / (config["dl_conf"]["bs"] * len(dev)))
+        if ts is not None:
+            sched["total_steps"] = ts
         if train_model == "fm":
             from legofmt.mod_comps.config import resolve_legoltng_config
             rc = resolve_legoltng_config(config)

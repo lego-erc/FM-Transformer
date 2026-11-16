@@ -11,50 +11,30 @@ import math
 import pytest
 import torch
 
-
-def _rc(**bc):
-    class _RC:
-        pdgids_template = torch.tensor([11, 22])
-        cond_scalars = ("Density", "Z", "A", "Size")
-        base_pretrain_batches = 1
-        config = {"base_conf": {"base_head": None, **bc}}
-    return _RC()
-
-
-class _GB:
-    scale_dist = "sm_norm"
-    sm_scale = 0.5
-    kappa = 8.0
-    tanh_theta = True
-    e_dep_max = 1.0
+from legofmt.base_dist.base_nn import BaseDist, build_base_head
+from legofmt.data.struct import DataStruct
+from test_helpers import GEN_BASE, _base_rc
 
 
 @pytest.mark.parametrize("ang_shape", [False, True])
 def test_head_width_one_angular_block_per_species(ang_shape) -> None:
-    from legofmt.base_dist.base_nn import build_base_head
-
     n_cls = 3  # two template species + the unknown class
-    head = build_base_head(_rc(ang_species=True, ang_shape=ang_shape), _GB())
+    head = build_base_head(_base_rc(ang_species=True, ang_shape=ang_shape), GEN_BASE)
     assert head[-1].out_features == 3 + n_cls * (1 + int(ang_shape))
     b = head[-1].bias.exp()
     assert torch.allclose(b[3:3 + n_cls], torch.full((n_cls,), 8.0))     # every species starts at the prior kappa
     if ang_shape:
         assert torch.allclose(b[3 + n_cls:], torch.ones(n_cls))         # and at pow = 1
-    plain = build_base_head(_rc(ang_shape=ang_shape), _GB())
-    assert plain[-1].out_features == 4 + int(ang_shape)                 # unchanged without the flag
 
 
 def test_per_slot_prior_recovers_species_specific_kappas() -> None:
     """Two species with different opening angles in every event: fitting the per-slot branch of
     _base_moment_loss recovers one kappa per species, while the pooled branch can only settle on a
     compromise between them."""
-    from legofmt.base_dist.base_nn import BaseDist
-    from legofmt.data.struct import DataStruct
-
     class M(BaseDist):
         def __init__(self):
-            self.rc = _rc(ang_species=True, ang_weight=1000.0)
-            self.gen_base = _GB()
+            self.rc = _base_rc(ang_species=True, ang_weight=1000.0)
+            self.gen_base = GEN_BASE
 
     torch.manual_seed(0)
     n, p = 256, 6

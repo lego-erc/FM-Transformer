@@ -1,6 +1,9 @@
+"""Validation metrics: MMD / W1 primitives, the event summary, and the logged key set (finite, and synced only where
+every rank emits it)."""
+
 import torch
 
-from legofmt.data.struct import DataStruct
+from legofmt.data.struct import DataStruct, set_layout
 from legofmt.log_metrics.val_metrics import (
     KIN_NAMES,
     SUMMARY_FEATURE_NAMES,
@@ -95,7 +98,7 @@ class _StubLego:
         return x_init
 
 
-def test_shower_val_metrics_returns_loggable_dict():
+def test_shower_val_metrics_returns_a_finite_dict_of_synced_static_keys():
     B, L = 16, 8
     f = torch.randn(B, L, 8)
     f[..., 7] = torch.tensor([0, 0, 0, 11, -11, 22, 11, 0.0])
@@ -103,13 +106,17 @@ def test_shower_val_metrics_returns_loggable_dict():
     am[:, 2:] = True
     mm = am.clone().long()
     mm[:, :3] = 0
-    ds = DataStruct(f, mm, am)
 
-    out = ShowerValMetrics()(_StubLego(), ds)
-    assert {"val/mmd_particle", "val/mmd_summary"} <= out.keys()
+    out = ShowerValMetrics()(_StubLego(), DataStruct(f, mm, am))
     assert sum(k.startswith("val/w1_particle/") for k in out) == len(KIN_NAMES)
     assert sum(k.startswith("val/w1_summary/") for k in out) == len(SUMMARY_FEATURE_NAMES)
     assert all(torch.isfinite(v) for v in out.values())
+    synced = {k for k in out if not k.startswith(UNSYNCED_PREFIXES)}
+    assert synced == (
+        {"val/mmd_particle", "val/mmd_summary"}
+        | {f"val/w1_particle/{n}" for n in KIN_NAMES}
+        | {f"val/w1_summary/{n}" for n in SUMMARY_FEATURE_NAMES}
+    )
 
 
 def test_edep_by_primary_splits_the_guns():
@@ -158,19 +165,26 @@ def test_population_dependent_keys_are_excluded_from_sync():
     assert all(k.startswith(UNSYNCED_PREFIXES) for k in varying), sorted(varying)
 
 
-def test_static_val_metric_keys_are_still_synced():
-    B, L = 16, 8
-    f = torch.randn(B, L, 8)
-    f[..., 7] = torch.tensor([0, 0, 0, 11, -11, 22, 11, 0.0])
-    am = torch.zeros(B, L, dtype=torch.bool)
-    am[:, 2:] = True
-    mm = am.clone().long()
-    mm[:, :3] = 0
+def test_overflow_sentinel_is_decoded_before_comparing(monkeypatch):
+    """A model that reproduces the truth exactly, writing its zero-valued energy and
+    E_dep cells as the -overflow_delta sentinel it was trained on, must score zero."""
+    B, L = 64, 6
+    f = torch.zeros(B, L, 8)
+    f[:, 0, 0] = 1.0
+    f[:, 1, 0] = torch.rand(B) * (torch.rand(B) > 0.5)  # E_dep with a zero atom
+    f[:, 2:, 1:7] = torch.nn.functional.normalize(torch.randn(B, L - 2, 6), dim=-1)
+    f[:, 3:, 0] = torch.rand(B, L - 3) * (torch.rand(B, L - 3) > 0.5)
+    f[:, 3:, 7] = 22.0
+    m = torch.zeros(B, L, dtype=torch.long); m[:, 1] = 1; m[:, 3:] = 1
+    ds = DataStruct(f, m, torch.ones(B, L, dtype=torch.bool))
 
-    out = ShowerValMetrics()(_StubLego(), DataStruct(f, mm, am))
-    synced = {k for k in out if not k.startswith(UNSYNCED_PREFIXES)}
-    assert synced == (
-        {"val/mmd_particle", "val/mmd_summary"}
-        | {f"val/w1_particle/{n}" for n in KIN_NAMES}
-        | {f"val/w1_summary/{n}" for n in SUMMARY_FEATURE_NAMES}
-    )
+    def sentinel_copy(lego, ds_t):
+        g = ds_t.f.full[..., :7].clone()
+        g[:, 1, 0].masked_fill_(g[:, 1, 0] == 0, -0.1)
+        g[:, 3:, 0].masked_fill_(g[:, 3:, 0] == 0, -0.1)
+        return torch.cat((g, ds_t.f.full[..., 7:]), -1)
+
+    set_layout(("Density",))
+    monkeypatch.setattr(ShowerValMetrics, "_generate", staticmethod(sentinel_copy))
+    out = ShowerValMetrics()(None, ds)
+    assert out["val/w1_particle/energy"] < 1e-6 and out["val/w1_summary/E_dep"] < 1e-6

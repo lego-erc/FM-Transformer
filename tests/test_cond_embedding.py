@@ -29,6 +29,12 @@ def _reference(vf, x, mask, types, pdgids, h):
     return embd, out
 
 
+def _module(vf, x, mask, types, pdgids, h):
+    """(embedding, output projection) the way the module computes them."""
+    oh = vf._one_hot(mask, types, pdgids, x.shape[0])
+    return vf._embed(x, oh), vf._project_out(h, mask, oh)
+
+
 def _setup(B=5, L=9, npdgids=6):
     torch.manual_seed(0)
     vf = CFMTrafo_x(h_dim=32, nhead=4, max_seq_l=L, ntypes=4, in_dim=7, nlayers=1, dropout=0.0,
@@ -48,8 +54,7 @@ def test_embedding_matches_the_einsum_reference():
     vf, x, mask, types, pdgids = _setup()
     h = torch.randn(x.shape[0], x.shape[1], vf.h_dim)
     embd_ref, out_ref = _reference(vf, x, mask, types, pdgids, h)
-    oh = vf._one_hot(mask, types, pdgids, x.shape[0])
-    embd, out = vf._embed(x, oh), vf._project_out(h, mask, oh)
+    embd, out = _module(vf, x, mask, types, pdgids, h)
     assert torch.allclose(embd, embd_ref, atol=1e-6), (embd - embd_ref).abs().max()
     assert torch.allclose(out, out_ref, atol=1e-6), (out - out_ref).abs().max()
 
@@ -66,10 +71,7 @@ def test_embedding_gradients_match_the_reference():
         return {n: p.grad.clone() for n, p in vf.named_parameters() if n in names}, h.grad.clone()
 
     g_ref, hg_ref = grads(lambda: _reference(vf, x, mask, types, pdgids, h))
-    def _new():
-        oh = vf._one_hot(mask, types, pdgids, x.shape[0])
-        return vf._embed(x, oh), vf._project_out(h, mask, oh)
-    g, hg = grads(_new)
+    g, hg = grads(lambda: _module(vf, x, mask, types, pdgids, h))
     for n in names:
         assert torch.allclose(g[n], g_ref[n], atol=1e-5), (n, (g[n] - g_ref[n]).abs().max())
     assert torch.allclose(hg, hg_ref, atol=1e-5)

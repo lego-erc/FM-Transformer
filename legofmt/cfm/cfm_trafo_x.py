@@ -6,7 +6,9 @@ one-hot-Kronecker-``x`` against the stacked weight banks (no ``(B, L, h, in)``
 intermediate; its index backward was 60% of an eager step). The output
 projection mirrors it. Time, and with ``step_cond`` the step size, enter as
 sinusoidal embeddings passed to x-transformers as ``condition=`` for adaptive
-RMSNorm.
+RMSNorm. With one ``(t, d)`` per event the condition takes two values per event
+(generated tokens, conditioning tokens), and the adaptive norms are handed those
+two rows rather than ``L`` (``_per_event_gammas``).
 """
 
 from __future__ import annotations
@@ -14,10 +16,41 @@ from __future__ import annotations
 from functools import partial
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.utils.checkpoint import checkpoint
 from x_transformers import ContinuousTransformerWrapper, Encoder
+from x_transformers.x_transformers import AdaptiveLayerScale, AdaptiveRMSNorm
 from legofmt.compat import fp32_attention, legacy_param_rename, needs_fp32_attention
+from legofmt.cfm.geom_encoder import GeomEncoder
+
+
+def _per_event_gammas(attn_layers: nn.Module) -> bool:
+    """Let the adaptive norms / layer-scales take a packed ``(B, 3, D)`` condition: row 0
+    the conditioning tokens' condition, row 1 the generated tokens', row 2's first ``L``
+    entries the generated-token selector. Their ``to_gamma`` matmuls then run on 2 rows
+    per event instead of ``L``: ~10% of a training step and of a solve (plate-Si config,
+    H100). Any other condition goes through the original forward. Patches nothing and
+    returns False when something else would consume the condition."""
+    mods = [m for m in attn_layers.modules() if isinstance(m, (AdaptiveRMSNorm, AdaptiveLayerScale))]
+    other = any(type(m).__name__.startswith("Adaptive") for m in attn_layers.modules() if m not in mods)
+    if not mods or other or type(getattr(attn_layers, "adaptive_mlp", nn.Identity())).__name__ != "Identity":
+        return False
+    for m in mods:
+        m.forward = partial(_packed_forward, m, m.forward)
+    return True
+
+
+def _packed_forward(mod, orig, x, *, condition, **kwargs):
+    if condition.shape[1] != 3 or x.shape[1] == 3:
+        return orig(x, condition=condition, **kwargs)
+    sel = condition[:, 2, :x.shape[1], None] > 0.5
+    g = mod.to_gamma(condition[:, :2])
+    pick = lambda g: torch.where(sel, g[:, 1:2], g[:, :1])
+    if isinstance(mod, AdaptiveRMSNorm):  # x_transformers.AdaptiveRMSNorm.forward
+        return F.normalize(x, dim=-1) * mod.scale * (pick(g) + 1.)
+    g, out = pick(g.sigmoid()), mod.fn(x, **kwargs)  # x_transformers.AdaptiveLayerScale.forward
+    return out * g if isinstance(out, Tensor) else (out[0] * g, *out[1:])
 
 
 class CFMTrafo_x(nn.Module):
@@ -40,11 +73,20 @@ class CFMTrafo_x(nn.Module):
         time_cond: bool = True,
         step_cond: bool = False,
         grad_ckpt: bool = False,
+        geom_encoder: dict | None = None,
+        lat_dim: int = 0,
         **kwargs,
     ) -> None:
         super().__init__()
         if step_cond and not time_cond:
             raise ValueError("step_cond=True requires time_cond=True")
+        self.geom = None
+        if geom_encoder is not None:
+            g = dict(geom_encoder)
+            n_prefix, self.geom_hide = g.pop("n_prefix"), g.pop("hide_scalars")
+            # the composite cond-scalar rows (E_dep is row 1, the incoming particle row n_prefix)
+            self.register_buffer("geom_scalar_rows", torch.tensor([0, *range(2, n_prefix)]), persistent=False)
+            self.geom = GeomEncoder(g.pop("layers"), h_dim, **g)
         ntypes = ntypes if ntypes is not None else max_seq_l
         self.h_dim = h_dim
         self.in_dim = in_dim
@@ -54,6 +96,7 @@ class CFMTrafo_x(nn.Module):
         self.npdgids = npdgids
         self.time_cond = time_cond
         self.step_cond = step_cond
+        self.lat_dim = lat_dim
 
         self.vf = ContinuousTransformerWrapper(
             dim_in=dim_in_out,
@@ -74,6 +117,7 @@ class CFMTrafo_x(nn.Module):
         )
         if needs_fp32_attention(kwargs):
             fp32_attention(self.vf)
+        self._packed_cond = time_cond and _per_event_gammas(self.vf.attn_layers)
 
         if grad_ckpt:
             for _norms, _block, _residual in self.vf.attn_layers.layers:
@@ -89,6 +133,14 @@ class CFMTrafo_x(nn.Module):
         self.cond_w_pdgids  = nn.Parameter(torch.empty(npdgids, 2, h_dim, in_dim))
         self.cond_bi_pdgids = nn.Parameter(torch.empty(npdgids, h_dim))
         self.cond_bo_pdgids = nn.Parameter(torch.empty(npdgids, in_dim))
+
+        self._register_load_state_dict_pre_hook(legacy_param_rename)
+
+        if lat_dim:  # model_conf.edep_ae: an event-level latent z (B, lat_dim), flown as one extra generated token
+            self.lat_in  = nn.Linear(lat_dim, h_dim)
+            self.lat_out = nn.Linear(h_dim, lat_dim)
+            nn.init.zeros_(self.lat_out.weight)
+            nn.init.zeros_(self.lat_out.bias)
 
         w_std = xavier_gain * 3 ** 0.5 * (2.0 / (in_dim + h_dim)) ** 0.5
         for p in (self.cond_w_mask, self.cond_w_types, self.cond_w_pdgids):
@@ -109,7 +161,6 @@ class CFMTrafo_x(nn.Module):
                     persistent=False,
                 )
                 self.step_gain = nn.Parameter(torch.zeros(1))
-            self._register_load_state_dict_pre_hook(legacy_param_rename)
         else:
             self.global_cond = nn.Parameter(torch.zeros(1, h_dim))
 
@@ -119,9 +170,9 @@ class CFMTrafo_x(nn.Module):
         ``pdgids`` arrives as ``_F.pdgids``, i.e. ``(B, L, 1)``."""
         n = mask.shape[1]
         return torch.cat((
-            nn.functional.one_hot(mask.reshape(batch, n).long(), self.nvtypes),
-            nn.functional.one_hot(types.view(-1)[:n], self.ntypes).expand(batch, -1, -1),
-            nn.functional.one_hot(pdgids.reshape(batch, n).long(), self.npdgids),
+            F.one_hot(mask.reshape(batch, n).long(), self.nvtypes),
+            F.one_hot(types.view(-1)[:n], self.ntypes).expand(batch, -1, -1),
+            F.one_hot(pdgids.reshape(batch, n).long(), self.npdgids),
         ), dim=-1).to(self.cond_w_mask.dtype)
 
     def _embed(self, x: Tensor, oh: Tensor) -> Tensor:
@@ -139,6 +190,13 @@ class CFMTrafo_x(nn.Module):
         out = torch.einsum("blki,blk->bli", out, oh) + oh @ b
         return (mask == 1).unsqueeze(-1) * out / 3
 
+    def _time_emb(self, t: Tensor, d: Tensor | None) -> Tensor:
+        tf   = t.unsqueeze(-1) * self.freqs
+        cond = torch.where(self.mask_freqs.bool(), tf.sin(), tf.cos())
+        if self.step_cond and d is not None:
+            cond = cond + self.step_gain * (d.unsqueeze(-1) * self.freqs_d).sin()
+        return cond
+
     def forward(
         self,
         x: Tensor,
@@ -148,23 +206,67 @@ class CFMTrafo_x(nn.Module):
         pdgids: Tensor | None,
         t: Tensor | None = None,
         d: Tensor | None = None,
+        z: Tensor | None = None,
     ) -> Tensor:
-        if self.time_cond:
-            tf = t.unsqueeze(-1) * self.freqs
-            cond = torch.where(self.mask_freqs.bool(), tf.sin(), tf.cos())
-            if self.step_cond and d is not None:
-                cond = cond + self.step_gain * (d.unsqueeze(-1) * self.freqs_d).sin()
+        """``t`` / ``d`` per token ``(B, L)`` are used as given. Per event ``(B or 1, 1)``
+        they condition the generated (``mask == 1``) tokens, and the conditioning tokens
+        get ``t = 1, d = 0`` -- the values ``ProjectModel`` pins them to. With ``lat_dim`` the
+        latent ``z`` (B, lat_dim) is one more generated token, prepended, and ``(v, v_z)`` is returned."""
+        B, L = x.shape[:2]
+        K = 0 if self.geom is None else self.geom.K
+        n_lat = int(self.lat_dim > 0)
+        n_pre = n_lat + K          # prepended tokens: [latent, geometry x K], then the sequence
+        cond_attn = c_gen = None
+        if not self.time_cond:
+            cond = self.global_cond.expand(B, -1)
         else:
-            cond = self.global_cond.expand(x.shape[0], -1)
+            c_con = self._time_emb(t.new_ones(1, 1), None if d is None else d.new_zeros(1, 1)).expand(B, 1, -1)
+            if t.shape[-1] == 1 and (d is None or d.shape[-1] == 1):
+                gen   = (mask == 1).unsqueeze(-1)
+                c_gen = self._time_emb(t, d).expand(B, 1, -1)
+                cond  = torch.where(gen, c_gen, c_con)
+                if self._packed_cond and 3 != L + n_pre <= self.h_dim:
+                    # the selector spans the whole sequence: the latent token is generated, the K geometry tokens
+                    # are conditioning tokens
+                    sel = F.pad(gen.squeeze(-1).to(cond.dtype), (n_pre, self.h_dim - L - n_pre))
+                    if n_lat:
+                        sel[:, 0] = 1.0
+                    cond_attn = torch.cat((c_con, c_gen, sel.unsqueeze(1)), dim=1)
+            else:
+                cond = self._time_emb(t, d)
 
-        oh   = self._one_hot(mask, types, pdgids, x.shape[0])
+        oh   = self._one_hot(mask, types, pdgids, B)
         embd = self._embed(x, oh)
         if self.time_cond:
             embd = embd + cond
+        if self.geom is not None:
+            tok = self.geom().to(embd.dtype).expand(B, -1, -1)
+            if self.time_cond:
+                c_tok = c_con.expand(B, K, -1)
+                tok = tok + c_tok
+                cond = torch.cat((c_tok, cond), dim=1)
+            embd = torch.cat((tok, embd), dim=1)
+            if self.geom_hide:
+                attn_mask = attn_mask.clone()
+                attn_mask[:, self.geom_scalar_rows] = False
+            attn_mask = torch.cat((attn_mask.new_ones(B, K), attn_mask), dim=1)
+        if n_lat:
+            tok = self.lat_in(z.to(embd.dtype)).unsqueeze(1)
+            if self.time_cond:
+                if c_gen is None:  # per-token t: the event's t is that of its generated tokens
+                    gen_any = (mask == 1).any(-1, keepdim=True)
+                    pick = lambda a, fill: torch.where(
+                        gen_any, a.masked_fill(mask != 1, -torch.inf).amax(-1, keepdim=True), fill)
+                    c_gen = self._time_emb(pick(t, 1.0), None if d is None else pick(d, 0.0))   # (B, 1, D)
+                c_lat = c_gen.expand(B, 1, -1)
+                tok = tok + c_lat
+                cond = torch.cat((c_lat, cond.expand(B, -1, -1)), dim=1)
+            embd = torch.cat((tok, embd), dim=1)
+            attn_mask = torch.cat((attn_mask.new_ones(B, 1), attn_mask), dim=1)
 
         # project_in / project_out are identities unless dim_in_out was set.
-        embd = self.vf.project_in(embd)
-        if self.training:
-            embd = self.vf.emb_dropout(embd)
-        h = self.vf.project_out(self.vf.attn_layers(embd, mask=attn_mask, condition=cond))
-        return self._project_out(h, mask, oh)
+        embd = self.vf.emb_dropout(self.vf.project_in(embd))
+        h = self.vf.project_out(self.vf.attn_layers(
+            embd, mask=attn_mask, condition=cond if cond_attn is None else cond_attn))
+        v = self._project_out(h[:, n_pre:], mask, oh)
+        return (v, self.lat_out(h[:, 0])) if n_lat else v

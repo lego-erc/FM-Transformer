@@ -49,9 +49,7 @@ def apply_legacy_projection_in_out(model_args: dict, state_dict: dict) -> None:
         model_args["dim_in_out"] = model_args["h_dim"]
 
 
-def migrate_legacy_mult_heads(
-    state_dict: dict, max_seq_len: int, max_particles: int
-) -> dict:
+def migrate_legacy_mult_heads(state_dict: dict, max_seq_len: int) -> dict:
     """Pre-fusion checkpoints stored per-position ModuleLists (``embd_in_.{i}``,
     ``proj_out_.{i}``); remap them onto the fused single-table layout."""
     has_legacy_proj = "proj_out_.0.weight" in state_dict
@@ -59,23 +57,13 @@ def migrate_legacy_mult_heads(
     if not (has_legacy_proj or has_legacy_embd):
         return state_dict
 
-    out = {
-        k: v for k, v in state_dict.items()
-        if not (k.startswith("proj_out_.") or k.startswith("embd_in_."))
-    }
-
+    out = {k: v for k, v in state_dict.items() if not k.startswith(("proj_out_.", "embd_in_."))}
     if has_legacy_proj:
-        weights = [state_dict[f"proj_out_.{i}.weight"] for i in range(max_seq_len)]
-        biases = [state_dict[f"proj_out_.{i}.bias"] for i in range(max_seq_len)]
-        out["proj_out_w"] = torch.stack([w.t().contiguous() for w in weights], dim=0)
-        out["proj_out_b"] = torch.stack(biases, dim=0)
-
+        rows = range(max_seq_len)
+        out["proj_out_w"] = torch.stack([state_dict[f"proj_out_.{i}.weight"].t().contiguous() for i in rows])
+        out["proj_out_b"] = torch.stack([state_dict[f"proj_out_.{i}.bias"] for i in rows])
     if has_legacy_embd:
-        embd_weights = [
-            state_dict[f"embd_in_.{i}.weight"] for i in range(max_seq_len - 1)
-        ]
-        out["embd_in_.weight"] = torch.cat(embd_weights, dim=0)
-
+        out["embd_in_.weight"] = torch.cat([state_dict[f"embd_in_.{i}.weight"] for i in range(max_seq_len - 1)])
     return out
 
 
@@ -169,6 +157,30 @@ def fp32_attention(module: nn.Module) -> None:
     for m in module.modules():
         if isinstance(m, Attend):
             m.forward = _wrap(m.forward)
+
+
+def dynamic_shape_attention() -> None:
+    """Make ``torch.compile(dynamic=True)`` actually symbolic in batch and length.
+
+    x-transformers masks ``Attention``'s output with
+    ``einx.where('b n, b n d, -> b n d', mask, out, 0.)``, and einx traces per
+    concrete shape, so dynamo specialises both dims and compiles one graph per
+    bucket shape. Replacing that one pattern by the equivalent ``torch.where``
+    leaves a single graph. Module-global, idempotent."""
+    import types
+    import x_transformers.x_transformers as xt
+
+    einx = xt.einx
+    if getattr(einx, "_legofmt_where", False):
+        return
+
+    def where(pattern, mask, out, val):
+        if pattern != "b n, b n d, -> b n d":
+            return einx.where(pattern, mask, out, val)
+        return torch.where(mask.unsqueeze(-1), out, val)
+
+    ns = {n: getattr(einx, n) for n in dir(einx) if not n.startswith("_")}
+    xt.einx = types.SimpleNamespace(**ns | {"where": where, "_legofmt_where": True})
 
 
 # ---------------------------------------------------------------------------

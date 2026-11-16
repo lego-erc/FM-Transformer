@@ -28,16 +28,14 @@ class BatchedMuon(torch.optim.Optimizer):
         weight_decay=0.0, weight_decouple=True, use_adjusted_lr=False,
         adamw_lr=3e-4, adamw_betas=(0.9, 0.95), adamw_wd=0.0, adamw_eps=1e-10, **_,
     ):
+        muon = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps, weight_decay=weight_decay,
+                    use_adjusted_lr=use_adjusted_lr, weight_decouple=weight_decouple)
+        adamw = dict(lr=adamw_lr, betas=adamw_betas, eps=adamw_eps, weight_decay=adamw_wd,
+                     weight_decouple=weight_decouple)
         for g in params:  # per-group keys win over the constructor defaults, as in the library
-            if g["use_muon"]:
-                g.update(lr=g.get("lr", lr), momentum=g.get("momentum", momentum),
-                         nesterov=g.get("nesterov", nesterov), ns_steps=g.get("ns_steps", ns_steps),
-                         weight_decay=g.get("weight_decay", weight_decay),
-                         use_adjusted_lr=g.get("use_adjusted_lr", use_adjusted_lr))
-            else:
-                g.update(lr=g.get("lr", adamw_lr), betas=g.get("betas", adamw_betas),
-                         eps=g.get("eps", adamw_eps), weight_decay=g.get("weight_decay", adamw_wd))
-            g.update(weight_decouple=g.get("weight_decouple", weight_decouple), step=0)
+            for k, v in (muon if g["use_muon"] else adamw).items():
+                g.setdefault(k, v)
+            g["step"] = 0
         super().__init__(params, {})
         self._shape_groups = {}  # id(group) -> [(param indices, lr ratio)], shapes are fixed
 
@@ -50,8 +48,8 @@ class BatchedMuon(torch.optim.Optimizer):
             by_shape = defaultdict(list)  # >2-D weights flatten to (dim0, -1), as in pytorch_optimizer
             for i, p in enumerate(ps):
                 by_shape[(p.shape[0], p[0].numel())].append(i)
-            # pytorch_optimizer's get_adjusted_lr: Moonlight's sqrt(max(1, rows/cols)) if
-            # use_adjusted_lr, else the original Muon 0.2*sqrt(max(rows, cols)) -- always applied
+            # pytorch_optimizer's get_adjusted_lr: the original Muon sqrt(max(1, rows/cols)) if
+            # use_adjusted_lr, else Moonlight's RMS-matching 0.2*sqrt(max(rows, cols)) -- always applied
             self._shape_groups[key] = [
                 (idx, max(1.0, r / c) ** 0.5 if group["use_adjusted_lr"] else 0.2 * max(r, c) ** 0.5)
                 for (r, c), idx in by_shape.items()
@@ -150,9 +148,8 @@ def build_optimizer(params, opt_conf):
     if sc is None:
         return opt, None
     sc = {**sc}
-    cls = _get(SCHEDULERS, sc.pop("cls"))
     interval = sc.pop("interval", "step")
-    return opt, {"scheduler": cls(opt, **sc), "interval": interval}
+    return opt, {"scheduler": _get(SCHEDULERS, sc.pop("cls"))(opt, **sc), "interval": interval}
 
 
 def opt_is_schedulefree(opt) -> bool:

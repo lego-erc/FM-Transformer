@@ -60,9 +60,6 @@ def test_factory_groups_and_scheduler_scales_both_lrs():
 def test_freezing_a_matrix_after_the_first_step_does_not_break_the_shape_cache() -> None:
     """The shape-group index is into the gradient-carrying subset; caching it
     per group broke the moment a 2-D parameter lost its gradient after step 1."""
-    import torch
-    from legofmt.mod_comps.optimizers import muon_factory
-
     a, b, c = (torch.nn.Parameter(torch.randn(8, 4)) for _ in range(3))
     opt = muon_factory([a, b, c], lr=1e-3)
     for p in (a, b, c):

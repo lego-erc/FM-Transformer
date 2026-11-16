@@ -1,122 +1,22 @@
-"""Smoke test for :class:`legofmt.distill.reflow.GenerateOutDirect`.
-
-Builds a tiny flow checkpoint on disk (no HF download), instantiates
-``GenerateOut`` from it, and runs one end-to-end forward on a synthetic
-``cond`` tensor.
-"""
+"""Offline smoke tests of :class:`legofmt.distill.reflow.GenerateOutDirect` and ``GenerateIn``: tiny checkpoints
+written to disk (no HF download), one end-to-end forward on a synthetic ``cond``."""
 
 from __future__ import annotations
-
-from pathlib import Path
 
 import pytest
 import torch
 
+from test_helpers import _gun_cond, _save_flow_ckpt, _save_mult_ckpt
 from legofmt.data.struct import _F
-from legofmt.distill.reflow import GenerateOutDirect as GenerateOut, LEGOLtngDirect as LEGOLtng
+from legofmt.distill.reflow import GenerateOutDirect as GenerateOut
 from legofmt.main.generate import GenerateIn
 from legofmt.main.modules import LEGOLtng as LEGOLtngVelocity
-
-
-def _flow_config() -> dict:
-    pdgids = torch.tensor([22, 211, 2212], dtype=torch.int64).sort().values
-    return {
-        "dl_conf": {"lds_args": {"cutoff_mev": 10.0}, "bs": 2, "num_workers": 0},
-        "val_conf": {"val_frac": 0.01, "seed": 0},
-        "base_conf": {
-            "base_range": 3.4,
-            "kappa": torch.tensor(8.0),
-            "bs_frac": 0.0,
-            "base_dist": "poles",
-            "scale_dist": "sm_norm",
-            "tanh_theta": True,
-        },
-        "model_conf": {
-            "manifold": [
-                {"name": "euclidean", "dim": 1},
-                {"name": "sphere",    "dim": 3},
-                {"name": "sphere",    "dim": 3},
-            ],
-            "max_energy": 300.0,
-            "pdgids": pdgids,
-            "model_args": {
-                "h_dim": 16,
-                "nlayers": 2,
-                "nhead": 2,
-                "in_dim": 7,
-                "max_seq_l": 7,
-                "ntypes": 4,
-                "nvtypes": 2,
-                "npdgids": pdgids.numel() + 1,
-                "ff_mult": 1,
-                "dropout": 0.0,
-                "use_adaptive_rmsnorm": True,
-                "use_adaptive_layerscale": True,
-                "ff_swish": True,
-                "ff_glu": True,
-            },
-        },
-        "opt_conf": {"opt": "schedulefree", "lr": 1e-3},
-    }
-
-
-def _save_flow_ckpt(tmp_path: Path, cls=LEGOLtng, name: str = "flow.pt") -> Path:
-    cfg = _flow_config()
-    m = cls({"state_dict": {}, "config": cfg})
-    path = tmp_path / name
-    torch.save({"state_dict": m.model.vf.state_dict(), "config": cfg}, path)
-    return path
-
-
-def _mult_config() -> dict:
-    """Checkpoint-style mult config: ptypes/max_count present so
-    ``resolve_mult_config`` takes the restore path (no meta.json needed)."""
-    return {
-        "dl_conf": {"lds_args": {"cutoff_mev": 10.0}, "bs": 2, "num_workers": 0},
-        "mm_conf": {
-            "ptypes": torch.tensor([22, 211], dtype=torch.int64),
-            "ptypes_in": torch.tensor([22, 211, 2212], dtype=torch.int64),
-            "max_out_particles": 4,
-            "max_count": 4,
-            "h_dim": 16,
-            "in_dim": 8,
-            "n_layers": 1,
-            "n_heads": 2,
-            "dropout": 0.0,
-            "use_abs_pos_emb": False,
-            "post_emb_norm": False,
-            "train_inverse": True,
-            "model_args": {"use_adaptive_rmsnorm": True},
-            "inv_model_args": {"use_adaptive_rmsnorm": True},
-        },
-        "opt_conf": {"opt": "schedulefree", "lr": 1e-3},
-    }
-
-
-def _save_mult_ckpt(tmp_path: Path) -> Path:
-    from legofmt.multiplicity.model import MultModel
-
-    cfg = _mult_config()
-    m = MultModel({"state_dict": {}, "config": cfg})
-    path = tmp_path / "mult.pt"
-    torch.save({"state_dict": m.state_dict(), "config": cfg}, path)
-    return path
 
 
 @pytest.fixture(scope="module")
 def generator(tmp_path_factory: pytest.TempPathFactory) -> GenerateOut:
     tmp = tmp_path_factory.mktemp("direct_ckpts")
     return GenerateOut(str(_save_flow_ckpt(tmp)), str(_save_mult_ckpt(tmp)), device="cpu")
-
-
-def _dummy_cond(gen: GenerateOut, batch: int = 2) -> torch.Tensor:
-    """``[B, 8]`` cond: density, E-scaled mom (3), entry pos (3), pdgid."""
-    cond = torch.zeros(batch, 8)
-    cond[:, 0] = 1.0
-    cond[:, 1:4] = torch.tensor([0.0, 0.0, 150.0])
-    cond[:, 4:7] = torch.tensor([0.0, 0.0, -1.0])
-    cond[:, 7] = gen.pdgids[0].item()
-    return cond
 
 
 def test_instantiation(generator: GenerateOut) -> None:
@@ -127,11 +27,36 @@ def test_instantiation(generator: GenerateOut) -> None:
 
 @torch.no_grad()
 def test_forward_shapes(generator: GenerateOut) -> None:
-    sols, mask, attn_mask = generator(_dummy_cond(generator, batch=2))
+    sols, mask, attn_mask = generator(_gun_cond(generator.pdgids[0].item(), batch=2))
     L = generator.max_seq_l
     assert sols.shape == (2, L, 8)
     assert mask.shape == attn_mask.shape == (2, L)
     assert torch.isfinite(sols[attn_mask]).all(), "non-finite values at attended slots"
+
+
+@torch.no_grad()
+def test_unknown_incoming_pdgid_raises(generator: GenerateOut) -> None:
+    """An incoming species outside the mult model's ptypes_in used to be relabelled
+    as its searchsorted neighbour, silently generating the wrong particle's shower."""
+    cond = _gun_cond(generator.pdgids[0].item(), batch=2)
+    cond[0, -1] = 2112.0  # neighbour of 2212 in ptypes_in = (22, 211, 2212)
+    with pytest.raises(ValueError, match="ptypes_in"):
+        generator(cond)
+
+
+@torch.no_grad()
+def test_saturation_refill_adds_no_unpredicted_species(generator: GenerateOut, monkeypatch) -> None:
+    """Counts (22: 5, 211: 1) exceed the 4 outgoing slots; flooring the rescaled counts
+    leaves one slot, which used to be drawn with weight 1 for every species -- 2212,
+    which the multiplicity model never predicted, included."""
+    B = 2000
+    monkeypatch.setattr(type(generator.gen_mult), "forward",
+                        lambda self, batch, pt_mask=None: torch.tensor([[5, 1]]).expand(B, -1))
+    cond = generator._model_cond(_gun_cond(generator.pdgids[0].item(), batch=B), prepped=False)
+    cond_fm, _, attn = generator.gen_batch(cond, passthrough=False)
+    out_idx = _F(cond_fm).out_p[..., -1]
+    assert (attn[:, generator.n_prefix + 1:].sum(-1) == 4).all()
+    assert not (out_idx == 3).any(), "a 2212 (flow index 3) was refilled"
 
 
 def _fake_shower(B: int = 2, L: int = 7) -> tuple:
@@ -139,7 +64,6 @@ def _fake_shower(B: int = 2, L: int = 7) -> tuple:
     batch would carry them."""
     f = torch.zeros(B, L, 8)
     f[:, 0, 0] = 1.0
-    f[:, 1, 1] = 0.1
     _F(f).non_p[..., 1:-1] = 1.0
     f[:, 3:, 0] = 0.5
     g = torch.Generator().manual_seed(0)

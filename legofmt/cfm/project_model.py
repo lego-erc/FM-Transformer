@@ -1,10 +1,6 @@
-"""Manifold-projection wrapper around the flow's vector field.
+"""Manifold-projection wrapper around the flow's vector field (:class:`~legofmt.cfm.cfm_trafo_x.CFMTrafo_x`).
 
-Split out of ``main/modules.py``: a plain ``nn.Module`` with no Lightning
-contact, so it belongs beside the :class:`~legofmt.cfm.cfm_trafo_x.CFMTrafo_x`
-it wraps. ``LEGOLtng`` assigns it as ``self.model``, which is where its
-state_dict keys (``model.vf.*``) come from -- the class's module path does not
-appear in a checkpoint.
+``LEGOLtng`` assigns it as ``self.model``, which is where the state_dict keys ``model.vf.*`` come from.
 """
 
 import torch
@@ -41,16 +37,24 @@ class ProjectModel(nn.Module):
         types: Tensor,
         pdgids: Tensor | None = None,
         d: Tensor | None = None,
+        z: Tensor | None = None,
     ) -> Tensor:
+        """With the field's latent token (``model_args.lat_dim``) pass the latent ``z`` (B, K) and get
+        ``(v, v_z)``; ``z`` is Euclidean and not projected."""
         x_proj, x_att = self._prep_x(x, attn_mask)
-        t = torch.atleast_2d(t).expand_as(attn_mask)
-        t = torch.where(mask == 1, t, 1.0)  # conditions get t=1
+        t = torch.atleast_2d(t)
         if getattr(self.vf, "step_cond", False):
-            d = torch.zeros_like(t) if d is None else torch.atleast_2d(d).expand_as(attn_mask)
-            d = torch.where(mask == 1, d, 0.0)  # conditions are not transported
-        v = self.vf(x_att, mask, attn_mask, types, pdgids, t=t, d=d)
-        v_proj = self.manifold.proju(x_proj, v)
-        return torch.where(attn_mask.unsqueeze(-1), v_proj, v)
+            d = torch.zeros_like(t) if d is None else torch.atleast_2d(d)
+        else:
+            d = None  # the field ignores it
+        if t.shape[-1] != 1 or (d is not None and d.shape[-1] != 1):  # per token: pin the conditions here
+            t = torch.where(mask == 1, t.expand_as(attn_mask), 1.0)  # conditions get t=1
+            if d is not None:
+                d = torch.where(mask == 1, d.expand_as(attn_mask), 0.0)  # and are not transported
+        out = self.vf(x_att, mask, attn_mask, types, pdgids, t=t, d=d, **({} if z is None else {"z": z}))
+        v, v_z = (out, None) if z is None else out
+        v = torch.where(attn_mask.unsqueeze(-1), self.manifold.proju(x_proj, v), v)
+        return v if z is None else (v, v_z)
 
 
 def uncompiled(module: nn.Module) -> nn.Module:
