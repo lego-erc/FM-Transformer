@@ -130,7 +130,7 @@ class GenerateOut(torch.nn.Module):
         self.pen = EnergyProjections(cutoff_mev=self.model.rc.cutoff_mev, max_energy=self.model.rc.max_energy)
         self.dp = DataPrep(flow_conf)   # the E_dep row's normalisation (edep_log_min), for the E_in ceiling
 
-    def __call__(self, cond: torch.Tensor, prepped: bool = False, passthrough: bool = True, rng=None):
+    def __call__(self, cond: torch.Tensor, prepped: bool = False, passthrough: bool = True, rng=None, gt_mult=None):
         """``cond`` is ``[B, n_cond + 7] = [*cond_scalars, mom * E_MeV (3), pos (3), pdgid]``;
         the momentum must be energy-scaled. ``prepped=True`` skips the ray-trace and
         the energy split. ``passthrough=False`` never fires the pass-through token: the
@@ -143,7 +143,8 @@ class GenerateOut(torch.nn.Module):
         if rng is not None:  # keys on the events' device: rows are subset by device masks, draws meet device params
             rng = EventRNG(rng.keys.to(cond.device), rng.seed)
         cond_model = self._model_cond(cond, prepped)
-        cond_fm, mask, attn_mask = self.gen_batch(cond_model, passthrough=passthrough, **_rng_kw(rng))
+        cond_fm, mask, attn_mask = self.gen_batch(cond_model, passthrough=passthrough, gt_mult=gt_mult,
+                                                  **_rng_kw(rng))
         nc = self.n_cond
         e_in = self.pen.from_scalar(cond_model[:, nc + 1:nc + 4], cond_model[:, nc:nc + 1]).norm(dim=-1)
         pid_in = cond_model[:, -1].long()
@@ -206,14 +207,14 @@ class GenerateOut(torch.nn.Module):
         return self.gen_mult.passthrough_prob(*self._mult_in(self._model_cond(cond, prepped)))
 
     def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None, passthrough=True,
-                            rng=None):
+                            rng=None, gt_mult=None):
         """Geant4-shaped entry point: broadcast the per-gun arguments to ``B * n`` events
         and return ``{per_event, per_particle, per_voxel}`` in *model* normalisation
         (``per_event["E_dep"]`` is the normalised scalar, not MeV, always on the log/linear ``norm_edep`` scale that
         callers decode with ``edep_log_min``: a ``model_conf.edep_wall`` row is re-encoded on it here).
         ``rng`` as in ``__call__``, with ``B * n`` keys (gun-major, as ``repeat_interleave`` orders the events)."""
         sols, _, _ = self(self._g4_cond(n, pos, mom, energy, density, size, pdgids, Z, A), passthrough=passthrough,
-                          **_rng_kw(rng))
+                          gt_mult=gt_mult, **_rng_kw(rng))
         s = _F(sols)
         edep = s.edep
         if self.dp.edep_wall:
@@ -275,10 +276,16 @@ class GenerateOut(torch.nn.Module):
             mult_in[:, self.n_mult_cond] = (mult_in[:, self.n_mult_cond] * self.mult_e_scale).clamp(0.0, 1.0)
         return mult_in, pdgid_in_idx
 
-    def gen_batch(self, cond: torch.Tensor, passthrough: bool = True, rng=None):
+    def gen_batch(self, cond: torch.Tensor, passthrough: bool = True, rng=None, gt_mult=None):
         """Sample per-pdgid counts, truncate to ``max_seq_l``, and build the padded
         ``(cond_fm, mask, attn_mask)`` triple the flow consumes."""
-        return self.build_batch(cond, *self.sample_counts(cond, passthrough, **_rng_kw(rng)), **_rng_kw(rng))
+        if gt_mult is None:
+            pt_mask, counts = self.sample_counts(cond, passthrough, **_rng_kw(rng))
+        else:  # (B, n_ptypes) ground-truth counts replace the multiplicity model's draw
+            assert gt_mult.shape == (len(cond), self.ptypes.shape[0])
+            pt_mask = torch.zeros(len(cond), dtype=torch.bool, device=cond.device)
+            counts = gt_mult.to(cond.device).long()
+        return self.build_batch(cond, pt_mask, counts, **_rng_kw(rng))
 
     def sample_counts(self, cond: torch.Tensor, passthrough: bool = True,
                       rng=None) -> tuple[torch.Tensor, torch.Tensor]:
