@@ -117,8 +117,7 @@ class DataPrep:
         energy  = torch.cat((e_mev[:, :1], e_out), dim=1)
         mom_dir = F.normalize(mom, dim=-1)
         if self.proj_ray:   # the incoming position, traced along its momentum onto the cube; false: legacy
-            pos = pos.clone()
-            pos[:, 0] = self.ppa(torch.cat((mom_dir[:, 0], pos[:, 0]), dim=-1))[..., 3:]
+            pos = pos.select_scatter(self.ppa(torch.cat((mom_dir[:, 0], pos[:, 0]), dim=-1))[..., 3:], dim=1, index=0)
         pos_dir = F.normalize(pos / self.ppa.cuboid_dim.to(pos), dim=-1)
         return self.manifold.projx(torch.cat((energy, mom_dir, pos_dir), dim=-1))
 
@@ -137,15 +136,13 @@ class DataPrep:
         tokens, m, am, per_event = batch
         first, *rest = cond_scalars()
         names = (first, "E_dep", *rest)
-        prefix = torch.ones_like(tokens[:, :1]).repeat(1, len(names), 1)   # [value, 1, 1, 1, 1, 1, 1, 0]
+        prefix = tokens.new_tensor([0, 1, 1, 1, 1, 1, 1, 0]).repeat(len(tokens), len(names), 1)
         prefix[..., 0] = torch.stack([per_event[n].reshape(len(tokens)) for n in names], dim=1)
-        prefix[..., -1] = 0
-        prefix_m = torch.zeros_like(m[:, :1]).repeat(1, len(names))
-        prefix_m[:, 1] = 1
 
         f = torch.cat((prefix, tokens), dim=1).nan_to_num()
-        m = torch.cat((prefix_m, m), dim=1)
-        am = torch.cat((torch.ones_like(am[:, :1]).repeat(1, len(names)), am), dim=1)
+        m = F.pad(m, (len(names), 0))
+        m[:, 1] = 1   # E_dep, the one generated prefix token
+        am = F.pad(am, (len(names), 0), value=True)
         return (f, m, am, per_event["E_dep_layers"]) if "E_dep_layers" in per_event else (f, m, am)
 
     # ---- stored tokens -> the model scale -----------------------------------------------------------------------
@@ -188,8 +185,7 @@ class DataPrep:
         if not self.edep_log_min: return denorm_edep_linear(u, self.pen.max_energy)   # legacy
         e_min = self.edep_log_min
         width = torch.log(torch.tensor(self.pen.max_energy / e_min)).item()
-        edep = e_min * torch.exp(u.clamp(0.0, 1.0) * width)
-        return torch.where(u > 0, edep, torch.zeros_like(u))
+        return torch.where(u > 0, e_min * torch.exp(u.clamp(0.0, 1.0) * width), 0.0)
 
     # ---- E_dep: the margin scale (the token) --------------------------------------------------------------------
 
@@ -229,7 +225,7 @@ class DataPrep:
         if not self.edep_margin: return self.denorm_edep_layer(u)
         cap, z_lo, z_hi = self._edep_margin_range(e_in.double(), pid)
         edep = cap * torch.sigmoid(z_lo + u.double().clamp(0.0, 1.0) * (z_hi - z_lo))
-        edep = torch.where(u > 0, edep, torch.zeros_like(edep)).to(u.dtype)
+        edep = torch.where(u > 0, edep, 0.0).to(u.dtype)
         return torch.where(self.edep_margin_mask(pid), edep, self.denorm_edep_layer(u))
 
     def edep_margin_mask(self, pid: Tensor) -> Tensor:
@@ -254,6 +250,7 @@ class DataPrep:
         ``model_conf.edep_excess_mev``.
         """
         s = _F(f)
-        e_in, pid = s.in_energy[..., 0].double(), s.in_pid
-        excess = s.edep.reshape(e_in.shape).double() - e_in
-        return {int(p): max(0.0, excess[pid == p].max().item()) for p in pid.unique().tolist()}
+        e_in = s.in_energy.reshape(-1).double()
+        species, idx = s.in_pid.reshape(-1).unique(return_inverse=True)
+        excess = e_in.new_zeros(len(species)).scatter_reduce(0, idx, s.edep.reshape(-1).double() - e_in, "amax")
+        return dict(zip(species.long().tolist(), excess.tolist()))   # the zeros: an excess >= 0
