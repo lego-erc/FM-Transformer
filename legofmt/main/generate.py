@@ -197,11 +197,11 @@ class GenerateOut(torch.nn.Module):
     def _clamp_edep(self, edep: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor) -> torch.Tensor:
         """Caps the E_dep token at E_in + the species' excess, out of place.
 
-        Only the log token is capped (a wall token is capped by construction). The excess is the training data's largest
-        (model_conf.edep_excess_mev), or for checkpoints from before it the hand-set _EDEP_EXCESS_MEV. Out of place, so
-        the density design can differentiate through it.
+        Only the log token is capped (a margin token is capped by construction). The excess is the training data's
+        largest (model_conf.edep_excess_mev), or for checkpoints from before it the hand-set _EDEP_EXCESS_MEV. Out of
+        place, so the density design can differentiate through it.
         """
-        log_token = ~self.dp.edep_wall_mask(pid_in)
+        log_token = ~self.dp.edep_margin_mask(pid_in)
         for pid, excess in (self.dp.edep_excess_mev or _EDEP_EXCESS_MEV).items():
             hit = (pid_in == pid) & log_token
             edep = torch.where(hit, torch.minimum(edep, self.dp.norm_edep(e_in + excess).to(edep)), edep)
@@ -234,13 +234,13 @@ class GenerateOut(torch.nn.Module):
         Returns:
             ``{per_event, per_particle, per_voxel}`` in *model* normalisation: ``per_event["E_dep"]`` is the normalised
                 scalar, not MeV, always on the log/linear ``norm_edep`` scale that callers decode with ``edep_log_min``
-                (a ``model_conf.edep_wall`` token is re-encoded on it here).
+                (a ``model_conf.edep_margin`` token is re-encoded on it here).
         """
         sols, _, _ = self(self._g4_cond(n, pos, mom, energy, density, size, pdgids, Z, A), passthrough=passthrough,
                           **_rng_kw(rng))
         s = _F(sols)
         edep = s.edep
-        if self.dp.edep_wall:
+        if self.dp.edep_margin:
             e_in = self.dp.pen.from_scalar(s.in_cc[:, 0, 1:4], s.in_cc[:, 0, 0:1]).norm(dim=-1)
             edep = self.dp.norm_edep(self.dp.denorm_edep_token(edep.double(), e_in.double(),
                                                              s.in_p[:, 0, -1])).to(edep.dtype)

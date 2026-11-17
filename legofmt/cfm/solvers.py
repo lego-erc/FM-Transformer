@@ -47,18 +47,47 @@ from legofmt.legacy.solvers import odesolver_sample
 from legofmt.mod_comps.config import _amp_dtype, resolve_len_buckets
 
 
-# ---- one step: ``field(x, z, t, d=...)`` returns the velocities ``(v, w)`` of the state and the latent ------------
+# ---- one step ----------------------------------------------------------------------------------------------------
 
 def _euler(field, man, x, z, t_a, t_b):
+    """Takes one Euler step from ``t_a`` to ``t_b``.
+
+    The field is told the step it takes, ``d = dt``.
+
+    Args:
+        field: ``field(x, z, t, d=...)``, the velocities ``(v, w)`` of the state and the latent.
+        man:   the product manifold.
+        x:     (B, L, 7), the state at ``t_a``.
+        z:     (B, K), the latent at ``t_a``; K = 0: no latent.
+        t_a:   scalar, the step's start.
+        t_b:   scalar, the step's end.
+
+    Returns:
+        ``(x_b, z_b)``, the state and the latent at ``t_b``.
+    """
     dt   = t_b - t_a
     v, w = field(x, z, t_a, d=dt)
     return man.expmap(x, dt * v), z + dt * w
 
 
 def _midpoint(field, man, x, z, t_a, t_b):
-    # v1 takes the half-step, so its d is dt/2; v2 is applied as a full step from x and stays instantaneous
-    # (tests/test_midpoint_flow_map.py). Its d = 0 is a tensor, not None: a None is a separate dynamo guard, i.e. a
-    # second compiled graph.
+    """Takes one midpoint step from ``t_a`` to ``t_b``.
+
+    ``v1`` takes the half-step, so its ``d`` is ``dt / 2``; ``v2`` is applied as a full step from ``x`` and stays
+    instantaneous (tests/test_midpoint_flow_map.py). Its ``d = 0`` is a tensor, not None: a None is a separate
+    dynamo guard, i.e. a second compiled graph.
+
+    Args:
+        field: ``field(x, z, t, d=...)``, the velocities ``(v, w)`` of the state and the latent.
+        man:   the product manifold.
+        x:     (B, L, 7), the state at ``t_a``.
+        z:     (B, K), the latent at ``t_a``; K = 0: no latent.
+        t_a:   scalar, the step's start.
+        t_b:   scalar, the step's end.
+
+    Returns:
+        ``(x_b, z_b)``, the state and the latent at ``t_b``.
+    """
     dt     = t_b - t_a
     v1, w1 = field(x, z, t_a, d=dt / 2)
     v2, w2 = field(man.expmap(x, dt / 2 * v1), z + dt / 2 * w1, t_a + dt / 2, d=torch.zeros_like(dt))
@@ -66,9 +95,24 @@ def _midpoint(field, man, x, z, t_a, t_b):
 
 
 def _rk4(field, man, x, z, t_a, t_b):
-    # torchdiffeq's rk4 (the 3/8 rule) as a projection method: stages combine in the ambient space, every step ends
-    # on the manifold (through the Euclidean ODESolver the sphere factors drifted off it, shortening every later
-    # angular step). The clones keep k1..k3 alive across CUDA-graph replays.
+    """Takes one fourth-order Runge-Kutta step from ``t_a`` to ``t_b``.
+
+    torchdiffeq's rk4 (the 3/8 rule) as a projection method: the stages combine in the ambient space, every step
+    ends on the manifold (through the Euclidean ODESolver the sphere factors drifted off it, shortening every later
+    angular step). All stages are instantaneous velocities (no ``d``). The clones keep ``k1..k3`` alive across
+    CUDA-graph replays.
+
+    Args:
+        field: ``field(x, z, t, d=...)``, the velocities ``(v, w)`` of the state and the latent.
+        man:   the product manifold.
+        x:     (B, L, 7), the state at ``t_a``.
+        z:     (B, K), the latent at ``t_a``; K = 0: no latent.
+        t_a:   scalar, the step's start.
+        t_b:   scalar, the step's end.
+
+    Returns:
+        ``(x_b, z_b)``, the state and the latent at ``t_b``.
+    """
     dt     = t_b - t_a
     k1, l1 = (a.clone() for a in field(x, z, t_a))
     k2, l2 = (a.clone() for a in field(x + dt * k1 / 3, z + dt * l1 / 3, t_a + dt / 3))
@@ -103,6 +147,7 @@ def _pack_latent(x: Tensor, z: Tensor) -> Tensor:
 
 
 def _split_latent(sols: Tensor, L: int, K: int) -> tuple[Tensor, Tensor]:
+    """Splits what ``_pack_latent`` joined into the state (..., B, L, C) and the latent (..., B, K)."""
     return sols[..., :L, :], sols[..., L:, :].flatten(-2)[..., :K]
 
 

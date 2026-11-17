@@ -173,7 +173,8 @@ def _resolve_fresh(config: dict) -> ResolvedLEGOConfig:
     if "edep_excess_max_mev" in meta:   # per incoming pdgid, the data's largest E_dep - E_in: the E_dep cap's margin
         model_conf.setdefault("edep_excess_mev",
                               {int(float(p)): float(m) for p, m in meta["edep_excess_max_mev"].items()})
-    elif model_conf.get("edep_wall") and "edep_excess_mev" not in model_conf:   # a dataset older than the key
+    elif (model_conf.get("edep_margin", model_conf.get("edep_wall"))   # a dataset older than the key
+          and "edep_excess_mev" not in model_conf):
         from legofmt.data.prep import DataPrep
         set_layout(model_conf["cond_scalars"])
         f = torch.load(config["dl_conf"]["data_path"], map_location="cpu", mmap=True)[0]

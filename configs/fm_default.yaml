@@ -67,6 +67,9 @@ config:
     reflow_every: 4
     base_pretrain_batches: 9000   # base_head_lik recipe: 9000 x 16384
     base_pretrain_bs: 16384
+    edep_log_min: 1.0e-6     # the E_dep token's log scale: its floor [MeV]
+    edep_margin: true        # e-/e+/gamma: the E_dep token as the log-odds of the deposited fraction of E_in + margin
+    edep_margin_species: [11, -11, 22]
     edep_whiten: true        # the flow carries the E_dep token in units of the base head's per-event prior
     mask_conf: { p_forward: 1. }
     canon_sym: true

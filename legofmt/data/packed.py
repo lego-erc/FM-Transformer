@@ -1,10 +1,16 @@
 """Prepped datasets without the padding: each event's real tokens plus where they start.
 
-Everything but the particle tokens of a padded ``(f, m, am[, edep_layers])`` follows from
-a few per-event numbers: prefix tokens are ``[value, *prefix_token[1:]]``, ``am`` is one
-block from token 0, ``m`` is ``am`` with its first ``n_prefix + 1`` entries ``[0, 1, 0, ...]``,
-and padded tokens are ``[pad_e0, *pad_token[1:]]``. Those values are copied when packing, so
-``unpack`` gives the padded tensors back bit for bit; ``from_padded`` refuses anything else.
+Everything but the particle tokens of a padded ``(f, m, am[, edep_layers])`` follows from a few per-event numbers:
+
+```
+prefix tokens   [prefix[i, j], *prefix_token[1:]]
+am              one block of n_prefix + 1 + n_out tokens from token 0
+m               am, with its first n_prefix + 1 entries [0, 1, 0, ...]
+padded tokens   [pad_e0[i], *pad_token[1:]]
+```
+
+Those values are copied when packing, so ``unpack`` gives the padded tensors back bit for bit; ``from_padded``
+refuses anything else.
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ _NAN_TOKEN = torch.full((8,), float("nan"))
 
 
 def is_packed(obj) -> bool:
+    """Returns whether ``obj`` is a packed dataset as ``torch.load`` gives it (``PackedData.to_dict``)."""
     return isinstance(obj, dict) and obj.get("format") == PACKED_FORMAT
 
 
@@ -44,6 +51,8 @@ def _merge_tokens(tokens: list[Tensor], name: str) -> Tensor:
 
 @dataclass
 class PackedData:
+    """A prepped dataset of N events without its padding; ``unpack`` pads events back to ``L`` tokens."""
+
     prefix: Tensor         # (N, n_prefix) channel 0 of the prefix tokens
     tokens: Tensor         # (R, 8) every event's incoming and outgoing tokens, back to back
     offsets: Tensor        # (N + 1,) event i's tokens are tokens[offsets[i]:offsets[i + 1]]
@@ -57,34 +66,59 @@ class PackedData:
     @classmethod
     def from_padded(cls, f: Tensor, m: Tensor, am: Tensor, n_prefix: int,
                     edep_layers: Tensor | None = None) -> "PackedData":
+        """Packs padded tensors, refusing any that ``unpack`` would not give back bit for bit.
+
+        Args:
+            f:           (N, L, 8) float32, the features.
+            m:           (N, L) int64, the loss mask.
+            am:          (N, L) bool, the attention mask.
+            n_prefix:    the number of prefix tokens.
+            edep_layers: (N, n_layers), the per-layer E_dep, carried along.
+
+        Raises:
+            TypeError:  a tensor has another dtype.
+            ValueError: ``am`` is not one block from token 0, ``m`` does not follow from ``am``, or the prefix /
+                padded tokens are not one template outside channel 0.
+        """
         if f.dtype != torch.float32 or m.dtype != torch.int64 or am.dtype != torch.bool:
             raise TypeError(f"expected f float32, m int64, am bool; got {f.dtype}, {m.dtype}, {am.dtype}")
         N, L, _ = f.shape
         P = n_prefix
         tot = am.sum(1)
-        if not torch.equal(am, torch.arange(L) < tot[:, None]) or (tot <= P).any():
-            raise ValueError("am must be one block of at least n_prefix + 1 tokens from token 0")
-        if not torch.equal(m, _mask(am, P)):
-            raise ValueError("m is not the pattern derived from am")
+        has_pad, pad = tot < L, ~am
+
+        # the values everything but the particle tokens follows from
         prefix_token = f[0, 0].clone() if N else _NAN_TOKEN.clone()
         prefix_token[0] = float("nan")
-        if not (f[:, :P, 1:] == prefix_token[1:]).all():
-            raise ValueError("prefix tokens differ outside channel 0")
-        has_pad, pad = tot < L, ~am
         first = f[has_pad, tot[has_pad]]   # each padded event's first padded token
         pad_e0 = torch.full((N,), float("nan"))
         pad_e0[has_pad] = first[:, 0]
         pad_token = first[0].clone() if len(first) else _NAN_TOKEN.clone()
         pad_token[0] = float("nan")
+
+        # ... which it does only if
+        if not torch.equal(am, torch.arange(L) < tot[:, None]) or (tot <= P).any():
+            raise ValueError("am must be one block of at least n_prefix + 1 tokens from token 0")
+        if not torch.equal(m, _mask(am, P)):
+            raise ValueError("m is not the pattern derived from am")
+        if not (f[:, :P, 1:] == prefix_token[1:]).all():
+            raise ValueError("prefix tokens differ outside channel 0")
         if not (f[pad][:, 1:] == pad_token[1:]).all():
             raise ValueError("padded tokens differ outside channel 0")
         if not torch.equal(f[..., 0][pad], pad_e0.repeat_interleave(L - tot)):
             raise ValueError("an event's padded tokens differ in channel 0")
+
         return cls(f[:, :P, 0].clone(), f[:, P:][am[:, P:]], F.pad((tot - P).cumsum(0), (1, 0)), pad_e0,
                    pad_token, prefix_token, P, L, None if edep_layers is None else edep_layers.clone())
 
     @staticmethod
     def concat(parts: list["PackedData"]) -> "PackedData":
+        """Joins datasets event-wise, as packing their padded tensors in one go would.
+
+        Raises:
+            ValueError: the parts disagree on ``n_prefix``, ``L``, the template tokens, or on carrying
+                ``edep_layers``.
+        """
         P, L = parts[0].n_prefix, parts[0].L
         if any(p.n_prefix != P or p.L != L for p in parts):
             raise ValueError("parts disagree on n_prefix or L")
@@ -107,10 +141,12 @@ class PackedData:
 
     @property
     def n_out(self) -> Tensor:
+        """Outgoing particles per event."""
         return self.offsets.diff() - 1
 
     @property
     def incoming(self) -> Tensor:
+        """The incoming particle's token of every event, (N, 8)."""
         return self.tokens[self.offsets[:-1]]
 
     def species_counts(self, ptypes: Tensor) -> Tensor:
@@ -125,6 +161,7 @@ class PackedData:
         return torch.stack([torch.bincount(ev[pid == p], minlength=len(self)) for p in ptypes], -1)
 
     def select(self, idx: Tensor) -> "PackedData":
+        """Returns the events ``idx`` (a 1-D index, repeats allowed) as a packed dataset of their own."""
         idx = torch.as_tensor(idx, dtype=torch.long)
         lens = self.offsets[idx + 1] - self.offsets[idx]
         offsets = F.pad(lens.cumsum(0), (1, 0))
@@ -134,9 +171,13 @@ class PackedData:
                           None if self.edep_layers is None else self.edep_layers[idx])
 
     def unpack(self, idx=slice(None)) -> tuple:
-        """Pads the events ``idx`` (any index of the event axis) to full ``L``.
+        """Pads the events ``idx`` to full ``L``.
 
-        Returns ``(f, m, am[, edep_layers])``.
+        Args:
+            idx: any index of the event axis; its shape becomes the batch shape.
+
+        Returns:
+            ``(f, m, am)`` as they were packed, with ``edep_layers`` as a 4th tensor when the dataset carries it.
         """
         P, L = self.n_prefix, self.L
         start = self.offsets[:-1][idx]
@@ -171,10 +212,16 @@ class PackedData:
             self.edep_layers = out[3]
 
     def to_dict(self) -> dict:
+        """Returns the fields plus format and version: what a packed file stores."""
         return {"format": PACKED_FORMAT, "version": PACKED_VERSION, **vars(self)}
 
     @classmethod
     def from_dict(cls, d: dict) -> "PackedData":
+        """Constructs the dataset from a packed file's dict.
+
+        Raises:
+            ValueError: not a packed file of this version.
+        """
         if not is_packed(d) or d.get("version") != PACKED_VERSION:
             raise ValueError(f"not a {PACKED_FORMAT} v{PACKED_VERSION} file: "
                              f"format={d.get('format')!r} version={d.get('version')!r}")
