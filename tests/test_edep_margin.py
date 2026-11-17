@@ -1,4 +1,4 @@
-"""model_conf.edep_wall: the E_dep TOKEN encoded as the log-odds of the deposited fraction of a per-species cap.
+"""model_conf.edep_margin: the E_dep TOKEN encoded as the log-odds of the deposited fraction of a per-species cap.
 
     E_cap = E_in + margin(species),  f = E_dep / E_cap,  z = log E_dep - log(E_cap - E_dep)
     u = (z - z_lo) / (z_hi - z_lo),  z_lo = log(eps / E_cap),  z_hi = log(E_cap / eps_missing)
@@ -24,8 +24,8 @@ from legofmt.mod_comps.config import resolve_legoltng_config
 from test_helpers import MANIFOLD, _fake_batch, _fill_edep, _gun_cond, _save_flow_ckpt, _save_mult_ckpt, _tiny_config
 
 
-def _prep(wall: bool = True, **model_conf) -> DataPrep:
-    return DataPrep(_tiny_config(edep_log_min=1e-6, edep_wall=wall, max_energy=2000.0, **model_conf)["config"])
+def _prep(margin: bool = True, **model_conf) -> DataPrep:
+    return DataPrep(_tiny_config(edep_log_min=1e-6, edep_margin=margin, max_energy=2000.0, **model_conf)["config"])
 
 
 @pytest.fixture
@@ -33,18 +33,18 @@ def gen(tmp_path) -> GenerateOut:
     return GenerateOut(str(_save_flow_ckpt(tmp_path, LEGOLtng)), str(_save_mult_ckpt(tmp_path)), device="cpu")
 
 
-def test_wall_species_keeps_the_log_token_for_the_others() -> None:
-    """edep_wall_species [11, -11, 22]: e-/e+/gamma tokens take the wall, every other species the log token -- the wall
-    resolves a contained EM shower near E_in but its prior misplaces a hadron's deposit."""
-    some, every, none = _prep(edep_wall_species=[11, -11, 22]), _prep(), _prep(wall=False)
+def test_margin_species_keeps_the_log_token_for_the_others() -> None:
+    """edep_margin_species [11, -11, 22]: e-/e+/gamma tokens take the margin token, every other species the log
+    token -- the margin token resolves a contained EM shower near E_in but its prior misplaces a hadron's deposit."""
+    some, every, none = _prep(edep_margin_species=[11, -11, 22]), _prep(), _prep(margin=False)
     e_in, E = torch.full((4,), 1000.0), torch.tensor([980.0, 980.0, 225.0, 225.0])
     pid = torch.tensor([11.0, 22.0, 2212.0, 2112.0])
     u = some.norm_edep_token(E, e_in, pid)
     torch.testing.assert_close(u[:2], every.norm_edep_token(E, e_in, pid)[:2])
     torch.testing.assert_close(u[2:], none.norm_edep_token(E, e_in, pid)[2:])
     torch.testing.assert_close(some.denorm_edep_token(u, e_in, pid), E, rtol=2e-4, atol=0)
-    assert some.edep_wall_mask(pid).tolist() == [True, True, False, False]
-    assert every.edep_wall_mask(pid).all() and not none.edep_wall_mask(pid).any()
+    assert some.edep_margin_mask(pid).tolist() == [True, True, False, False]
+    assert every.edep_margin_mask(pid).all() and not none.edep_margin_mask(pid).any()
 
 
 def test_round_trip_below_the_cap() -> None:
@@ -70,10 +70,10 @@ def test_zero_is_zero_and_the_cap_is_the_edge() -> None:
 
 def test_the_contained_peak_is_wide_in_the_new_channel() -> None:
     """The 1 GeV e- peak (0.96 - 0.995 E_in) is ~0.0013 wide on the old log token and should span > 0.05 here."""
-    wall, old = _prep(), _prep(wall=False)
+    new, old = _prep(), _prep(margin=False)
     e_in, pid = torch.tensor([1000.0, 1000.0]), torch.tensor([11.0, 11.0])
     E = torch.tensor([960.0, 995.0])
-    u = wall.norm_edep_token(E, e_in, pid)
+    u = new.norm_edep_token(E, e_in, pid)
     assert (u[1] - u[0]) > 0.05
     u_old = old.norm_edep_token(E, e_in, pid)
     assert (u_old[1] - u_old[0]) < 0.002
@@ -94,18 +94,18 @@ def test_pion_margin_allows_absorption_above_e_in() -> None:
     torch.testing.assert_close(dp.denorm_edep_token(dp.norm_edep_token(E, e_in, pid), e_in, pid), E, rtol=2e-4, atol=0)
 
 
-def test_without_the_wall_the_token_is_the_old_scale() -> None:
-    dp = _prep(wall=False)
+def test_without_the_margin_the_token_is_the_old_scale() -> None:
+    dp = _prep(margin=False)
     E, e_in, pid = torch.tensor([0.0, 3.0, 900.0]), torch.full((3,), 1000.0), torch.full((3,), 11.0)
     torch.testing.assert_close(dp.norm_edep_token(E, e_in, pid), dp.norm_edep(E))
     torch.testing.assert_close(dp.denorm_edep_token(dp.norm_edep(E), e_in, pid), dp.denorm_edep(dp.norm_edep(E)))
 
 
-@pytest.mark.parametrize("wall", [True, False])
-def test_norm_e_encodes_the_token_from_the_raw_incoming_energy(wall: bool) -> None:
+@pytest.mark.parametrize("margin", [True, False])
+def test_norm_e_encodes_the_token_from_the_raw_incoming_energy(margin: bool) -> None:
     """Loading a post-energy-split file: the incoming token holds E_in in MeV and the E_dep token MeV; norm_e must
     encode the token with E_in BEFORE it rewrites the incoming energy as its scalar. Layers keep the old scale."""
-    dp = _prep(wall)
+    dp = _prep(margin)
     ds = _fake_batch()
     f = ds.f.full.clone()
     _F(f).in_cc[..., 0, 0] = 1000.0
@@ -119,10 +119,10 @@ def test_norm_e_encodes_the_token_from_the_raw_incoming_energy(wall: bool) -> No
 
 
 @torch.no_grad()
-def test_generate_out_keeps_the_wall_token_and_skips_the_mev_clamp(gen, monkeypatch) -> None:
-    """With the wall the token is bounded by the cap by construction: GenerateOut must not apply the old MeV clamp
+def test_generate_out_keeps_the_margin_token_and_skips_the_mev_clamp(gen, monkeypatch) -> None:
+    """A margin token is bounded by the cap by construction: GenerateOut must not apply the old MeV clamp
     (which works on the old scale and would rewrite u), and the token decodes to <= E_cap."""
-    gen.dp.edep_wall = True
+    gen.dp.edep_margin = True
     monkeypatch.setattr(gen.model, "forward", _fill_edep(1.0))
     sols, _, _ = gen(_gun_cond(22, batch=64))
     token = _F(sols).edep
@@ -135,8 +135,8 @@ def test_generate_out_keeps_the_wall_token_and_skips_the_mev_clamp(gen, monkeypa
 @torch.no_grad()
 def test_g4_api_hands_out_the_log_scale_token(gen, monkeypatch) -> None:
     """Callers of gen_model_w_g4_args (lego-eval) decode its E_dep with the checkpoint's edep_log_min, i.e. as the
-    log token: a wall model re-encodes its token on that scale there, or every MeV they report is wrong."""
-    gen.dp.edep_wall = True
+    log token: a margin model re-encodes its token on that scale there, or every MeV they report is wrong."""
+    gen.dp.edep_margin = True
     e_in, pid, E = 150.0, 22, 140.0
     u = float(gen.dp.norm_edep_token(torch.tensor([E]), torch.tensor([e_in]), torch.tensor([float(pid)])))
     monkeypatch.setattr(gen.model, "forward", _fill_edep(u))
@@ -152,9 +152,9 @@ def test_g4_api_hands_out_the_log_scale_token(gen, monkeypatch) -> None:
 @torch.no_grad()
 @pytest.mark.parametrize("pid, clamped", [(22, False), (2212, True)])
 def test_the_mev_clamp_applies_to_the_log_token_species_only(gen, monkeypatch, pid, clamped) -> None:
-    """With edep_wall_species [11, -11, 22] a photon's wall token is capped by construction and left alone, while a
+    """With edep_margin_species [11, -11, 22] a photon's margin token is capped by construction and left alone, while a
     proton's log token is still clamped at E_in (+ its _EDEP_EXCESS_MEV, 0 for protons)."""
-    gen.dp.edep_wall, gen.dp.edep_wall_species = True, [11, -11, 22]
+    gen.dp.edep_margin, gen.dp.edep_margin_species = True, [11, -11, 22]
     monkeypatch.setattr(gen.model, "forward", _fill_edep(1.0))
     sols, _, _ = gen(_gun_cond(pid, batch=64))
     token = _F(sols).edep
@@ -169,7 +169,7 @@ def test_the_mev_clamp_applies_to_the_log_token_species_only(gen, monkeypatch, p
 # --- data-driven margin: model_conf.edep_excess_mev ---------------------------------------------------------------
 # Per incoming species, the largest E_dep - E_in [MeV] in the training data (meta.json edep_excess_max_mev, written by
 # gen_data.py; for an older dataset computed from data_prepped.pt at fresh training). It replaces the hand-set
-# EDEP_WALL_MARGIN_MEV / _EDEP_EXCESS_MEV; checkpoints without it keep the constants.
+# HAND_SET_MARGIN_MEV / _EDEP_EXCESS_MEV; checkpoints without it keep the constants.
 
 def _raw_file(e_in, pid, edep) -> torch.Tensor:
     """A stored (pre-norm_e) tensor: incoming kinetic energy and E_dep in MeV."""
@@ -197,16 +197,24 @@ def test_the_cap_is_e_in_plus_the_data_excess() -> None:
     torch.testing.assert_close(dp.denorm_edep_token(u, e_in, pid)[1], E[1], rtol=2e-4, atol=0)
 
 
-def test_a_walled_species_missing_from_the_data_is_an_error() -> None:
+def test_the_old_key_names_still_select_the_margin_token() -> None:
+    """``edep_wall`` / ``edep_wall_species`` were the keys' names until 11.2026; older configs and checkpoints carry
+    them."""
+    conf = _tiny_config(edep_log_min=1e-6, edep_wall=True, edep_wall_species=[11], max_energy=2000.0)["config"]
+    old = DataPrep(conf)
+    assert old.edep_margin and old.edep_margin_species == [11]
+
+
+def test_a_margin_species_missing_from_the_data_is_an_error() -> None:
     with pytest.raises(ValueError, match="edep_excess_mev"):
-        _prep(edep_excess_mev={11: 0.0}, edep_wall_species=[11, 22])
+        _prep(edep_excess_mev={11: 0.0}, edep_margin_species=[11, 22])
 
 
 def test_fresh_training_takes_the_excess_from_meta_or_the_data(tmp_path) -> None:
     meta = {"ntokens": 8, "particles": [11.0, 22.0, 2212.0], "max_energy": 1000.0, "cutoff_mev": 10.0,
             "cond_scalars": ["Density"], "energy_kin": True}
     cfg = {"dl_conf": {"lds_args": {"data": str(tmp_path), "cutoff_mev": 10.0}, "bs": 2},
-           "model_conf": {"manifold": MANIFOLD, "max_energy": 1000.0, "base_pretrain_batches": 0, "edep_wall": True,
+           "model_conf": {"manifold": MANIFOLD, "max_energy": 1000.0, "base_pretrain_batches": 0, "edep_margin": True,
                           "model_args": {"h_dim": 8, "in_dim": 7, "nlayers": 1, "nhead": 1}},
            "opt_conf": {"opt": "schedulefree", "lr": 1e-3}}
     _prep()
