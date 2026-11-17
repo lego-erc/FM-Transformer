@@ -49,8 +49,8 @@ def test_load_puts_edep_layers_on_the_edep_scale(tmp_path, cfg) -> None:
     torch.save((d.f.full, d.m.full, d.am.full, d.edep_layers), tmp_path / "data_prepped.pt")
     prep = DataPrep(cfg)
     loaded = load_dataset(data=str(tmp_path / "data_prepped.pt"), prep=prep).data
-    torch.testing.assert_close(loaded.edep_layers, prep.norm_edep(d.edep_layers))
-    torch.testing.assert_close(loaded.f.edep, prep.norm_edep(d.f.edep))
+    torch.testing.assert_close(loaded.edep_layers, prep.norm_edep_layer(d.edep_layers))
+    torch.testing.assert_close(loaded.f.edep, prep.norm_edep_layer(d.f.edep))
 
 
 def test_datastruct_keeps_edep_layers_aligned() -> None:

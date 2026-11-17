@@ -45,7 +45,7 @@ def _balance_energy(sols: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor
     E = torch.where(live, pen.to_mev(e.double().nan_to_num(), e_in_n), 0.0)
     tot = E.sum(-1, keepdim=True)
     pair = 1.022 * ((live & (pid == -11)).sum(-1, keepdim=True) - (pid_in == -11).long())
-    budget = (e_in - dp.denorm_edep_token(s.edep.double(), e_in[:, 0], pid_in[:, 0])[:, None] - pair).clamp_min(0.0)
+    budget = (e_in - dp.denorm_edep_margin(s.edep.double(), e_in[:, 0], pid_in[:, 0])[:, None] - pair).clamp_min(0.0)
     em = ((pid_in.abs() == 11) | (pid_in == 22)) & (e_in_n > 1e-6)  # at the cutoff the log ratio is 0/0
     lead_e, lead = E.max(-1, keepdim=True)
     is_lead = F.one_hot(lead[:, 0], E.shape[-1]).bool()
@@ -53,7 +53,7 @@ def _balance_energy(sols: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor
     surv = ~em & (e_in_n > 1e-6) & (pid.gather(-1, lead) == pid_in) & ((lead_e > 0.9 * e_in) | em_rest)
     w = torch.where(em, E / tot, surv * is_lead)                    # who takes the residual budget - tot
     absorbed = (em & (tot == 0))[:, 0]                              # nothing leaves: the deposit is the budget
-    s.edep[absorbed] = dp.norm_edep_token((e_in - pair)[:, 0], e_in[:, 0], pid_in[:, 0])[absorbed].to(s.edep.dtype)
+    s.edep[absorbed] = dp.norm_edep_margin((e_in - pair)[:, 0], e_in[:, 0], pid_in[:, 0])[absorbed].to(s.edep.dtype)
     e.copy_(torch.where(w > 0, 1 - pen.to_scalar_e(E + w * (budget - tot)) / e_in_n, e.double()))
 
 
@@ -190,7 +190,7 @@ class GenerateOut(torch.nn.Module):
             self.edep_layers = sols.new_zeros(sols.shape[0], ae.n_layers)
             run = ~pt_mask
             if run.any():
-                self.edep_layers[run] = ae.sample(self.model._edep_latents, self.dp.denorm_edep_token(
+                self.edep_layers[run] = ae.sample(self.model._edep_latents, self.dp.denorm_edep_margin(
                     _F(sols).edep[run].float(), e_in[run].float(), pid_in[run]), **_rng_kw(rng, run))
         return sols, mask, attn_mask
 
@@ -204,7 +204,7 @@ class GenerateOut(torch.nn.Module):
         log_token = ~self.dp.edep_margin_mask(pid_in)
         for pid, excess in (self.dp.edep_excess_mev or _EDEP_EXCESS_MEV).items():
             hit = (pid_in == pid) & log_token
-            edep = torch.where(hit, torch.minimum(edep, self.dp.norm_edep(e_in + excess).to(edep)), edep)
+            edep = torch.where(hit, torch.minimum(edep, self.dp.norm_edep_layer(e_in + excess).to(edep)), edep)
         return edep
 
     def _model_cond(self, cond: torch.Tensor, prepped: bool) -> torch.Tensor:
@@ -233,8 +233,8 @@ class GenerateOut(torch.nn.Module):
 
         Returns:
             ``{per_event, per_particle, per_voxel}`` in *model* normalisation: ``per_event["E_dep"]`` is the normalised
-                scalar, not MeV, always on the log/linear ``norm_edep`` scale that callers decode with ``edep_log_min``
-                (a ``model_conf.edep_margin`` token is re-encoded on it here).
+                scalar, not MeV, always on the ``norm_edep_layer`` scale (log, or linear) that callers decode with
+                ``edep_log_min`` (a ``model_conf.edep_margin`` token is re-encoded on it here).
         """
         sols, _, _ = self(self._g4_cond(n, pos, mom, energy, density, size, pdgids, Z, A), passthrough=passthrough,
                           **_rng_kw(rng))
@@ -242,7 +242,7 @@ class GenerateOut(torch.nn.Module):
         edep = s.edep
         if self.dp.edep_margin:
             e_in = self.dp.pen.from_scalar(s.in_cc[:, 0, 1:4], s.in_cc[:, 0, 0:1]).norm(dim=-1)
-            edep = self.dp.norm_edep(self.dp.denorm_edep_token(edep.double(), e_in.double(),
+            edep = self.dp.norm_edep_layer(self.dp.denorm_edep_margin(edep.double(), e_in.double(),
                                                              s.in_p[:, 0, -1])).to(edep.dtype)
         per_event = {"E_dep": edep}
         per_event.update({k: s.cond(k) for k in self.cond_names})
@@ -252,7 +252,7 @@ class GenerateOut(torch.nn.Module):
             "per_voxel": {"E_dep": sols.new_empty(sols.shape[0], 0, 4)},
         }
         if self.edep_layers is not None:  # geom/slab_calo's own group, in model normalisation like E_dep
-            out["per_slab"] = {"E_dep": self.dp.norm_edep(self.edep_layers)}
+            out["per_slab"] = {"E_dep": self.dp.norm_edep_layer(self.edep_layers)}
         return out
 
     def passthrough_prob_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None):

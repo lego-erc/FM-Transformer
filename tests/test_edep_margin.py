@@ -39,10 +39,10 @@ def test_margin_species_keeps_the_log_token_for_the_others() -> None:
     some, every, none = _prep(edep_margin_species=[11, -11, 22]), _prep(), _prep(margin=False)
     e_in, E = torch.full((4,), 1000.0), torch.tensor([980.0, 980.0, 225.0, 225.0])
     pid = torch.tensor([11.0, 22.0, 2212.0, 2112.0])
-    u = some.norm_edep_token(E, e_in, pid)
-    torch.testing.assert_close(u[:2], every.norm_edep_token(E, e_in, pid)[:2])
-    torch.testing.assert_close(u[2:], none.norm_edep_token(E, e_in, pid)[2:])
-    torch.testing.assert_close(some.denorm_edep_token(u, e_in, pid), E, rtol=2e-4, atol=0)
+    u = some.norm_edep_margin(E, e_in, pid)
+    torch.testing.assert_close(u[:2], every.norm_edep_margin(E, e_in, pid)[:2])
+    torch.testing.assert_close(u[2:], none.norm_edep_margin(E, e_in, pid)[2:])
+    torch.testing.assert_close(some.denorm_edep_margin(u, e_in, pid), E, rtol=2e-4, atol=0)
     assert some.edep_margin_mask(pid).tolist() == [True, True, False, False]
     assert every.edep_margin_mask(pid).all() and not none.edep_margin_mask(pid).any()
 
@@ -55,16 +55,16 @@ def test_round_trip_below_the_cap() -> None:
         cap = e_in + {11: 0.0, 2212: 0.0, 211: 200.0}[pid]
         for frac in (1e-6, 1e-3, 0.3, 0.9, 0.99, 0.999):
             E = cap * frac
-            back = dp.denorm_edep_token(dp.norm_edep_token(E, e_in, p), e_in, p)
+            back = dp.denorm_edep_margin(dp.norm_edep_margin(E, e_in, p), e_in, p)
             torch.testing.assert_close(back, E, rtol=2e-4, atol=0)
 
 
 def test_zero_is_zero_and_the_cap_is_the_edge() -> None:
     dp = _prep()
     e_in, pid = torch.tensor([1000.0, 1000.0, 1000.0]), torch.tensor([11.0, 11.0, 11.0])
-    u = dp.norm_edep_token(torch.tensor([0.0, 1000.0, 1300.0]), e_in, pid)
+    u = dp.norm_edep_margin(torch.tensor([0.0, 1000.0, 1300.0]), e_in, pid)
     assert u[0] == 0 and u[1] == 1 and u[2] == 1                     # zero stays the sentinel's 0; >= cap -> edge
-    E = dp.denorm_edep_token(torch.tensor([-0.1, 1.0, 1.7]), e_in, pid)
+    E = dp.denorm_edep_margin(torch.tensor([-0.1, 1.0, 1.7]), e_in, pid)
     assert E[0] == 0 and (E[1:] <= 1000.0).all() and (E[1:] > 999.99).all()
 
 
@@ -73,16 +73,16 @@ def test_the_contained_peak_is_wide_in_the_new_channel() -> None:
     new, old = _prep(), _prep(margin=False)
     e_in, pid = torch.tensor([1000.0, 1000.0]), torch.tensor([11.0, 11.0])
     E = torch.tensor([960.0, 995.0])
-    u = new.norm_edep_token(E, e_in, pid)
+    u = new.norm_edep_margin(E, e_in, pid)
     assert (u[1] - u[0]) > 0.05
-    u_old = old.norm_edep_token(E, e_in, pid)
+    u_old = old.norm_edep_margin(E, e_in, pid)
     assert (u_old[1] - u_old[0]) < 0.002
 
 
 def test_small_deposits_keep_a_log_scale() -> None:
     dp = _prep()
     e_in, pid = torch.full((3,), 1000.0), torch.full((3,), 2212.0)
-    u = dp.norm_edep_token(torch.tensor([1e-3, 1e-2, 1e-1]), e_in, pid)
+    u = dp.norm_edep_margin(torch.tensor([1e-3, 1e-2, 1e-1]), e_in, pid)
     torch.testing.assert_close(u[1] - u[0], u[2] - u[1], rtol=1e-3, atol=0)   # equal steps per decade
 
 
@@ -90,15 +90,17 @@ def test_pion_margin_allows_absorption_above_e_in() -> None:
     dp = _prep()
     e_in, pid = torch.tensor([500.0]), torch.tensor([211.0])
     E = torch.tensor([640.0])                                         # 140 MeV above E_in: pion absorption
-    assert dp.norm_edep_token(E, e_in, pid) < 1
-    torch.testing.assert_close(dp.denorm_edep_token(dp.norm_edep_token(E, e_in, pid), e_in, pid), E, rtol=2e-4, atol=0)
+    assert dp.norm_edep_margin(E, e_in, pid) < 1
+    u = dp.norm_edep_margin(E, e_in, pid)
+    torch.testing.assert_close(dp.denorm_edep_margin(u, e_in, pid), E, rtol=2e-4, atol=0)
 
 
 def test_without_the_margin_the_token_is_the_old_scale() -> None:
     dp = _prep(margin=False)
     E, e_in, pid = torch.tensor([0.0, 3.0, 900.0]), torch.full((3,), 1000.0), torch.full((3,), 11.0)
-    torch.testing.assert_close(dp.norm_edep_token(E, e_in, pid), dp.norm_edep(E))
-    torch.testing.assert_close(dp.denorm_edep_token(dp.norm_edep(E), e_in, pid), dp.denorm_edep(dp.norm_edep(E)))
+    torch.testing.assert_close(dp.norm_edep_margin(E, e_in, pid), dp.norm_edep_layer(E))
+    u = dp.norm_edep_layer(E)
+    torch.testing.assert_close(dp.denorm_edep_margin(u, e_in, pid), dp.denorm_edep_layer(u))
 
 
 @pytest.mark.parametrize("margin", [True, False])
@@ -113,9 +115,9 @@ def test_norm_e_encodes_the_token_from_the_raw_incoming_energy(margin: bool) -> 
     _F(f).edep[:] = torch.tensor([980.0, 4.0])
     layers = torch.tensor([[500.0, 480.0], [3.0, 1.0]])
     out_f, _, _, out_layers = dp.norm_e((f, ds.m.full, ds.am.full, layers))
-    expect = dp.norm_edep_token(torch.tensor([980.0, 4.0]), torch.full((2,), 1000.0), torch.full((2,), 11.0))
+    expect = dp.norm_edep_margin(torch.tensor([980.0, 4.0]), torch.full((2,), 1000.0), torch.full((2,), 11.0))
     torch.testing.assert_close(_F(out_f).edep, expect)
-    torch.testing.assert_close(out_layers, dp.norm_edep(layers))
+    torch.testing.assert_close(out_layers, dp.norm_edep_layer(layers))
 
 
 @torch.no_grad()
@@ -128,7 +130,7 @@ def test_generate_out_keeps_the_margin_token_and_skips_the_mev_clamp(gen, monkey
     token = _F(sols).edep
     flowed = token > 0
     assert flowed.any() and (token[flowed] == 1.0).all()
-    E = gen.dp.denorm_edep_token(token, torch.full_like(token, 150.0), torch.full_like(token, 22.0))
+    E = gen.dp.denorm_edep_margin(token, torch.full_like(token, 150.0), torch.full_like(token, 22.0))
     assert (E[flowed] <= 150.0).all() and (E[flowed] > 149.99).all()
 
 
@@ -138,7 +140,7 @@ def test_g4_api_hands_out_the_log_scale_token(gen, monkeypatch) -> None:
     log token: a margin model re-encodes its token on that scale there, or every MeV they report is wrong."""
     gen.dp.edep_margin = True
     e_in, pid, E = 150.0, 22, 140.0
-    u = float(gen.dp.norm_edep_token(torch.tensor([E]), torch.tensor([e_in]), torch.tensor([float(pid)])))
+    u = float(gen.dp.norm_edep_margin(torch.tensor([E]), torch.tensor([e_in]), torch.tensor([float(pid)])))
     monkeypatch.setattr(gen.model, "forward", _fill_edep(u))
     out = gen.gen_model_w_g4_args(16, torch.tensor([[0.0, 0.0, -1.0]]), torch.tensor([[0.0, 0.0, 1.0]]),
                                   torch.tensor([e_in]), torch.tensor([1.0]), torch.tensor([1.0]), torch.tensor([pid]))
@@ -146,7 +148,8 @@ def test_g4_api_hands_out_the_log_scale_token(gen, monkeypatch) -> None:
     assert token.shape == out["per_particle"]["Outgoing"].shape[:1]      # one value per event
     flowed = token > 0
     assert flowed.any()
-    torch.testing.assert_close(gen.dp.denorm_edep(token[flowed]), torch.full_like(token[flowed], E), rtol=1e-3, atol=0)
+    torch.testing.assert_close(gen.dp.denorm_edep_layer(token[flowed]), torch.full_like(token[flowed], E),
+                               rtol=1e-3, atol=0)
 
 
 @torch.no_grad()
@@ -161,7 +164,7 @@ def test_the_mev_clamp_applies_to_the_log_token_species_only(gen, monkeypatch, p
     flowed = token > 0
     assert flowed.any()
     if clamped:
-        torch.testing.assert_close(token[flowed], gen.dp.norm_edep(torch.full_like(token[flowed], 150.0)))
+        torch.testing.assert_close(token[flowed], gen.dp.norm_edep_layer(torch.full_like(token[flowed], 150.0)))
     else:
         assert (token[flowed] == 1.0).all()
 
@@ -192,9 +195,9 @@ def test_the_cap_is_e_in_plus_the_data_excess() -> None:
     dp, const = _prep(edep_excess_mev={2112: 2.0, 211: 150.0}), _prep()
     e_in, pid = torch.tensor([500.0, 500.0]), torch.tensor([2112.0, 211.0])
     E = torch.tensor([502.0, 640.0])
-    u = dp.norm_edep_token(E, e_in, pid)
-    assert u[0] == 1 and const.norm_edep_token(E, e_in, pid)[0] < 1
-    torch.testing.assert_close(dp.denorm_edep_token(u, e_in, pid)[1], E[1], rtol=2e-4, atol=0)
+    u = dp.norm_edep_margin(E, e_in, pid)
+    assert u[0] == 1 and const.norm_edep_margin(E, e_in, pid)[0] < 1
+    torch.testing.assert_close(dp.denorm_edep_margin(u, e_in, pid)[1], E[1], rtol=2e-4, atol=0)
 
 
 def test_the_old_key_names_still_select_the_margin_token() -> None:
@@ -237,4 +240,4 @@ def test_the_mev_clamp_uses_the_data_excess(gen, monkeypatch) -> None:
     token = _F(sols).edep
     flowed = token > 0
     assert flowed.any()
-    torch.testing.assert_close(token[flowed], gen.dp.norm_edep(torch.full_like(token[flowed], 180.0)))
+    torch.testing.assert_close(token[flowed], gen.dp.norm_edep_layer(torch.full_like(token[flowed], 180.0)))

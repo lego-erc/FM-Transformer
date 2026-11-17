@@ -1,4 +1,4 @@
-"""``DataPrep``: raw MeV particles -> the model's normalised tokens.
+"""``DataPrep``: raw MeV particles -> the model's tokens, and E_dep to and from its scales.
 
 A raw particle is ``[E_kin, p (3), x (3), pdgid]`` (MeV, mm). ``prep`` writes what a dataset file stores; ``norm_e``
 puts the two channels that depend on ``max_energy`` on the model scale when the file is loaded, so a dataset is
@@ -10,23 +10,21 @@ energy     incoming   e_in [MeV]  --norm_e-->  log(e_in / cutoff) / log(max_ener
 momentum              p / |p|
 position              direction of x / cuboid_dim             incoming: x ray-traced onto the cube first
 
-E_dep      log scale      u = log(edep / e_min) / log(max_energy / e_min)        e_min = edep_log_min
-           margin token   z = log(edep) - log(cap - edep)                        cap  = e_in + margin(species)
+E_dep      layer scale    u = log(edep / e_min) / log(max_energy / e_min)        e_min = edep_log_min
+           margin scale   z = logit(edep / cap) = log(edep) - log(cap - edep)    cap  = e_in + margin(species)
                           u = (z - z_lo) / (z_hi - z_lo)                         z_lo = log(e_min / cap)
                                                                                  z_hi = log(cap / 1e-3 MeV)
 ```
 
-Every channel lands in [0, 1]. The margin token (``model_conf.edep_margin``) is the log-odds of the deposited
-fraction of the cap: a small deposit keeps a log scale, and near the cap the channel resolves the missing energy
-``cap - edep``, so a contained shower's narrow peak below ``e_in`` becomes wide. ``margin(species)`` is the training
-data's largest ``edep - e_in`` (``model_conf.edep_excess_mev``). An incoming species not listed in
-``model_conf.edep_margin_species`` keeps the log scale, and so do the per-layer deposits.
+Every channel lands in [0, 1]. The E_dep token takes the margin scale (``model_conf.edep_margin``): the log-odds of
+the deposited fraction of the cap. A small deposit keeps a log scale, and near the cap the channel resolves the
+missing energy ``cap - edep``, so a contained shower's narrow peak below ``e_in`` becomes wide. ``margin(species)`` is
+the training data's largest ``edep - e_in`` (``model_conf.edep_excess_mev``). The per-layer deposits, and the token of
+an incoming species not in ``model_conf.edep_margin_species``, take the layer scale.
 
-``DataPrep`` takes a full config, or the flat dict of ``scripts/gen_data.py`` and ``MultLoader`` (without a manifold:
-it only calls ``norm_e``). Superseded: the linear E_dep scale and hand-set margins (:mod:`legofmt.legacy.norm`),
-``energy_kin: false`` and ``proj_ray: false`` (one line each in ``cc_trafo``).
+Superseded: the linear E_dep scale and hand-set margins (:mod:`legofmt.legacy.norm`), ``energy_kin: false`` and
+``proj_ray: false`` (one line each in ``cc_trafo``).
 """
-
 
 import torch
 import torch.nn.functional as F
@@ -39,28 +37,31 @@ from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.legacy.norm import HAND_SET_MARGIN_MEV, denorm_edep_linear, norm_edep_linear
 from legofmt.mod_comps.config import build_manifold
 
-_MISSING_MEV = 1e-3     # the smallest missing energy cap - edep the margin token resolves
-_TINY        = 1e-300   # holds the margin token's two logs finite at edep = 0 and edep = cap
+_MISSING_MEV = 1e-3   # the smallest missing energy cap - edep the margin scale resolves
 
 
 class DataPrep:
-    """Converts raw MeV particles to the model's tokens (``prep``, ``norm_e``), and E_dep to and from its scales."""
+    """Converts raw MeV particles to the model's tokens (``prep``, ``norm_e``), and E_dep to and from its scales.
 
-    def __init__(self, config):
+    Args:
+        config: a full config, or the flat dict of ``scripts/gen_data.py`` and ``MultModel`` (``MultModel`` gives no
+            manifold: it only calls ``norm_e``).
+    """
+
+    def __init__(self, config: dict):
         config = config.get("config", config)
         if "model_conf" in config:   # a full config
             conf = config["model_conf"]
+            cutoff_mev, self.proj_ray = config["dl_conf"]["lds_args"].get("cutoff_mev"), conf.get("proj_ray", True)
             self.manifold = build_manifold(conf["manifold"])
-            self.proj_ray = conf.get("proj_ray", True)
-            cutoff_mev = config["dl_conf"]["lds_args"].get("cutoff_mev")
-            max_energy = conf["max_energy"]
-        else:                        # the flat dict: only cc_trafo needs the manifold, MultLoader has none to give
+        else:                        # the flat dict
             conf = config
+            cutoff_mev, self.proj_ray = conf.get("cutoff_mev"), conf.get("proj_ray")
             self.manifold = build_manifold(conf["manifold"]) if conf.get("manifold") else None
-            self.proj_ray = conf.get("proj_ray")
-            cutoff_mev = conf.get("cutoff_mev")
-            max_energy = conf.get("max_energy")
+        self.pen = EnergyProjections(cutoff_mev=cutoff_mev, max_energy=conf.get("max_energy"))
+        self.ppa = CubeTrace(conf.get("cuboid_dim"))
         self.energy_kin = conf.get("energy_kin", True)
+
         self.edep_log_min = conf.get("edep_log_min")
         self.edep_margin = conf.get("edep_margin", conf.get("edep_wall", False))                   # edep_wall*: the
         self.edep_margin_species = conf.get("edep_margin_species", conf.get("edep_wall_species"))  # keys until 11.2026
@@ -70,9 +71,7 @@ class DataPrep:
             if missing:
                 raise ValueError(f"edep_margin_species {sorted(missing)} have no entry in model_conf.edep_excess_mev: "
                                  "no such incoming species in the training data, so no cap")
-        set_layout(conf.get("cond_scalars", ("Density",)))
-        self.pen = EnergyProjections(cutoff_mev=cutoff_mev, max_energy=max_energy)
-        self.ppa = CubeTrace(conf.get("cuboid_dim"))
+        set_layout(conf.get("cond_scalars", ("Density",)))   # process-global
 
     def __call__(self, batch: tuple) -> tuple:
         return self.prep(batch)
@@ -87,35 +86,27 @@ class DataPrep:
         load time.
 
         Args:
-            batch: ``(cc_ext, mask, attn_mask, data_add)`` as ``GetLEGOData`` returns it: (B, 1 + n_out, 8) raw
-                particles, the incoming one first, and the per-event scalars.
+            batch: ``(particles, m, am, per_event)`` as ``GetLEGOData`` returns it: (B, 1 + n_out, 8) raw particles,
+                the incoming one first, their masks, and the per-event scalars.
 
         Returns:
-            ``(f, mask, attn_mask)``, with the per-layer E_dep [MeV] as a 4th tensor when ``data_add`` carries it.
+            ``(f, m, am)``, with the per-layer E_dep [MeV] as a 4th tensor when ``per_event`` carries it.
         """
-        cc_ext, mask, attn_mask, data_add = batch
-        e_kin = cc_ext[..., 0:1] if self.energy_kin else None
-        model_in = self.cc_trafo(cc_ext[..., 1:7], e_kin=e_kin)
-        cc_ext = torch.cat((model_in, cc_ext[..., 7:]), dim=-1)
-        return self.format_add((cc_ext, mask, attn_mask, data_add))
+        particles, m, am, per_event = batch
+        e_kin = particles[..., 0:1] if self.energy_kin else None
+        tokens = torch.cat((self.cc_trafo(particles[..., 1:7], e_kin=e_kin), particles[..., 7:]), dim=-1)
+        return self.format_add((tokens, m, am, per_event))
 
     @torch.no_grad()
     def cc_trafo(self, cc: Tensor, e_kin: Tensor | None = None) -> Tensor:
-        """Converts MeV momenta / positions to (energy, unit momentum direction, unit position direction).
-
-        ```
-        energy     incoming   e_in [MeV]
-                   outgoing   1 - log(e_out / cutoff) / log(e_in / cutoff)
-        momentum              p / |p|
-        position              direction of x / cuboid_dim: the point on the unit cube the cuboid maps to
-        ```
+        """Converts MeV momenta and positions to (energy, unit momentum direction, unit position direction).
 
         Args:
             cc:    (B, 1 + n_out, 6), momentum and position per particle, the incoming one first; NaN is padding.
             e_kin: (B, 1 + n_out, 1), Geant4's recorded kinetic energy [MeV].
 
         Returns:
-            (B, 1 + n_out, 7), on the manifold.
+            (B, 1 + n_out, 7), on the manifold; the incoming energy stays in MeV.
         """
         mom, pos = cc.nan_to_num(1).split(3, -1)
         e_mev = (e_kin.nan_to_num(1) if e_kin is not None
@@ -133,31 +124,29 @@ class DataPrep:
 
     @torch.no_grad()
     def format_add(self, batch: tuple) -> tuple:
-        """Prepends the conditioning-scalar tokens and the generated E_dep token (the layout of ``struct.py``).
+        """Prepends the prefix tokens: the conditioning scalars and the generated E_dep (the layout of ``struct.py``).
 
         Args:
-            batch: ``(cc_ext, mask, attn_mask, data_add)``: (B, 1 + n_out, 8) particle tokens, their masks, and the
-                per-event scalars by name (``E_dep``, the ``cond_scalars``, optionally ``E_dep_layers``).
+            batch: ``(tokens, m, am, per_event)``: (B, 1 + n_out, 8) particle tokens, their masks, and the per-event
+                scalars by name (``E_dep``, the ``cond_scalars``, optionally ``E_dep_layers``).
 
         Returns:
-            ``(f, mask, attn_mask)`` with the prefix tokens in front (E_dep is the only one with ``mask = 1``); the
-            (B, n_layers) ``E_dep_layers`` as a 4th tensor, in MeV like the E_dep token.
+            ``(f, m, am)``, E_dep the only prefix token with ``m = 1``; the (B, n_layers) ``E_dep_layers`` [MeV] as a
+            4th tensor.
         """
-        cc_ext, mask, attn_mask, data_add = batch
+        tokens, m, am, per_event = batch
         first, *rest = cond_scalars()
-        tokens = []
-        for name in (first, "E_dep", *rest):
-            token = torch.ones_like(cc_ext[:, :1])
-            token[..., 0] = data_add[name].view_as(token[..., 0])
-            tokens.append(token)
-        target = torch.cat((*tokens, cc_ext), dim=1).nan_to_num()
-        _F(target).non_p[..., -1] = 0
-        z, o = torch.zeros_like(mask[:, :1]), torch.ones_like(mask[:, :1])
-        mask = torch.cat((z, o, *([z] * len(rest)), mask), dim=1)
-        attn_mask = torch.cat((torch.ones_like(attn_mask[:, :1]).repeat(1, len(tokens)), attn_mask), dim=1)
-        if "E_dep_layers" in data_add:
-            return target, mask, attn_mask, data_add["E_dep_layers"]
-        return target, mask, attn_mask
+        names = (first, "E_dep", *rest)
+        prefix = torch.ones_like(tokens[:, :1]).repeat(1, len(names), 1)   # [value, 1, 1, 1, 1, 1, 1, 0]
+        prefix[..., 0] = torch.stack([per_event[n].reshape(len(tokens)) for n in names], dim=1)
+        prefix[..., -1] = 0
+        prefix_m = torch.zeros_like(m[:, :1]).repeat(1, len(names))
+        prefix_m[:, 1] = 1
+
+        f = torch.cat((prefix, tokens), dim=1).nan_to_num()
+        m = torch.cat((prefix_m, m), dim=1)
+        am = torch.cat((torch.ones_like(am[:, :1]).repeat(1, len(names)), am), dim=1)
+        return (f, m, am, per_event["E_dep_layers"]) if "E_dep_layers" in per_event else (f, m, am)
 
     # ---- stored tokens -> the model scale -----------------------------------------------------------------------
 
@@ -166,65 +155,48 @@ class DataPrep:
         """Converts the two channels that depend on ``max_energy`` from MeV to the model scale.
 
         The incoming energy becomes ``log(e_in / cutoff) / log(max_energy / cutoff)``, the E_dep token its scale
-        (``norm_edep_token``). The outgoing energy is a log ratio: ``cutoff_mev`` only, already final. A dataset
-        written before the energy split is passed through; see ``compat.dataset_already_normalised``.
+        (``norm_edep_margin``), the per-layer deposits theirs (``norm_edep_layer``). A dataset written before the
+        energy split is passed through; see ``compat.dataset_already_normalised``.
 
         Args:
-            batch:   ``(f, mask, attn_mask)``; an optional 4th tensor (per-layer E_dep) goes on the log scale.
+            batch:   ``(f, m, am[, edep_layers])``.
             inplace: write into ``f`` (a freshly loaded file: the copy doubled the load's peak RAM).
 
         Returns:
             The batch, as new tensors unless ``inplace``.
         """
-        f, mask, attn_mask, *edep_layers = batch
+        f, m, am, *edep_layers = batch
         if dataset_already_normalised(f, self.pen.max_energy):
             return batch
-        f = f if inplace else f.clone()
-        s = _F(f)
+        s = _F(f if inplace else f.clone())
         e_in, pid = s.in_energy[..., 0].clone(), s.in_pid   # MeV, before it becomes the scalar below
         s.in_energy.copy_(self.pen.to_scalar_e(s.in_energy))
-        s.edep.copy_(self.norm_edep_token(s.edep, e_in, pid))
-        if edep_layers:   # optional (B, n_layers) tensor; norm_edep is elementwise
-            return f, mask, attn_mask, self.norm_edep(edep_layers[0])
-        return f, mask, attn_mask
+        s.edep.copy_(self.norm_edep_margin(s.edep, e_in, pid))
+        return (s.full, m, am, *map(self.norm_edep_layer, edep_layers))
 
-    # ---- E_dep: the log scale -----------------------------------------------------------------------------------
+    # ---- E_dep: the layer scale ---------------------------------------------------------------------------------
 
-    def norm_edep(self, edep: Tensor) -> Tensor:
-        """Converts E_dep from MeV to the log scale, held in [0, 1].
-
-        ``u = log(edep / e_min) / log(max_energy / e_min)``. A deposit below ``e_min`` (zero included) gives 0.
-        """
+    def norm_edep_layer(self, edep: Tensor) -> Tensor:
+        """Converts E_dep from MeV to the layer scale, held in [0, 1]: a deposit below ``e_min`` (zero too) gives 0."""
         if not self.edep_log_min: return norm_edep_linear(edep, self.pen.max_energy)   # legacy
         e_min = self.edep_log_min
         width = torch.log(torch.tensor(self.pen.max_energy / e_min)).item()
-        u = torch.log((edep / e_min).clamp_min(1.0)) / width
-        return u.clamp(0.0, 1.0)
+        return (torch.log((edep / e_min).clamp_min(1.0)) / width).clamp(0.0, 1.0)
 
-    def denorm_edep(self, u: Tensor) -> Tensor:
-        """Converts E_dep from the log scale to MeV, the inverse of ``norm_edep`` on [0, 1].
-
-        ``edep = e_min exp(u log(max_energy / e_min))``. Every non-positive input (the ``overflow_delta`` sentinel)
-        decodes to zero.
-        """
+    def denorm_edep_layer(self, u: Tensor) -> Tensor:
+        """Converts E_dep from the layer scale to MeV: ``e_min exp(u log(max_energy / e_min))``, 0 where ``u <= 0``."""
         if not self.edep_log_min: return denorm_edep_linear(u, self.pen.max_energy)   # legacy
         e_min = self.edep_log_min
         width = torch.log(torch.tensor(self.pen.max_energy / e_min)).item()
         edep = e_min * torch.exp(u.clamp(0.0, 1.0) * width)
         return torch.where(u > 0, edep, torch.zeros_like(u))
 
-    # ---- E_dep: the margin token --------------------------------------------------------------------------------
+    # ---- E_dep: the margin scale (the token) --------------------------------------------------------------------
 
-    def norm_edep_token(self, edep: Tensor, e_in: Tensor, pid: Tensor) -> Tensor:
-        """Converts the E_dep token from MeV to the model scale: the margin token where ``edep_margin_mask``.
+    def norm_edep_margin(self, edep: Tensor, e_in: Tensor, pid: Tensor) -> Tensor:
+        """Converts the E_dep token from MeV to the margin scale, held in [0, 1]: ``cap`` gives 1, zero gives 0.
 
-        ```
-        z = log(edep) - log(cap - edep)          cap = e_in + margin(species)
-        u = (z - z_lo) / (z_hi - z_lo)
-        ```
-
-        held in [0, 1]: ``cap`` is the edge ``u = 1``, and zero stays 0 (the overflow sentinel's condition). Every
-        other event takes the log scale (``norm_edep``).
+        Where ``edep_margin_mask`` is false, the token takes the layer scale.
 
         Args:
             edep: the deposit [MeV].
@@ -234,20 +206,17 @@ class DataPrep:
         Returns:
             The token, in the shape and dtype of ``edep``.
         """
-        if not self.edep_margin:
-            return self.norm_edep(edep)
-        e = edep.double()
+        if not self.edep_margin: return self.norm_edep_layer(edep)
         cap, z_lo, z_hi = self._edep_margin_range(e_in.double(), pid)
-        z = torch.log(e.clamp_min(_TINY)) - torch.log((cap - e).clamp_min(_TINY))
-        u = ((z - z_lo) / (z_hi - z_lo)).clamp(0.0, 1.0)
-        u = torch.where(e > 0, u, torch.zeros_like(u)).to(edep.dtype)
-        return torch.where(self.edep_margin_mask(pid), u, self.norm_edep(edep))
+        z = torch.logit((edep.double() / cap).clamp(0.0, 1.0))   # -inf at zero, +inf from the cap on
+        u = ((z - z_lo) / (z_hi - z_lo)).clamp(0.0, 1.0).to(edep.dtype)
+        return torch.where(self.edep_margin_mask(pid), u, self.norm_edep_layer(edep))
 
-    def denorm_edep_token(self, u: Tensor, e_in: Tensor, pid: Tensor) -> Tensor:
-        """Converts the E_dep token from the model scale to MeV, the inverse of ``norm_edep_token``.
+    def denorm_edep_margin(self, u: Tensor, e_in: Tensor, pid: Tensor) -> Tensor:
+        """Converts the E_dep token from the margin scale to MeV: ``cap sigmoid(z_lo + u (z_hi - z_lo))``.
 
-        ``edep = cap sigmoid(z_lo + u (z_hi - z_lo))`` on a margin token. A non-positive ``u`` (the sentinel) decodes to
-        zero, ``u > 1`` to the cap.
+        ``u <= 0`` decodes to zero, ``u > 1`` to the cap. Where ``edep_margin_mask`` is false, the token is on the
+        layer scale.
 
         Args:
             u:    the token.
@@ -257,40 +226,25 @@ class DataPrep:
         Returns:
             The deposit [MeV], in the shape and dtype of ``u``.
         """
-        if not self.edep_margin:
-            return self.denorm_edep(u)
+        if not self.edep_margin: return self.denorm_edep_layer(u)
         cap, z_lo, z_hi = self._edep_margin_range(e_in.double(), pid)
         edep = cap * torch.sigmoid(z_lo + u.double().clamp(0.0, 1.0) * (z_hi - z_lo))
         edep = torch.where(u > 0, edep, torch.zeros_like(edep)).to(u.dtype)
-        return torch.where(self.edep_margin_mask(pid), edep, self.denorm_edep(u))
+        return torch.where(self.edep_margin_mask(pid), edep, self.denorm_edep_layer(u))
 
     def edep_margin_mask(self, pid: Tensor) -> Tensor:
-        """Returns where the E_dep token is the margin token.
-
-        Nowhere without ``model_conf.edep_margin``; with it for every incoming species, or only for those listed in
-        ``model_conf.edep_margin_species`` (raw pdgids; the rest keep the log scale).
-        """
-        if not self.edep_margin:
-            return torch.zeros_like(pid, dtype=torch.bool)
-        mask = torch.full_like(pid, self.edep_margin_species is None, dtype=torch.bool)
-        for p in self.edep_margin_species or ():   # python scalars: no host-to-device copy per call
-            mask |= pid == p
-        return mask
+        """Returns where the E_dep token is on the margin scale: every species, or those in ``edep_margin_species``."""
+        if not self.edep_margin: return torch.zeros_like(pid, dtype=torch.bool)
+        if self.edep_margin_species is None: return torch.ones_like(pid, dtype=torch.bool)
+        return torch.isin(pid, pid.new_tensor(self.edep_margin_species))
 
     def _edep_margin_range(self, e_in: Tensor, pid: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        """Returns the margin token's cap and log-odds range, ``(cap, z_lo, z_hi)``.
-
-        ``cap = e_in + margin(species)``, ``z_lo = log(e_min / cap)``, ``z_hi = log(cap / 1e-3 MeV)``. A species
-        without a margin of its own gets the widest.
-        """
+        """Returns ``(cap, z_lo, z_hi)``; a species without a margin of its own gets the widest."""
         margins = self.edep_excess_mev or HAND_SET_MARGIN_MEV   # legacy: a checkpoint from before edep_excess_mev
-        margin = torch.full_like(e_in, max(margins.values()))
-        for p, m in margins.items():
-            margin = torch.where(pid == p, torch.full_like(e_in, m), margin)
-        cap = e_in + margin
-        z_lo = torch.log((self.edep_log_min or 1e-6) / cap)
-        z_hi = torch.log(cap / _MISSING_MEV)
-        return cap, z_lo, z_hi
+        own = pid[..., None] == pid.new_tensor(list(margins))   # (..., n_species), one-hot or all false
+        mev = e_in.new_tensor(list(margins.values()))
+        cap = e_in + torch.where(own.any(-1), (own * mev).sum(-1), mev.max())
+        return cap, torch.log((self.edep_log_min or 1e-6) / cap), torch.log(cap / _MISSING_MEV)
 
     @staticmethod
     def edep_excess_max(f: Tensor) -> dict[int, float]:
@@ -299,6 +253,7 @@ class DataPrep:
         ``f`` holds MeV channels (before ``norm_e``). The result is meta.json's ``edep_excess_max_mev``, which becomes
         ``model_conf.edep_excess_mev``.
         """
-        e_in, pid = _F(f).in_energy[..., 0].double(), _F(f).in_pid
-        excess = _F(f).edep.reshape(e_in.shape).double() - e_in
+        s = _F(f)
+        e_in, pid = s.in_energy[..., 0].double(), s.in_pid
+        excess = s.edep.reshape(e_in.shape).double() - e_in
         return {int(p): max(0.0, excess[pid == p].max().item()) for p in pid.unique().tolist()}

@@ -69,7 +69,7 @@ def _layers(ds):
 
 
 dev = "cuda"
-train = DataPrep(lego.rc.config).denorm_edep(_layers(lego._train_ds).float())
+train = DataPrep(lego.rc.config).denorm_edep_layer(_layers(lego._train_ds).float())
 train = train[train.sum(1) > 0].to(dev)
 print(f"{train.shape[0]} training events with a deposit, {train.shape[1]} layers", flush=True)
 

@@ -33,7 +33,7 @@ def _event(pen, dp, e_in: float, edep: float, out: list[tuple[int, float]], L: i
     f[..., 7] = 0.0
     s = _F(f)
     s.non_p[...] = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0])
-    s.edep[...] = dp.norm_edep(torch.tensor([edep]))
+    s.edep[...] = dp.norm_edep_layer(torch.tensor([edep]))
     e_in_n = pen.to_scalar_e(torch.tensor([[e_in]]))
     for i, (pid, e) in enumerate(out):
         s.out_p[0, i, 0] = 1 - pen.to_scalar_e(torch.tensor(e)) / e_in_n[0, 0]
@@ -46,7 +46,7 @@ def _decode(pen, dp, f: torch.Tensor, e_in: float) -> tuple[float, torch.Tensor]
     s = _F(f)
     live = s.out_p[0, :, 7] != 0
     e = pen.to_mev(s.out_p[0, live, 0], pen.to_scalar_e(torch.tensor(e_in)))
-    return float(dp.denorm_edep(s.edep)[0]), e
+    return float(dp.denorm_edep_layer(s.edep)[0]), e
 
 
 def _run(pen, dp, f, e_in, pid):

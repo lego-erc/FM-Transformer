@@ -199,7 +199,7 @@ class TrainStep:
             if self.edep_ae is not None:  # the latent token's target (the AE's encoding of the true layers) and base
                 if layers is None:
                     raise ValueError("model_conf.edep_ae needs a dataset with per-layer E_dep (E_dep_layers).")
-                z1 = self.edep_ae.encode(self._edep_dp.denorm_edep(layers).to(base.dtype))
+                z1 = self.edep_ae.encode(self._edep_dp.denorm_edep_layer(layers).to(base.dtype))
                 z0 = torch.randn_like(z1)
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
             t = self._sample_t(ds_t)

@@ -137,7 +137,7 @@ class ShowerValMetrics:
 
     def __call__(self, lego, ds_t) -> dict:
         gen = _F(self._generate(lego, ds_t))
-        # decode the overflow sentinel as to_mev / denorm_edep do: a generated -overflow_delta
+        # decode the overflow sentinel as to_mev / denorm_edep_layer do: a generated -overflow_delta
         # is a truth zero, and compared raw it inflated val/mmd_particle 4.5x on plateSi_131026
         gen.out_p[..., 0].clamp_(0.0, 1.0)
         gen.edep.clamp_(0.0, 1.0)
@@ -158,8 +158,8 @@ class ShowerValMetrics:
             dp = lego._edep_dp
             e_in = dp.pen.from_scalar(ds_t.f.in_cc[:, 0, 1:4], ds_t.f.in_cc[:, 0, 0:1]).norm(dim=-1)
             fake = lego.edep_ae.sample(lego._edep_latents,
-                                       dp.denorm_edep_token(gen.edep.float(), e_in.float(), ds_t.f.in_p[:, 0, -1]))
-            out.update(edep_layer_metrics(dp.denorm_edep(ds_t.edep_layers.float()), fake))
+                                       dp.denorm_edep_margin(gen.edep.float(), e_in.float(), ds_t.f.in_p[:, 0, -1]))
+            out.update(edep_layer_metrics(dp.denorm_edep_layer(ds_t.edep_layers.float()), fake))
         return out
 
     @staticmethod

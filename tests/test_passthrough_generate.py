@@ -101,7 +101,7 @@ def test_absorbed_em_events_skip_the_flow_under_energy_balance(generator: Genera
     assert rows == [3]
     nc = generator.n_cond
     e_in = cond[:4, nc:nc + 3].norm(dim=-1)                   # the momentum column is energy-scaled
-    edep = generator.dp.denorm_edep(_F(sols).edep[:4].double())
+    edep = generator.dp.denorm_edep_layer(_F(sols).edep[:4].double())
     torch.testing.assert_close(edep, e_in.double(), rtol=1e-4, atol=1e-6)
     assert (mask[:4].sum(-1) == 1).all()               # still an interacting event: the E_dep token is generated
 

@@ -30,7 +30,7 @@ def test_edep_is_capped_at_the_incoming_energy(generator, monkeypatch, pdgid, ca
     dp = DataPrep(generator.model.rc.config)
     e_in = 150.0
     sols, _, _ = generator(_gun_cond(pdgid, e_in, batch=64))
-    edep = dp.denorm_edep(_F(sols).edep)
+    edep = dp.denorm_edep_layer(_F(sols).edep)
     flowed = edep > 0                         # pass-through events never reach the flow and keep E_dep = 0
     assert flowed.any()
     expect = e_in if capped else 300.0
