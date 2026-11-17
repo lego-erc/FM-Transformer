@@ -19,8 +19,9 @@ from x_transformers import ContinuousTransformerWrapper, Decoder, Encoder
 
 from legofmt.compat import fp32_attention, needs_fp32_attention
 
-from legofmt.data.dataloaders import LEGODataset, loader_seed, make_loader
-from legofmt.data.prep import DataPrep
+from legofmt.data.load.packed import load_dataset
+from legofmt.data.load.loader import loader_seed, make_loader
+from legofmt.data.write.norm import DataPrep
 from legofmt.data.struct import cond_scalars
 from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.geometry.symmetry_projections import CubeSymmetry
@@ -66,7 +67,7 @@ class MultLoader(torch.utils.data.Dataset):
         ptypes_in = mm_conf.get("ptypes_in", torch.tensor([11, 22]))
         self.train_inverse = mm_conf.get("train_inverse", False)
 
-        lds = LEGODataset(**lds_conf, prep=DataPrep({
+        lds = load_dataset(**lds_conf, prep=DataPrep({
             "max_energy": mm_conf["max_energy"],
             "cutoff_mev": lds_conf.get("cutoff_mev"),
             "cond_scalars": mm_conf.get("cond_scalars", cond_scalars()),
@@ -79,7 +80,7 @@ class MultLoader(torch.utils.data.Dataset):
             )
         # in_dim must be len(cond_scalars) + 7
         conds = torch.cat([lds.cond(n).unsqueeze(-1) for n in cond_scalars()], dim=-1)
-        incoming = lds.incoming()
+        incoming = lds.incoming
 
         self.pdgid_in_idx = torch.searchsorted(
             ptypes_in, incoming[:, -1].contiguous()
@@ -88,7 +89,7 @@ class MultLoader(torch.utils.data.Dataset):
         self.counts = lds.species_counts(ptypes).clamp_max(max_particles - 1)
         self.pt_target = None
         if mm_conf.get("passthrough_head", False):
-            self.pt_target = ((lds.edep().reshape(-1) <= 0) & (lds.n_out() == 1)).float()
+            self.pt_target = ((lds.edep.reshape(-1) <= 0) & (lds.n_out == 1)).float()
 
         if self.train_inverse:   # needs every outgoing token: the padded tensors
             ds = lds.data
@@ -381,7 +382,6 @@ class MultModel(LightningModule):
             bs=self.rc.mm_conf.get("bs", 2**12),
             shuffle=shuffle,
             num_workers=self.rc.dl_conf.get("num_workers", 4),
-            batched_sampler=True,
             seed=loader_seed(self.rc.dl_conf),
         )
 

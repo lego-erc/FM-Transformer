@@ -1,4 +1,4 @@
-"""E_dep scales superseded by the log scale and the margin token of :mod:`legofmt.data.prep`, kept so older
+"""E_dep scales superseded by the log scale and the margin token of :mod:`legofmt.data.write.norm`, kept so older
 checkpoints and datasets still run.
 
     linear             ``u = E / max_energy``: a model without ``model_conf.edep_log_min``

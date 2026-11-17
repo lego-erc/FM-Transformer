@@ -14,8 +14,8 @@ import pytest
 import torch
 
 from test_helpers import MANIFOLD, _prep_config
-from legofmt.data.dataloaders import GetLEGOData
-from legofmt.data.prep import DataPrep
+from legofmt.data.write.cut import GetLEGOData
+from legofmt.data.write.norm import DataPrep
 from legofmt.data.struct import _F
 from legofmt.geometry.energy_proj import EnergyProjections
 

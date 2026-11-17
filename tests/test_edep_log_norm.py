@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from test_helpers import MANIFOLD
-from legofmt.data.prep import DataPrep
+from legofmt.data.write.norm import DataPrep
 
 CFG = {
     "manifold": MANIFOLD,

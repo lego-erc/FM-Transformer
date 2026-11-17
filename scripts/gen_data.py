@@ -2,7 +2,7 @@
 
 The events are simulated in chunks, each its own process (Geant4 is seeded from
 std::random_device, so chunks are independent and may run in parallel), and merged once into
-``data_packed.pt`` (the prepped tensors without their padding, see ``legofmt.data.packed``;
+``data_packed.pt`` (the prepped tensors without their padding, see ``legofmt.data.load.packed``;
 ``--padded`` writes the padded ``data_prepped.pt`` instead) and ``meta.json`` (the metadata the
 fresh-training config path reads). OUT is the first CLI argument, or ``$LEGO_DATA_DIR`` if none
 is given:
@@ -23,9 +23,9 @@ import torch
 import torch.nn.functional as F
 import pyg4lego
 
-from legofmt.data.dataloaders import GetLEGOData
-from legofmt.data.packed import PackedData
-from legofmt.data.prep import DataPrep
+from legofmt.data.write.cut import GetLEGOData
+from legofmt.data.write.norm import DataPrep
+from legofmt.data.write.pack import concat, pack
 
 n_items = 500        # density points swept per material
 n_events_per_item = 4000
@@ -143,15 +143,15 @@ for path, kp in zip(paths, keep.split(sizes)):
             o[i:i + len(t)] = t
         i += len(parts[0])
     else:
-        chunks.append(PackedData.from_padded(*parts[:3], n_prefix=len(cond_scalars) + 1,
-                                             edep_layers=parts[3] if len(parts) > 3 else None))
+        chunks.append(pack(*parts[:3], n_prefix=len(cond_scalars) + 1,
+                           edep_layers=parts[3] if len(parts) > 3 else None))
     del parts
 
 if padded:
     torch.save(tuple(out), f"{out_dir}/data_prepped.pt")
     ntokens, pids = out[0].shape[1], out[0][..., -1]
 else:
-    packed = PackedData.concat(chunks)
+    packed = concat(chunks)
     del chunks
     torch.save(packed.to_dict(), f"{out_dir}/data_packed.pt")
     ntokens, pids = packed.L, packed.tokens[:, -1]

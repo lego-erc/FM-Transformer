@@ -8,10 +8,10 @@ from types import SimpleNamespace
 
 import torch
 
-from legofmt.data.dataloaders import LEGODataset
-from legofmt.data.packed import PackedData
-from legofmt.data.prep import DataPrep
+from legofmt.data.load.packed import load_dataset
 from legofmt.data.struct import DataStruct, _F
+from legofmt.data.write.norm import DataPrep
+from legofmt.data.write.pack import pack
 from legofmt.distill.reflow import LEGOLtngDirect
 
 MANIFOLD = [{"name": "euclidean", "dim": 1},
@@ -269,7 +269,7 @@ def prepped_padded(cond=("Density",), layers=False, n=6, k=4) -> tuple:
         per_event["E_dep_layers"] = torch.rand(n, 3, generator=g) * 30.0
     cfg = {"cutoff_mev": 10.0, "manifold": MANIFOLD, "proj_ray": False,
            "cond_scalars": list(cond), "energy_kin": True}
-    d = LEGODataset(data={"per_particle": {"Incoming": inc, "Outgoing": out}, "per_event": per_event},
+    d = load_dataset(data={"per_particle": {"Incoming": inc, "Outgoing": out}, "per_event": per_event},
                     prep=DataPrep(cfg), cutoff_mev=10.0, min_particles=0).data
     n_prefix = len(cond) + 1
     assert (d.am.full[:, n_prefix + 1:].sum(1) == 0).any(), "no zero-outgoing event survived prep"
@@ -289,7 +289,7 @@ def write_two_dirs(tmp_path: Path, cond=PACKED_COND, layers=True) -> tuple[Path,
     """The same ``prepped_padded`` events as ``pad/`` (only ``data_prepped.pt``), ``pk/`` (only
     ``data_packed.pt``) and ``both/`` (both files), each with a ``meta.json``."""
     t = prepped_padded(cond, layers)
-    packed = PackedData.from_padded(*t[:3], n_prefix=len(cond) + 1, edep_layers=t[3] if layers else None)
+    packed = pack(*t[:3], n_prefix=len(cond) + 1, edep_layers=t[3] if layers else None)
     meta = {"ntokens": t[0].shape[1], "particles": [22.0, 2212.0], "particles_in": [2212.0],
             "cutoff_mev": 10.0, "cond_scalars": list(cond), "energy_kin": True, "max_energy": 300.0}
     pad, pk, both = dirs = tuple(tmp_path / n for n in ("pad", "pk", "both"))

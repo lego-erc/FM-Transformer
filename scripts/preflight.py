@@ -66,7 +66,7 @@ if not dpath.is_dir():
 else:
     ok(f"data dir {dpath}")
     mp = dpath / "meta.json"
-    pp = dpath / "data_packed.pt"           # what LEGODataset loads when the dir has both
+    pp = dpath / "data_packed.pt"           # what load_dataset loads when the dir has both
     if not pp.is_file():
         pp = dpath / "data_prepped.pt"
     if not mp.is_file():
@@ -82,7 +82,7 @@ else:
         ok(f"{pp.name} {gb:.1f} GB")
         nranks = len(run.get("devices", [0])) or 1
         need = gb * nranks
-        warn(f"LEGODataset torch.loads {pp.name} per rank with no mmap: "
+        warn(f"load_dataset torch.loads {pp.name} per rank with no mmap: "
              f"~{need:.0f} GB across {nranks} rank(s) -- size --mem accordingly")
 
 mc = config.get("model_conf", {})

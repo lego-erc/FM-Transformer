@@ -11,7 +11,7 @@ import pytest
 import torch
 from lightning.fabric.utilities.distributed import DistributedSamplerWrapper
 
-from legofmt.data.dataloaders import loader_seed, make_loader
+from legofmt.data.load.loader import loader_seed, make_loader
 
 
 @pytest.mark.parametrize("wrapper_shuffle", [False, True])

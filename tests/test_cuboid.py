@@ -15,7 +15,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from legofmt.data.prep import DataPrep
+from legofmt.data.write.norm import DataPrep
 from legofmt.data.struct import _F
 from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.geometry.raytracing_proj import CubeTrace

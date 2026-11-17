@@ -15,7 +15,7 @@ import torch.nn.functional as F
 
 from legofmt.cfm.project_model import is_compiled
 from legofmt.compat import dynamic_shape_attention
-from legofmt.data.prep import DataPrep
+from legofmt.data.write.norm import DataPrep
 from legofmt.data.struct import _F, DataStruct, set_layout
 from legofmt.geometry.energy_proj import EnergyProjections
 from legofmt.geometry.raytracing_proj import CubeTrace

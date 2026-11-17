@@ -25,8 +25,9 @@ from legofmt.cfm.solvers import Solvers
 
 from legofmt.main.train_step import TrainStep
 
-from legofmt.data.dataloaders import LEGODataset, LengthBucketBatchSampler, loader_seed, make_loader
-from legofmt.data.prep import DataPrep
+from legofmt.data.load.packed import load_dataset
+from legofmt.data.load.loader import LengthBucketBatchSampler, loader_seed, make_loader
+from legofmt.data.write.norm import DataPrep
 
 from legofmt.cfm.path_sampler import ProductPathSampler
 from legofmt.geometry.geom_trafos import zoom_polar
@@ -56,11 +57,11 @@ def _event_lengths(ds) -> Tensor:
         return _event_lengths(ds.dataset)[torch.as_tensor(ds.indices)]
     if isinstance(ds, _Interacting):
         return _event_lengths(ds.ds)[ds.keep_idx]
-    return ds.lengths()
+    return ds.lengths
 
 
 def _interacting_only(ds) -> _Interacting:
-    keep_idx = ((ds.edep().reshape(-1) > 0) | (ds.n_out() != 1)).nonzero(as_tuple=True)[0]
+    keep_idx = ((ds.edep.reshape(-1) > 0) | (ds.n_out != 1)).nonzero(as_tuple=True)[0]
     return _Interacting(ds, keep_idx)
 
 
@@ -208,7 +209,7 @@ class LEGOLtng(TrainStep, LegacyEdepToken, LegacyBaseDist, BaseDist, Solvers, lt
     def setup(self, stage: str | None = None) -> None:
         if getattr(self, "_val_ds", None) is not None:
             return
-        full  = LEGODataset(**self.rc.dl_conf["lds_args"], prep=DataPrep(self.rc.config))
+        full  = load_dataset(**self.rc.dl_conf["lds_args"], prep=DataPrep(self.rc.config))
         if self.rc.config.get("model_conf", {}).get("exclude_passthrough", False):
             full = _interacting_only(full)
         n_val = max(1, int(len(full) * self.rc.val_conf.get("val_frac", 0.01)))
@@ -218,8 +219,8 @@ class LEGOLtng(TrainStep, LegacyEdepToken, LegacyBaseDist, BaseDist, Solvers, lt
 
     def _make_loader(self, dataset, *, shuffle: bool, bs: int | None = None, batch_sampler=None) -> DataLoader:
         return make_loader(dataset, bs=bs if bs is not None else self.rc.dl_conf.get("bs", 2**12), shuffle=shuffle,
-                           num_workers=self.rc.dl_conf.get("num_workers", 4), batched_sampler=True,
-                           batch_sampler=batch_sampler, seed=loader_seed(self.rc.dl_conf))
+                           num_workers=self.rc.dl_conf.get("num_workers", 4), batch_sampler=batch_sampler,
+                           seed=loader_seed(self.rc.dl_conf))
 
     def on_before_batch_transfer(self, batch, dataloader_idx: int):
         if self.rc.len_buckets is not None:

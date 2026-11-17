@@ -23,7 +23,7 @@ data's largest ``edep - e_in`` (``model_conf.edep_excess_mev``). An incoming spe
 ``model_conf.edep_margin_species`` keeps the log scale, and so do the per-layer deposits.
 
 ``DataPrep`` takes a full config, or the flat dict of ``scripts/gen_data.py`` and ``MultLoader`` (without a manifold:
-it only calls ``norm_e``). Superseded: the linear E_dep scale and hand-set margins (:mod:`legofmt.legacy.prep`),
+it only calls ``norm_e``). Superseded: the linear E_dep scale and hand-set margins (:mod:`legofmt.legacy.norm`),
 ``energy_kin: false`` and ``proj_ray: false`` (one line each in ``cc_trafo``).
 """
 
@@ -36,7 +36,7 @@ from legofmt.compat import dataset_already_normalised
 from legofmt.data.struct import _F, cond_scalars, set_layout
 from legofmt.geometry.energy_proj import EnergyProjections
 from legofmt.geometry.raytracing_proj import CubeTrace
-from legofmt.legacy.prep import HAND_SET_MARGIN_MEV, denorm_edep_linear, norm_edep_linear
+from legofmt.legacy.norm import HAND_SET_MARGIN_MEV, denorm_edep_linear, norm_edep_linear
 from legofmt.mod_comps.config import build_manifold
 
 _MISSING_MEV = 1e-3     # the smallest missing energy cap - edep the margin token resolves

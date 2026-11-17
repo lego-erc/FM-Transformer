@@ -61,18 +61,20 @@ supplied -- `Density`, `Z`, `A`, `Size` for current checkpoints; a legacy `("Den
 ## Workflow
 
 ```
-raw event dict ─► GetLEGOData ─► DataPrep.prep ─► folder/{data_prepped.pt, meta.json}        scripts/gen_data.py
+raw event dict ─► GetLEGOData ─► DataPrep.prep ─► folder/{data_packed.pt, meta.json}         scripts/gen_data.py
                   (cutoff, NaN,    (projx, ray trace,
                    sort)            scalar tokens)
 
-folder ─► LEGODataset(folder, prep=DataPrep(cfg)) ─► LEGOLtng / MultModel ─► {"state_dict", "config"}   scripts/train.py
+folder ─► load_dataset(folder, prep=DataPrep(cfg)) ─► LEGOLtng / MultModel ─► {"state_dict", "config"}   scripts/train.py
           (DataPrep.norm_e scales the MeV channels at load)
 
 flow + multiplicity checkpoints ─► GenerateOut: sample counts, solve the ODE on the product manifold
 ```
 
-`LEGODataset` dispatches on `data`: a folder or `.pt` path loads the prepped tuple (normalised by `prep.norm_e`
-when a `prep` is given); a raw dict needs `prep=DataPrep(config)` and runs `GetLEGOData` + `DataPrep.prep`.
+`load_dataset` reads a folder or a `.pt` path: the packed file as a `PackedData`, normalised by `prep.norm_e` when a
+`prep` is given; indexing it with a batch of event indices gives a `DataStruct`.
+Superseded inputs (`legofmt/legacy/dataset.py`): a padded `data_prepped.pt`, the padded tuple in memory, and a raw
+dict, which needs `prep=DataPrep(config)` and runs `GetLEGOData` + `DataPrep.prep`.
 
 ### Training
 
@@ -204,7 +206,7 @@ Any key not listed defaults to the value shown in the source.
 
 | Key | Default | Effect |
 |---|---|---|
-| `lds_args.data` | — | Folder with `data_prepped.pt` + `meta.json` (fresh training requires the folder; `LEGODataset` also loads a bare `.pt` path). |
+| `lds_args.data` | — | Folder with `data_prepped.pt` + `meta.json` (fresh training requires the folder; `load_dataset` also loads a bare `.pt` path). |
 | `lds_args.cutoff_mev` | from `meta.json` | Lower bound of the energy normalisation (`log(E/cutoff)/log(max_energy/cutoff)`); the file's value wins. The cut itself is applied at prep time (kinetic energy when `energy_kin`, else `\|p\|`, incoming token included). |
 | `lds_args.min_particles` | `0` | Prep time (raw-dict path): drop events with fewer valid outgoing particles. |
 | `lds_args.frac` | `1.0` | Keep a seeded random fraction of the events. |
@@ -251,7 +253,7 @@ Top-level FM options:
 | `max_energy` | — | Required (here or in `meta.json`). Upper energy bound (MeV) for the `EnergyProjections` normalisation; with `dl_conf.lds_args.cutoff_mev` (lower bound) it maps physical energy to/from the bounded `[0, 1]` energy scalar. A pure normalisation ceiling: it may exceed the gun energy (E_dep can exceed T_kin). |
 | `cond_scalars` | from `meta.json`, else `("Density",)` | Per-event conditioning scalars; sets the token layout (see Data structure). |
 | `energy_kin` | from `meta.json`, else `True` | Use Geant4's recorded kinetic energy as the energy scalar instead of `|p|` (which saturates for hadrons). |
-| `edep_log_min` | `None` | Log-scale the E_dep token: `log(E_dep/edep_log_min)/log(max_energy/edep_log_min)`, clamped to `[0, 1]`; `None` keeps the linear `E_dep/max_energy` (superseded, `legofmt/legacy/prep.py`). |
+| `edep_log_min` | `None` | Log-scale the E_dep token: `log(E_dep/edep_log_min)/log(max_energy/edep_log_min)`, clamped to `[0, 1]`; `None` keeps the linear `E_dep/max_energy` (superseded, `legofmt/legacy/norm.py`). |
 | `overflow_delta` | `0.0` | Sentinel offset: zero-valued outgoing-energy cells (the full-energy atom, `E_out >= E_in`) and zero-deposit E_dep targets are written to `-overflow_delta`, so the flow can separate the atom from the continuum. |
 | `proj_ray` | `True` (read by `DataPrep` only) | At prep-time, ray-trace the incoming position onto the unit-cube surface via `CubeTrace`. |
 | `canon_sym` | `False` | Canonicalise directions onto a reference cube face before the flow and undo it after (`CubeSymmetry`). Cube only (`cuboid_dim` with unequal sides raises). |
@@ -260,7 +262,7 @@ Top-level FM options:
 | `exclude_passthrough` | `False` | Train only on events where the primary interacted (`E_dep > 0` or `n_out != 1`); the count model's pass-through token emits the rest. |
 | `edep_cell`, `max_loss_weight_edep` | `False`, `= max_loss_weight` | Give the E_dep token its own loss cell; under `learned_loss_weights` its own learned weight and floor. |
 | `edep_ae` | `None` | `{path: <ae.pt>}` from `scripts/train_edep_ae.py <flow config>`: per-layer E_dep (`E_dep_layers` in the data) through the K latents of a frozen autoencoder (`legofmt/cfm/edep_ae.py`), flown with the particles as one extra token of the field (`model_args.lat_dim = K`, own loss cell `loss/lat`). `GenerateOut` decodes them after energy balancing into `edep_layers` (MeV, summing to the E_dep token) and `per_slab` of the G4-shaped output; the flow checkpoint carries the AE's weights. Not with training `len_buckets` in `"split"` mode, reflow, inverse-mask events or `log_likelihood`. |
-| `edep_margin`, `edep_margin_species` | `False`, `None` (all) | (Named `edep_wall`, `edep_wall_species` until 11.2026; the old keys are still read.) E_dep token as the log-odds of the deposited fraction of `E_cap = E_in + margin(species)`: `log E - log(E_cap - E)` mapped from `[log(edep_log_min / E_cap), log(E_cap / 1e-3 MeV)]` to `[0, 1]`. Small deposits keep a log scale, a contained shower's peak just below `E_in` gets a wide channel (the 1 GeV e- peak spans 0.0024 of the plain log token), and `E_cap` is the edge, so `GenerateOut` skips its per-species E_dep clamp. The margin is `model_conf.edep_excess_mev`, set from `meta.json`'s `edep_excess_max_mev` (`data/prep.py:EDEP_WALL_MARGIN_MEV` for older data). `edep_wall_species` restricts the wall to those incoming pdgids; the rest keep the log token. The per-layer tensor keeps the plain scale. Train with it. |
+| `edep_margin`, `edep_margin_species` | `False`, `None` (all) | (Named `edep_wall`, `edep_wall_species` until 11.2026; the old keys are still read.) E_dep token as the log-odds of the deposited fraction of `E_cap = E_in + margin(species)`: `log E - log(E_cap - E)` mapped from `[log(edep_log_min / E_cap), log(E_cap / 1e-3 MeV)]` to `[0, 1]`. Small deposits keep a log scale, a contained shower's peak just below `E_in` gets a wide channel (the 1 GeV e- peak spans 0.0024 of the plain log token), and `E_cap` is the edge, so `GenerateOut` skips its per-species E_dep clamp. The margin is `model_conf.edep_excess_mev`, set from `meta.json`'s `edep_excess_max_mev` (`legofmt/legacy/norm.py:HAND_SET_MARGIN_MEV` for older data). `edep_margin_species` restricts the margin token to those incoming pdgids; the rest keep the log token. The per-layer tensor keeps the plain scale. Train with it. |
 | `edep_whiten`, `edep_whiten_max_sig`, `edep_whiten_feed`, `edep_whiten_global` | `False`, `None`, `False`, `None` | E_dep token in units of the frozen base head's per-event prior, `y = (logit(u / e_dep_max) - mu) / sig` (needs the base head; not with `log_likelihood`); a cap on that unit so a broad prior keeps a fine MeV grid; hand each event's `(mu, unit)` to the network; one global `(c, s)` map for every event instead. |
 | `dir_zoom` | `None` | `theta_s` (rad). Learn each outgoing momentum direction with its polar angle about the incoming direction remapped to `pi*log1p(theta/theta_s)/log1p(pi/theta_s)` (azimuth kept; applied to the targets in training, undone in `forward`), so a particle that crosses a thin plate nearly undeflected (mrad) is resolvable. `2e-3` magnifies 7 mrad ~47x and compresses 1 rad ~2.3x. Train with it. |
 | `dir_zoom_mix` | `0.0` | Linear share of the `dir_zoom` map (`0` = pure log). |
@@ -406,8 +408,8 @@ default `odeint_conf.amp`) and `x_transformers_version` (the qk-norm scale above
 | `legofmt/distill/distill.py`, `legofmt/distill/reflow.py` | Flow-map self-distillation loss; reflow teacher and the one-step `LEGOLtngDirect` / `GenerateOutDirect` variants. |
 | `legofmt/mod_comps/config.py`, `legofmt/mod_comps/optimizers.py` | Config resolution (`Resolved*Config`, manifold building, version stamps) and the optimizer registry (`BatchedMuon`, `"schedulefree"`, `"warmup_cosine"`). |
 | `legofmt/multiplicity/model.py` | `MultModel`: autoregressive Decoder over PDG-id slots producing per-type particle counts, with the pass-through head; optional `InvModel`. |
-| `legofmt/data/dataloaders.py`, `legofmt/data/packed.py` | `GetLEGOData` (energy cutoff, compaction, NaN padding of raw particles), `LEGODataset` (a packed or padded file, read a batch of indices at a time as a `DataStruct`), the length-bucket batch sampler and `make_loader`; `PackedData`, the dataset format without padding. |
-| `legofmt/data/prep.py` | `DataPrep`: energy normalisation, `CubeTrace` ray projection, `manifold.projx`, the per-event scalar tokens, `norm_e`, and the E_dep token's scales (log scale, margin token). Superseded: the linear E_dep scale and hand-set margins (`legofmt/legacy/prep.py`), `energy_kin: false`, `proj_ray: false`. |
+| `legofmt/data/write/` | Raw particles → a dataset file (`scripts/gen_data.py`). `cut.py`: `GetLEGOData`, energy cutoff, compaction and NaN padding. `norm.py`: `DataPrep`, energy normalisation, `CubeTrace` ray projection, `manifold.projx`, the per-event scalar tokens, `norm_e`, and the E_dep token's scales (log scale, margin token). `pack.py`: `pack` / `concat`, padded tensors → `PackedData`. Superseded: the linear E_dep scale and hand-set margins (`legofmt/legacy/norm.py`), `energy_kin: false`, `proj_ray: false`. |
+| `legofmt/data/load/` | A dataset file → batches (training). `packed.py`: `PackedData`, the dataset without padding, read a batch of indices at a time as a `DataStruct`, and `load_dataset`, which reads it from its file. `loader.py`: the length-bucket batch sampler and `make_loader`. Superseded: padded tensors and raw dicts as dataset inputs (`legofmt/legacy/dataset.py`, `PaddedData`), `make_loader`'s per-item path. |
 | `legofmt/data/struct.py` | The token layout: `DataStruct(f, m, am)`, the `_F` / `_M` views, and the process-global `set_layout`. |
 | `legofmt/geometry/*` | `ProductManifold`, `GeomTrafos` (direction sampling, cartesian↔spherical, `to_cuboid`), `CubeTrace`, `EnergyProjections`, `CubeSymmetry`. |
 | `legofmt/log_metrics/val_metrics.py` | `ShowerValMetrics`: MMD and per-feature W1 on particle kinematics and event summaries (vendored from `lego-eval`). |

@@ -1,5 +1,5 @@
 """The training-side readers of a whole dataset give the same values on a packed file,
-without materialising its padded tensors (``LEGODataset.data`` warns when it does)."""
+without materialising its padded tensors (``PackedData.data`` warns when it does)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import torch
 from torch.utils.data import random_split
 
 from test_helpers import PACKED_COND, packed_prep, write_two_dirs
-from legofmt.data.dataloaders import LEGODataset
+from legofmt.data.load.packed import load_dataset
 from legofmt.main.modules import _event_lengths, _interacting_only
 from legofmt.multiplicity.model import MultLoader
 
@@ -25,7 +25,7 @@ def _no_materialising():
 
 def test_event_lengths_and_interacting_match(tmp_path) -> None:
     pad, pk, _ = write_two_dirs(tmp_path)
-    a, b = (LEGODataset(str(d), prep=packed_prep()) for d in (pad, pk))
+    a, b = (load_dataset(str(d), prep=packed_prep()) for d in (pad, pk))
     split = lambda ds: random_split(ds, [4, 2], generator=torch.Generator().manual_seed(0))[0]
     with _no_materialising():
         lb, ib = _event_lengths(split(b)), _interacting_only(b)

@@ -10,13 +10,14 @@ import pytest
 import torch
 
 from test_helpers import prepped_padded
-from legofmt.data.packed import PACKED_FORMAT, PACKED_VERSION, PackedData, is_packed
+from legofmt.data.load.packed import PACKED_FORMAT, PACKED_VERSION, PackedData, is_packed
+from legofmt.data.write.pack import concat, pack
 
 CONDS = [("Density",), ("Density", "Z", "A", "Size")]
 
 
 def _pack(t, cond, layers=False) -> PackedData:
-    return PackedData.from_padded(*t[:3], n_prefix=len(cond) + 1, edep_layers=t[3] if layers else None)
+    return pack(*t[:3], n_prefix=len(cond) + 1, edep_layers=t[3] if layers else None)
 
 
 def _equal(a, b) -> bool:
@@ -41,10 +42,10 @@ def test_unpack_index_equals_fancy_index(cond, idx) -> None:
 def test_block_without_padding_concats(cond) -> None:
     t, n_prefix = prepped_padded(cond), len(cond) + 1
     full = t[2].sum(1) == t[0].shape[1]
-    a = PackedData.from_padded(*(x[full] for x in t), n_prefix=n_prefix)
+    a = pack(*(x[full] for x in t), n_prefix=n_prefix)
     assert torch.isnan(a.pad_token).all()
-    b = PackedData.from_padded(*(x[~full] for x in t), n_prefix=n_prefix)
-    out = PackedData.concat([a, b]).unpack()
+    b = pack(*(x[~full] for x in t), n_prefix=n_prefix)
+    out = concat([a, b]).unpack()
     assert _equal(out, tuple(torch.cat((x[full], x[~full])) for x in t))
 
 
@@ -52,7 +53,7 @@ def test_block_without_padding_concats(cond) -> None:
 def test_concat_equals_packing_whole(cond) -> None:
     t = prepped_padded(cond, layers=True)
     parts = [_pack(tuple(x[s] for x in t), cond, True) for s in (slice(0, 2), slice(2, 4), slice(4, 6))]
-    whole, joined = _pack(t, cond, True).to_dict(), PackedData.concat(parts).to_dict()
+    whole, joined = _pack(t, cond, True).to_dict(), concat(parts).to_dict()
     assert whole.keys() == joined.keys()
     for k, v in whole.items():
         if isinstance(v, torch.Tensor):
@@ -95,7 +96,7 @@ def test_accessors(cond) -> None:
 
 
 @pytest.mark.parametrize("cond", CONDS)
-def test_from_padded_rejects_unrepresentable(cond) -> None:
+def test_pack_rejects_unrepresentable(cond) -> None:
     t, n_prefix = prepped_padded(cond), len(cond) + 1
     f, m, am = t
     bad_am = am.clone()
@@ -109,6 +110,6 @@ def test_from_padded_rejects_unrepresentable(cond) -> None:
     bad_prefix[1, 0, 2] += 1.0
     for args in ((f, m, bad_am), (f, bad_m, am), (bad_pad, m, am), (bad_prefix, m, am)):
         with pytest.raises(ValueError):
-            PackedData.from_padded(*args, n_prefix=n_prefix)
+            pack(*args, n_prefix=n_prefix)
     with pytest.raises(TypeError):
-        PackedData.from_padded(f, m.bool(), am, n_prefix=n_prefix)
+        pack(f, m.bool(), am, n_prefix=n_prefix)

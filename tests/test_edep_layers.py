@@ -12,8 +12,8 @@ import torch
 from torch.utils.data._utils.collate import default_collate
 
 from test_helpers import _prep_config as _cfg
-from legofmt.data.dataloaders import LEGODataset
-from legofmt.data.prep import DataPrep
+from legofmt.data.load.packed import load_dataset
+from legofmt.data.write.norm import DataPrep
 from legofmt.data.struct import DataStruct
 
 CUTOFF = 10.0
@@ -34,7 +34,7 @@ def _raw(n=4, k=3):
 
 def test_prep_carries_edep_layers_of_the_kept_events() -> None:
     raw = _raw()
-    d = LEGODataset(data=raw, prep=DataPrep(_cfg()), cutoff_mev=CUTOFF).data
+    d = load_dataset(data=raw, prep=DataPrep(_cfg()), cutoff_mev=CUTOFF).data
     keep = torch.tensor([0, 2, 3])
     assert len(d) == 3
     torch.testing.assert_close(d.edep_layers, raw["per_event"]["E_dep_layers"][keep])
@@ -45,16 +45,16 @@ def test_prep_carries_edep_layers_of_the_kept_events() -> None:
                                  _cfg(max_energy=300.0, edep_log_min=1e-3)])
 def test_load_puts_edep_layers_on_the_edep_scale(tmp_path, cfg) -> None:
     raw = _raw()
-    d = LEGODataset(data=raw, prep=DataPrep(cfg), cutoff_mev=CUTOFF).data
+    d = load_dataset(data=raw, prep=DataPrep(cfg), cutoff_mev=CUTOFF).data
     torch.save((d.f.full, d.m.full, d.am.full, d.edep_layers), tmp_path / "data_prepped.pt")
     prep = DataPrep(cfg)
-    loaded = LEGODataset(data=str(tmp_path / "data_prepped.pt"), prep=prep).data
+    loaded = load_dataset(data=str(tmp_path / "data_prepped.pt"), prep=prep).data
     torch.testing.assert_close(loaded.edep_layers, prep.norm_edep(d.edep_layers))
     torch.testing.assert_close(loaded.f.edep, prep.norm_edep(d.f.edep))
 
 
 def test_datastruct_keeps_edep_layers_aligned() -> None:
-    d = LEGODataset(data=_raw(), prep=DataPrep(_cfg()), cutoff_mev=CUTOFF).data
+    d = load_dataset(data=_raw(), prep=DataPrep(_cfg()), cutoff_mev=CUTOFF).data
     idx = torch.tensor([2, 0])
     torch.testing.assert_close(d[idx].edep_layers, d.edep_layers[idx])
     torch.testing.assert_close(d.to("cpu").edep_layers, d.edep_layers)
@@ -65,10 +65,10 @@ def test_datastruct_keeps_edep_layers_aligned() -> None:
 def test_without_edep_layers_nothing_changes(tmp_path) -> None:
     raw = _raw()
     del raw["per_event"]["E_dep_layers"]
-    d = LEGODataset(data=raw, prep=DataPrep(_cfg()), cutoff_mev=CUTOFF).data
+    d = load_dataset(data=raw, prep=DataPrep(_cfg()), cutoff_mev=CUTOFF).data
     assert d.edep_layers is None
     torch.save((d.f.full, d.m.full, d.am.full), tmp_path / "data_prepped.pt")
-    loaded = LEGODataset(data=str(tmp_path / "data_prepped.pt"), prep=DataPrep(_cfg(max_energy=300.0))).data
+    loaded = load_dataset(data=str(tmp_path / "data_prepped.pt"), prep=DataPrep(_cfg(max_energy=300.0))).data
     assert loaded.edep_layers is None
     assert default_collate([loaded[0], loaded[1]]).edep_layers is None
     assert DataStruct(d.f.full, d.m.full, d.am.full).edep_layers is None

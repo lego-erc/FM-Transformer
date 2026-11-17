@@ -19,9 +19,11 @@ class _FakeDS:
     def __getitem__(self, i):
         return self.data[i]
 
+    @property
     def edep(self):
         return _F(self.data.f.full).edep
 
+    @property
     def n_out(self):
         return self.data.am.out_p.sum(-1)
 

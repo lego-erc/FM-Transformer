@@ -41,7 +41,7 @@ if (ROOT / ".env").is_file():
 import torch
 
 from legofmt.cfm.edep_ae import LOG_OFFSET, EdepLayerAE
-from legofmt.data.prep import DataPrep
+from legofmt.data.write.norm import DataPrep
 from legofmt.main.modules import LEGOLtng
 
 out_path = config["model_conf"]["edep_ae"]["path"]
@@ -60,12 +60,12 @@ lego.setup("fit")                               # no trainer attached: the base 
 
 
 def _layers(ds):
-    """The normalised per-layer E_dep of a (Subset of a) (_Interacting view of a) LEGODataset."""
+    """The normalised per-layer E_dep of a (Subset of a) (_Interacting view of a) loaded dataset."""
     if hasattr(ds, "indices"):
         return _layers(ds.dataset)[torch.as_tensor(ds.indices)]
     if hasattr(ds, "keep_idx"):
         return _layers(ds.ds)[ds.keep_idx]
-    return ds.edep_layers()
+    return ds.edep_layers
 
 
 dev = "cuda"

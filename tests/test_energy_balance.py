@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from legofmt.data.prep import DataPrep
+from legofmt.data.write.norm import DataPrep
 from legofmt.data.struct import _F, set_layout
 from legofmt.geometry.energy_proj import EnergyProjections
 from legofmt.main.generate import _balance_energy

@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from legofmt.data.prep import DataPrep
+from legofmt.data.write.norm import DataPrep
 from legofmt.data.struct import _F
 from legofmt.main.generate import GenerateOut
 from legofmt.main.modules import LEGOLtng

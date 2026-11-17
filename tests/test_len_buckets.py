@@ -13,7 +13,7 @@ import pytest
 import torch
 from torch.utils.data import DistributedSampler
 
-from legofmt.data.dataloaders import LengthBucketBatchSampler
+from legofmt.data.load.loader import LengthBucketBatchSampler
 from legofmt.data.struct import DataStruct
 from legofmt.main.modules import LEGOLtng
 from legofmt.mod_comps.config import resolve_legoltng_config, resolve_len_buckets

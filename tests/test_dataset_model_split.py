@@ -2,7 +2,7 @@
 
 ``DataPrep.prep`` writes the incoming energy and ``E_dep`` in MeV and the
 outgoing energy as a cutoff-only log ratio; ``DataPrep.norm_e`` puts the two
-MeV channels on the model scale when ``LEGODataset`` loads the file. So one
+MeV channels on the model scale when ``load_dataset`` loads the file. So one
 dataset can feed models with different ``max_energy``, and a dataset can be
 generated before any model exists.
 """
@@ -16,8 +16,8 @@ import pytest
 import torch
 
 from test_helpers import MANIFOLD, _prep_config
-from legofmt.data.dataloaders import LEGODataset
-from legofmt.data.prep import DataPrep
+from legofmt.data.load.packed import load_dataset
+from legofmt.data.write.norm import DataPrep
 from legofmt.data.struct import _F
 
 CUTOFF = 10.0
@@ -42,7 +42,7 @@ def _raw(n=4):
 @pytest.fixture
 def dataset_dir(tmp_path):
     """A dataset generated with no knowledge of any model's max_energy."""
-    ds = LEGODataset(data=_raw(), prep=DataPrep(_prep_config()), cutoff_mev=CUTOFF).data
+    ds = load_dataset(data=_raw(), prep=DataPrep(_prep_config()), cutoff_mev=CUTOFF).data
     torch.save((ds.f.full, ds.m.full, ds.am.full), tmp_path / "data_prepped.pt")
     (tmp_path / "meta.json").write_text(json.dumps({
         "ntokens": ds.f.full.shape[1], "particles": [22.0, 2212.0],
@@ -60,7 +60,7 @@ def test_prep_needs_no_max_energy(dataset_dir) -> None:
 
 @pytest.mark.parametrize("max_energy", [300.0, 1000.0])
 def test_one_file_feeds_models_with_different_max_energy(dataset_dir, max_energy) -> None:
-    d = LEGODataset(data=str(dataset_dir / "data_prepped.pt"),
+    d = load_dataset(data=str(dataset_dir / "data_prepped.pt"),
                     prep=DataPrep(_prep_config(max_energy=max_energy))).data
     assert float(_F(d.f.full).in_p[..., 0, 0][0]) == pytest.approx(_in_scalar(max_energy), abs=1e-5)
     assert float(_F(d.f.full).edep[0]) == pytest.approx(E_DEP / max_energy, abs=1e-6)
@@ -69,7 +69,7 @@ def test_one_file_feeds_models_with_different_max_energy(dataset_dir, max_energy
 def test_outgoing_column_is_max_energy_independent(dataset_dir) -> None:
     want = 1 - math.log(E_OUT / CUTOFF) / math.log(E_IN / CUTOFF)
     for max_energy in (300.0, 1000.0):
-        d = LEGODataset(data=str(dataset_dir / "data_prepped.pt"),
+        d = load_dataset(data=str(dataset_dir / "data_prepped.pt"),
                         prep=DataPrep(_prep_config(max_energy=max_energy))).data
         assert float(_F(d.f.full).out_p[..., 0, 0][0]) == pytest.approx(want, abs=1e-5)
 
@@ -84,7 +84,7 @@ def test_norm_e_does_not_mutate_the_caller(dataset_dir) -> None:
 @pytest.mark.parametrize("prep", [None, lambda x: x])
 def test_loading_without_a_dataprep_gives_the_file_verbatim(dataset_dir, prep) -> None:
     # inspection / plotting callers legitimately want the stored tensors
-    d = LEGODataset(data=str(dataset_dir / "data_prepped.pt"), prep=prep).data
+    d = load_dataset(data=str(dataset_dir / "data_prepped.pt"), prep=prep).data
     assert float(_F(d.f.full).in_p[..., 0, 0][0]) == pytest.approx(E_IN)   # MeV
     assert float(_F(d.f.full).edep[0]) == pytest.approx(E_DEP)
 
@@ -134,9 +134,9 @@ def test_mev_file_is_still_normalised(dataset_dir) -> None:
     assert float(_F(out[0]).in_p[..., 0, 0][0]) == pytest.approx(_in_scalar(), abs=1e-5)
 
 
-def test_legacy_file_loads_through_LEGODataset(dataset_dir, tmp_path) -> None:
+def test_legacy_file_loads_through_load_dataset(dataset_dir, tmp_path) -> None:
     torch.save(_legacy(dataset_dir), tmp_path / "legacy.pt")
     with pytest.warns(DeprecationWarning):
-        d = LEGODataset(data=str(tmp_path / "legacy.pt"), prep=DataPrep(_prep_config(max_energy=300.0))).data
+        d = load_dataset(data=str(tmp_path / "legacy.pt"), prep=DataPrep(_prep_config(max_energy=300.0))).data
     assert float(_F(d.f.full).in_p[..., 0, 0][0]) == pytest.approx(_in_scalar(), abs=1e-5)
     assert float(_F(d.f.full).edep[0]) == pytest.approx(E_DEP / 300.0, abs=1e-6)
