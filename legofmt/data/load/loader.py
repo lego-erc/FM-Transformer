@@ -31,7 +31,7 @@ class LengthBucketBatchSampler(DistributedSampler):
     def __init__(self, lengths: Tensor, buckets, bs: int, seed: int = 0,
                  rank: int = 0, world_size: int = 1, max_tokens: int | None = None) -> None:
         buckets = torch.as_tensor(buckets)
-        self.bucket_of = torch.bucketize(torch.as_tensor(lengths), buckets)
+        self.bucket_of = torch.bucketize(torch.as_tensor(lengths), buckets, out_int32=True)
         self.counts = torch.bincount(self.bucket_of, minlength=len(buckets))
         self.bs_of = torch.full_like(buckets, bs) if max_tokens is None else (max_tokens // buckets).clamp(min=1)
         self.seed, self.rank, self.world_size, self.epoch = seed, rank, world_size, 0

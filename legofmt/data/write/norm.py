@@ -166,9 +166,8 @@ class DataPrep:
         if dataset_already_normalised(f, self.pen.max_energy):
             return batch
         s = _F(f if inplace else f.clone())
-        e_in, pid = s.in_energy[..., 0].clone(), s.in_pid   # MeV, before it becomes the scalar below
+        s.edep.copy_(self.norm_edep_margin(s.edep, s.in_energy[..., 0], s.in_pid))   # reads e_in in MeV: first
         s.in_energy.copy_(self.pen.to_scalar_e(s.in_energy))
-        s.edep.copy_(self.norm_edep_margin(s.edep, e_in, pid))
         return (s.full, m, am, *map(self.norm_edep_layer, edep_layers))
 
     # ---- E_dep: the layer scale ---------------------------------------------------------------------------------
@@ -178,7 +177,7 @@ class DataPrep:
         if not self.edep_log_min: return norm_edep_linear(edep, self.pen.max_energy)   # legacy
         e_min = self.edep_log_min
         width = torch.log(torch.tensor(self.pen.max_energy / e_min)).item()
-        return (torch.log((edep / e_min).clamp_min(1.0)) / width).clamp(0.0, 1.0)
+        return (torch.log((edep / e_min).clamp_min(1.0)) / width).clamp_max(1.0)
 
     def denorm_edep_layer(self, u: Tensor) -> Tensor:
         """Converts E_dep from the layer scale to MeV: ``e_min exp(u log(max_energy / e_min))``, 0 where ``u <= 0``."""

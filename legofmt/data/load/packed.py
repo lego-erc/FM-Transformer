@@ -144,10 +144,9 @@ class PackedData:
         f[..., :P, 0] = self.prefix[idx]
         f[..., P:, :] = self.pad_token
         f[..., P:, 0] = self.pad_e0[idx][..., None]
-        j = torch.arange(L - P)
-        valid = j < lens[..., None]
-        f[..., P:, :][valid] = self.tokens[(start[..., None] + j)[valid]]
-        am = torch.cat((torch.ones(*lens.shape, P, dtype=torch.bool), valid), -1)
+        am = torch.arange(L) < (lens + P)[..., None]
+        valid = am[..., P:]
+        f[..., P:, :][valid] = self.tokens[(start[..., None] + torch.arange(L - P))[valid]]
         out = (f, loss_mask(am, P), am)
         return out if self.edep_layers is None else out + (self.edep_layers[idx],)
 

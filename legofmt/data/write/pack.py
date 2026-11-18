@@ -42,8 +42,7 @@ def pack(f: Tensor, m: Tensor, am: Tensor, n_prefix: int, edep_layers: Tensor | 
     prefix_token = f[0, 0].clone() if N else _NAN_TOKEN.clone()
     prefix_token[0] = float("nan")
     first = f[has_pad, tot[has_pad]]   # each padded event's first padded token
-    pad_e0 = torch.full((N,), float("nan"))
-    pad_e0[has_pad] = first[:, 0]
+    pad_e0 = torch.where(has_pad, f[:, -1, 0], float("nan"))   # the last token is padded if any is
     pad_token = first[0].clone() if len(first) else _NAN_TOKEN.clone()
     pad_token[0] = float("nan")
 
