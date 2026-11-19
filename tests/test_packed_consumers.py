@@ -12,7 +12,8 @@ from torch.utils.data import random_split
 
 from test_helpers import PACKED_COND, packed_prep, write_two_dirs
 from legofmt.data.load.packed import load_dataset
-from legofmt.main.modules import _event_lengths, _interacting_only
+from legofmt.data.load.loader import event_lengths as _event_lengths
+from legofmt.data.load.packed import interacting_only as _interacting_only
 from legofmt.multiplicity.model import MultLoader
 
 

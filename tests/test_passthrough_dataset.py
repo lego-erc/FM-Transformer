@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from legofmt.data.struct import DataStruct, _F, set_layout
-from legofmt.main.modules import _interacting_only
+from legofmt.data.load.packed import interacting_only as _interacting_only
 
 
 class _FakeDS:

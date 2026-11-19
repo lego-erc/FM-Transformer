@@ -24,6 +24,10 @@ from torch.utils.data._utils.collate import default_collate_fn_map
 # The conditioning scalars, by their data_add keys; the default is the original (density, E_dep) prefix.
 _COND_SCALARS: tuple[str, ...] = ("Density",)
 
+# Where a particle token's channels start: energy | momentum direction (3) | position direction (3) | pdgid (absent
+# from model_in); ``energy, mom, pos, pid = x.tensor_split(CHANNELS, dim=-1)``.
+CHANNELS = (1, 4, 7)
+
 
 def set_layout(cond_scalars) -> None:
     """Sets the process-global slot layout.

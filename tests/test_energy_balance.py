@@ -14,7 +14,7 @@ import torch
 from legofmt.data.write.norm import DataPrep
 from legofmt.data.struct import _F, set_layout
 from legofmt.geometry.energy_proj import EnergyProjections
-from legofmt.main.generate import _balance_energy
+from legofmt.legacy.generate import _balance_energy
 
 CUT, MAX, EDEP_MIN = 0.1, 2000.0, 1e-6
 COND = ("Density", "Z", "A", "Size")
@@ -178,7 +178,7 @@ def _exit_event(tokens: list[tuple[list[float], list[float]]], L: int = 12) -> t
 def test_exit_momentum_is_mirrored_out_of_its_face() -> None:
     """A particle leaving through a face moves away from it (Geant4: never otherwise). One the flow sends back into
     its exit face would enter the next slab moving away from it -- the count model's out-of-distribution input."""
-    from legofmt.main.generate import _exit_outward
+    from legofmt.legacy.generate import _exit_outward
     f = _exit_event([([0.6, 0.0, -0.8], [0.1, 0.2, 50.0]),    # +z face, moving -z: mirrored
                      ([0.6, 0.0, 0.8], [0.1, 0.2, 50.0]),     # +z face, moving +z: kept
                      ([-0.5, 0.5, 0.7], [1.0, 0.2, 0.3]),     # +x face, moving -x: mirrored

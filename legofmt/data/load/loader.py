@@ -1,6 +1,7 @@
 """Batches of a dataset: the length-bucket sampler and the DataLoader factory.
 
     LengthBucketBatchSampler   batches of events of similar length
+    event_lengths              each event's token count, through the dataset views the sampler gets
     make_loader                the worker plumbing both LightningModules share
 """
 
@@ -8,7 +9,9 @@ import os
 
 import torch
 from torch import Tensor
-from torch.utils.data import BatchSampler, DataLoader, DistributedSampler, RandomSampler, SequentialSampler
+from torch.utils.data import BatchSampler, DataLoader, DistributedSampler, RandomSampler, SequentialSampler, Subset
+
+from legofmt.data.load.packed import Interacting
 
 
 class LengthBucketBatchSampler(DistributedSampler):
@@ -52,6 +55,15 @@ class LengthBucketBatchSampler(DistributedSampler):
             n = len(events) - len(events) % (bs * self.world_size)
             batches += events[:n].view(-1, self.world_size, bs)[:, self.rank].tolist()
         return iter([batches[i] for i in torch.randperm(len(batches), generator=gen).tolist()])
+
+
+def event_lengths(ds) -> Tensor:
+    """Returns each event's token count, through ``Subset`` and ``Interacting`` views (for the bucket sampler)."""
+    if isinstance(ds, Subset):
+        return event_lengths(ds.dataset)[torch.as_tensor(ds.indices)]
+    if isinstance(ds, Interacting):
+        return event_lengths(ds.ds)[ds.keep_idx]
+    return ds.lengths
 
 
 def loader_seed(dl_conf: dict) -> int:

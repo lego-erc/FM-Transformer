@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -76,6 +77,7 @@ class ResolvedLEGOConfig:
     n_prefix: int
 
     mask_conf: dict
+    inverse_events: bool         # mask_conf.p_forward < 1: some events generate the incoming particle (legacy)
 
     max_energy: float
     cutoff_mev: float
@@ -312,6 +314,9 @@ def _build_resolved(config: dict, max_seq_l: int, pdgids: torch.Tensor, state_di
                 or (model_conf.get("mask_conf") or {}).get("p_forward", 1.0) < 1):
             raise ValueError("model_conf.edep_ae does not support training len_buckets in split mode, reflow or "
                              "inverse-mask events (mask_conf.p_forward < 1) yet.")
+        if state_dict and "lat_in.weight" not in state_dict:   # the field loads strict=False, which would hide it
+            raise ValueError("model_conf.edep_ae checkpoint without the latent token (lat_in): the 16-token "
+                             "prototype (feat/edep-latents) is not supported.")
         model_args.setdefault("lat_dim", edep_ae["config"]["K"])   # the field's latent token (CFMTrafo_x)
 
     whiten_global = model_conf.get("edep_whiten_global")
@@ -327,6 +332,7 @@ def _build_resolved(config: dict, max_seq_l: int, pdgids: torch.Tensor, state_di
         cond_scalars=cond_scalars,
         n_prefix=n_prefix,
         mask_conf=model_conf.get("mask_conf", {}),
+        inverse_events=bool(model_conf.get("mask_conf")) and model_conf["mask_conf"].get("p_forward", 0.5) < 1,
         max_energy=model_conf["max_energy"],
         cutoff_mev=dl_conf["lds_args"]["cutoff_mev"],
         amp_dtype=_amp_dtype((config.get("additional") or {}).get("precision")),
@@ -472,3 +478,29 @@ def _build_resolved_mult(config: dict, state_dict: dict | None) -> ResolvedMultC
         inv_n_layers=mm_conf.get("inv_n_layers", c["n_layers"]),
         inv_n_heads=mm_conf.get("inv_n_heads", c["n_heads"]),
     )
+
+
+def mult_energy_scale(mult_conf: dict, rc: ResolvedLEGOConfig) -> float:
+    """Checks a multiplicity config against the flow's, and returns the factor between their energy scalars.
+
+    ```
+    scale = log(max_energy / cutoff) / log(mm_max_energy / cutoff)       1 when the two max_energy agree
+    ```
+
+    Raises:
+        ValueError: the multiplicity model's ``cond_scalars`` are not a prefix of the flow's.
+    """
+    mm = mult_conf["config"]["mm_conf"]
+    mm_cond = mm.get("cond_scalars")
+    if mm_cond and tuple(mm_cond) != tuple(rc.cond_scalars)[:len(mm_cond)]:
+        raise ValueError(f"mult cond_scalars {tuple(mm_cond)} is not a prefix of the flow's "
+                         f"{tuple(rc.cond_scalars)}; cond carries only the flow's scalars.")
+    mm_cut = mult_conf["config"]["dl_conf"]["lds_args"].get("cutoff_mev")
+    if mm_cut is not None and mm_cut != rc.cutoff_mev:
+        warnings.warn(f"mult cutoff_mev {mm_cut} != flow {rc.cutoff_mev}: "
+                      "the two energy scales disagree and mult_e_scale assumes they do not", stacklevel=3)
+    mm_max = mm.get("max_energy")
+    if not mm_max or mm_max == rc.max_energy:
+        return 1.0
+    cut = rc.cutoff_mev
+    return float(torch.log(torch.tensor(rc.max_energy / cut)) / torch.log(torch.tensor(mm_max / cut)))

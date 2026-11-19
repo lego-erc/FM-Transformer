@@ -29,6 +29,14 @@ def build_legacy_base_head(rc, gen_base) -> nn.Module | None:
     The caller assigns the result as ``LEGOLtng.base_head``; the absence of the
     attribute is what ``_set_prior`` and ``setup`` test with ``hasattr``.
     """
+    head = _moment_head(rc, gen_base)
+    if head is None and rc.edep_whiten:
+        raise ValueError("model_conf.edep_whiten needs the base head's per-event E_dep prior (base_pretrain_"
+                         "batches > 0 or a saved base_conf.base_head, scale_dist sm_norm, Z/A/Size conditioning).")
+    return head
+
+
+def _moment_head(rc, gen_base) -> nn.Module | None:
     bc = rc.config.get("base_conf") or {}
     hs = bc.get("base_head")
     if hs is not None and "k0.weight" in hs:

@@ -1,7 +1,8 @@
 """A dataset without its padding (each event's real tokens plus where they start), and reading it from its file.
 
-    load_dataset   a dataset directory or file -> PackedData, on the model scale
-    PackedData     the events; ``dataset[idx]`` pads a batch of them to a ``DataStruct``
+    load_dataset       a dataset directory or file -> PackedData, on the model scale
+    PackedData         the events; ``dataset[idx]`` pads a batch of them to a ``DataStruct``
+    interacting_only   the events without the pass-through ones (``model_conf.exclude_passthrough``)
 
 Everything but the particle tokens of a padded ``(f, m, am[, edep_layers])`` follows from a few per-event numbers:
 
@@ -183,6 +184,25 @@ class PackedData:
             raise ValueError(f"not a {PACKED_FORMAT} v{PACKED_VERSION} file: "
                              f"format={d.get('format')!r} version={d.get('version')!r}")
         return cls(**{k: v for k, v in d.items() if k not in ("format", "version")})
+
+
+class Interacting:
+    """Index view over the events that interacted (a deposit, or more than one particle out), without copying them."""
+
+    def __init__(self, ds, keep_idx: Tensor) -> None:
+        self.ds, self.keep_idx = ds, keep_idx
+
+    def __len__(self) -> int:
+        return len(self.keep_idx)
+
+    def __getitem__(self, i):
+        return self.ds[self.keep_idx[i]]
+
+
+def interacting_only(ds) -> Interacting:
+    """Returns the view of ``ds`` without its pass-through events (no deposit, one particle out)."""
+    keep_idx = ((ds.edep.reshape(-1) > 0) | (ds.n_out != 1)).nonzero(as_tuple=True)[0]
+    return Interacting(ds, keep_idx)
 
 
 def load_dataset(data: str | dict | tuple, *, prep=None, frac=None, device="cpu", **cut_args) -> PackedData:

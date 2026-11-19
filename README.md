@@ -123,9 +123,9 @@ sols, mask, attn_mask = gen(cond)              # gen(cond, prepped=False, passth
 # mask / attn_mask : [B, ntokens]
 ```
 
-After the solve `GenerateOut` clamps E_dep and applies the optional `odeint_conf.energy_balance` /
-`exit_consistency`. `GenerateIn` runs the reverse direction (incoming PID from the outgoing set) and needs a
-`train_inverse` multiplicity checkpoint.
+After the solve `GenerateOut` clamps E_dep. Superseded, in `legofmt/legacy/generate.py`: the optional
+`odeint_conf.energy_balance` / `exit_consistency`, and `GenerateIn`, the reverse direction (incoming PID from the
+outgoing set), which needs a `train_inverse` multiplicity checkpoint.
 
 ---
 
@@ -401,15 +401,15 @@ default `odeint_conf.amp`) and `x_transformers_version` (the qk-norm scale above
 | `legofmt/cfm/cfm_trafo_x.py`, `legofmt/cfm/event_cond.py` | `CFMTrafo_x`: vector field. Per-(mask, type, pdgid) conditional linear embedding, `x-transformers` Encoder conditioned on sinusoidal `t` (and `d`) embeddings, mirrored output projection; the per-event form of that condition for the adaptive norms. Superseded options (`time_cond: false`, per-token times, `dim_in_out`, `grad_ckpt`) are in `legofmt/legacy/cfm_trafo_x.py`. |
 | `legofmt/cfm/project_model.py`, `legofmt/cfm/solvers.py`, `legofmt/cfm/path_sampler.py` | `ProjectModel` keeps state/velocity on the manifold; `Solvers` mixin (`solve`, hand-unrolled euler / midpoint / rk4 steps, `log_likelihood`, `forward`); `ProductPathSampler` (the CondOT geodesic per factor, closed form). Any other solver `method` runs through flow_matching's `ODESolver` (`legofmt/legacy/solvers.py`). |
 | `legofmt/cfm/edep_ae.py`, `legofmt/cfm/geom_encoder.py` | `EdepLayerAE`, the per-layer E_dep autoencoder (`model_conf.edep_ae`); `GeomEncoder`, the layered-stack summary tokens (`model_args.geom_encoder`). |
-| `legofmt/main/modules.py` | `LEGOLtng`: construction, Lightning hooks, data split, optimizer wiring. Behaviour lives in the mixins `TrainStep` / `BaseDist` / `Solvers`. |
-| `legofmt/main/train_step.py` | `TrainStep`: training step, per-cell uncertainty weighting, `t` and mask sampling, flow-map loss gating. |
-| `legofmt/main/generate.py` | `GenerateOut` / `GenerateIn`: chain `MultModel` + `LEGOLtng` for end-to-end sampling; build the padded conditioning batch. |
+| `legofmt/main/modules.py` | `LEGOLtng`: construction, the token maps the mixins share (`convert_pdgids`, `_canon_dirs`, `_zoom_dirs`), Lightning hooks. Behaviour lives in the mixins `TrainStep` / `BaseDist` / `Solvers`. |
+| `legofmt/main/train_step.py` | The loss as functions (`sd3_time`, `loss_cells`, `kendall_total`) and `TrainStep`, the step that computes it (flow frame, path, flow-map term). Superseded: inverse-mask events (`mask_conf.p_forward < 1`), `t_dist: sm_norm`, `t_dist_shift`, reflow (`legofmt/legacy/train_step.py`). |
+| `legofmt/main/generate.py` | `GenerateOut`: chain `MultModel` + `LEGOLtng` for end-to-end sampling; counts -> slots (`fit_counts`, `slot_species`) -> the flow's tokens. Superseded: `energy_balance`, `exit_consistency`, `GenerateIn` (`legofmt/legacy/generate.py`). |
 | `legofmt/base/` | The flow's base distribution: its three distributions (`base_dists.py`), the sampler `GenerateBase` (`gen_base.py`), the per-event base head and its likelihood fit (`nn.py`, `nn_fit.py`), the `BaseDist` mixin (`interface.py`), the E_dep token's unit (`edep_whiten.py`) and OT coupling (`ot_coupling.py`). Superseded options (`iso` / `iso_pos`, other `scale_dist`, the moment head) are in `legofmt/legacy/`. |
 | `legofmt/distill/distill.py`, `legofmt/distill/reflow.py` | Flow-map self-distillation loss; reflow teacher and the one-step `LEGOLtngDirect` / `GenerateOutDirect` variants. |
 | `legofmt/mod_comps/config.py`, `legofmt/mod_comps/optimizers.py` | Config resolution (`Resolved*Config`, manifold building, version stamps) and the optimizer registry (`BatchedMuon`, `"schedulefree"`, `"warmup_cosine"`). |
 | `legofmt/multiplicity/model.py` | `MultModel`: autoregressive Decoder over PDG-id slots producing per-type particle counts, with the pass-through head; optional `InvModel`. |
 | `legofmt/data/write/` | Raw particles → a dataset file (`scripts/gen_data.py`). `cut.py`: `GetLEGOData`, energy cutoff, compaction and NaN padding. `norm.py`: `DataPrep`, energy normalisation, `CubeTrace` ray projection, `manifold.projx`, the per-event scalar tokens, `norm_e`, and the E_dep token's scales (log scale, margin token). `pack.py`: `pack` / `concat`, padded tensors → `PackedData`. Superseded: the linear E_dep scale and hand-set margins (`legofmt/legacy/norm.py`), `energy_kin: false`, `proj_ray: false`. |
-| `legofmt/data/load/` | A dataset file → batches (training). `packed.py`: `PackedData`, the dataset without padding, read a batch of indices at a time as a `DataStruct`, and `load_dataset`, which reads it from its file. `loader.py`: the length-bucket batch sampler and `make_loader`. Superseded: padded tensors and raw dicts as dataset inputs (`legofmt/legacy/dataset.py`, `PaddedData`), `make_loader`'s per-item path. |
+| `legofmt/data/load/` | A dataset file → batches (training). `packed.py`: `PackedData`, the dataset without padding, read a batch of indices at a time as a `DataStruct`; `load_dataset`, which reads it from its file; `interacting_only`, the view without pass-through events. `loader.py`: the length-bucket batch sampler, `event_lengths` and `make_loader`. Superseded: padded tensors and raw dicts as dataset inputs (`legofmt/legacy/dataset.py`, `PaddedData`), `make_loader`'s per-item path. |
 | `legofmt/data/struct.py` | The token layout: `DataStruct(f, m, am)`, the `_F` / `_M` views, and the process-global `set_layout`. |
 | `legofmt/geometry/*` | `ProductManifold`, `GeomTrafos` (direction sampling, cartesian↔spherical, `to_cuboid`), `CubeTrace`, `EnergyProjections`, `CubeSymmetry`. |
 | `legofmt/log_metrics/val_metrics.py` | `ShowerValMetrics`: MMD and per-feature W1 on particle kinematics and event summaries (vendored from `lego-eval`). |
