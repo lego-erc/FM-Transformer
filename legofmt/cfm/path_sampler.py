@@ -26,7 +26,8 @@ from legofmt.geometry.product_manifold import ProductManifold, sphere_logmap
 def _sphere_geodesic(x0, x1, t):
     v    = sphere_logmap(x0, x1)
     th   = v.norm(dim=-1, keepdim=True)
-    c, s = torch.cos(t * th), torch.sin(t * th)
+    phi  = t * th
+    c, s = torch.cos(phi), torch.sin(phi)
     # normalised like flow_matching's retraction branch, which also maps the E_dep token's (1, 1, 1) direction
     # filler onto the sphere; th = 0 (x_0 = x_1) divides by the smallest float instead
     x_t  = F.normalize(c * x0 + s * v / th.clamp_min(torch.finfo(th.dtype).tiny), dim=-1)
@@ -35,9 +36,8 @@ def _sphere_geodesic(x0, x1, t):
 
 
 def _euclidean_geodesic(x0, x1, t):
-    x_t  = x0 + t * (x1 - x0)
     dx_t = x1 - x0
-    return x_t, dx_t
+    return x0 + t * dx_t, dx_t
 
 
 class ProductPathSampler:

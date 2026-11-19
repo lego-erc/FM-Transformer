@@ -96,10 +96,10 @@ class EdepLayerAE(nn.Module):
         u = torch.rand_like(a) if rng is None else rng.uniform(AE_ZERO, layer).to(a)
 
         log_e = mu.gather(-1, k)[..., 0] + torch.exp(log_sig.gather(-1, k)[..., 0]) * n
-        E     = torch.where(u < torch.sigmoid(a), torch.zeros_like(a), torch.exp(torch.minimum(log_e, self.log_e_max)))
-        dead  = E.sum(-1) == 0                    # nothing drawn anywhere: the total goes to the likeliest layer
-        E[dead, a[dead].argmin(-1)] = 1.0
-        return torch.where(tot > 0, E * tot / E.sum(-1, keepdim=True), torch.zeros_like(E))
+        E     = torch.where(u < torch.sigmoid(a), 0.0, torch.exp(torch.minimum(log_e, self.log_e_max)))
+        dead  = E.sum(-1, keepdim=True) == 0      # nothing drawn anywhere: the total goes to the likeliest layer
+        E     = torch.where(dead, E.scatter(-1, a.argmin(-1, keepdim=True), 1.0), E)
+        return torch.where(tot > 0, E * tot / E.sum(-1, keepdim=True), 0.0)
 
 
 def build_edep_ae(spec: dict) -> EdepLayerAE:

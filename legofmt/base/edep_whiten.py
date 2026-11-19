@@ -24,7 +24,7 @@ from legofmt.data.struct import _F
 _Y_NO_DEPOSIT = -6.0
 _Y_SPLIT      = -4.5   # a sample below maps back to E = 0
 _Y_MIN        = -4.4   # a real deposit is held at or above
-_FRAC_RANGE   = (1e-6, 1 - 1e-6)
+_FRAC_EPS     = 1e-6
 
 
 def whiten_edep(f: Tensor, generated: Tensor, mu: Tensor, sig: Tensor, e_dep_max: float,
@@ -44,10 +44,9 @@ def whiten_edep(f: Tensor, generated: Tensor, mu: Tensor, sig: Tensor, e_dep_max
     e = _F(f).edep
     if inverse:
         back = e_dep_max * torch.sigmoid(mu + sig*e)
-        new  = torch.where(e > _Y_SPLIT, back, torch.zeros_like(e))
+        new  = torch.where(e > _Y_SPLIT, back, 0.0)
     else:
-        frac = (e / e_dep_max).clamp(*_FRAC_RANGE)
-        y    = (torch.logit(frac) - mu) / sig
+        y    = (torch.logit(e / e_dep_max, eps=_FRAC_EPS) - mu) / sig
         new  = torch.where(e > 0, y.clamp_min(_Y_MIN), _Y_NO_DEPOSIT)
     f = f.clone()   # e still reads the caller's tensor
     _F(f).edep.copy_(torch.where(generated, new, e))

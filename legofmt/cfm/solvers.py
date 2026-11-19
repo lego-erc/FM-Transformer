@@ -89,8 +89,9 @@ def _midpoint(field, man, x, z, t_a, t_b):
         ``(x_b, z_b)``, the state and the latent at ``t_b``.
     """
     dt     = t_b - t_a
-    v1, w1 = field(x, z, t_a, d=dt / 2)
-    v2, w2 = field(man.expmap(x, dt / 2 * v1), z + dt / 2 * w1, t_a + dt / 2, d=torch.zeros_like(dt))
+    h      = dt / 2
+    v1, w1 = field(x, z, t_a, d=h)
+    v2, w2 = field(man.expmap(x, h * v1), z + h * w1, t_a + h, d=torch.zeros_like(dt))
     return man.expmap(x, dt * man.proju(x, v2)), z + dt * w2
 
 

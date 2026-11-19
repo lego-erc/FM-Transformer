@@ -160,7 +160,7 @@ class BaseDist:
         out_oh   = nn.functional.one_hot(self._species_idx(f.out_pid, n_cls), n_cls)
         count    = (out_oh * valid.unsqueeze(-1)).sum(-2).float()
         n_out    = valid.sum(-1, keepdim=True).float()
-        out_set  = torch.cat((torch.log1p(n_out), torch.log1p(count)), dim=-1)
+        out_set  = torch.log1p(torch.cat((n_out, count), dim=-1))
         return torch.cat((f.in_energy, chord, torch.log(t).unsqueeze(-1)), dim=-1), species, out_set
 
     def _species_idx(self, pid: Tensor, n_cls: int) -> Tensor:
