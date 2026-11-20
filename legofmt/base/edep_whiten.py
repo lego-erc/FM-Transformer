@@ -27,6 +27,18 @@ _Y_MIN        = -4.4   # a real deposit is held at or above
 _FRAC_EPS     = 1e-6
 
 
+def whiten(E: Tensor, mu: Tensor, sig: Tensor, e_dep_max: float) -> Tensor:
+    """Whitens a deposit ``E``: ``y = (logit(E / e_dep_max) - mu) / sig``, -6 without deposit."""
+    y = (torch.logit(E / e_dep_max, eps=_FRAC_EPS) - mu) / sig
+    return torch.where(E > 0, y.clamp_min(_Y_MIN), _Y_NO_DEPOSIT)
+
+
+def unwhiten(y: Tensor, mu: Tensor, sig: Tensor, e_dep_max: float) -> Tensor:
+    """Maps ``y`` back to a deposit: ``E = e_dep_max sigmoid(mu + sig y)``, 0 below -4.5."""
+    E = e_dep_max * torch.sigmoid(mu + sig*y)
+    return torch.where(y > _Y_SPLIT, E, 0.0)
+
+
 def whiten_edep(f: Tensor, generated: Tensor, mu: Tensor, sig: Tensor, e_dep_max: float,
                 inverse: bool = False) -> Tensor:
     """Whitens the E_dep token of ``f`` (``inverse``: maps it back) on the events whose E_dep the flow generates.
@@ -41,13 +53,8 @@ def whiten_edep(f: Tensor, generated: Tensor, mu: Tensor, sig: Tensor, e_dep_max
     Returns:
         A copy of ``f``.
     """
-    e = _F(f).edep
-    if inverse:
-        back = e_dep_max * torch.sigmoid(mu + sig*e)
-        new  = torch.where(e > _Y_SPLIT, back, 0.0)
-    else:
-        y    = (torch.logit(e / e_dep_max, eps=_FRAC_EPS) - mu) / sig
-        new  = torch.where(e > 0, y.clamp_min(_Y_MIN), _Y_NO_DEPOSIT)
-    f = f.clone()   # e still reads the caller's tensor
+    e   = _F(f).edep
+    new = unwhiten(e, mu, sig, e_dep_max) if inverse else whiten(e, mu, sig, e_dep_max)
+    f   = f.clone()   # e still reads the caller's tensor
     _F(f).edep.copy_(torch.where(generated, new, e))
     return f

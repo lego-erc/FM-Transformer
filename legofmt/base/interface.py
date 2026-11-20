@@ -152,16 +152,15 @@ class BaseDist:
             species: (B, n_cls), the primary's one-hot.
             out_set: (B, 1 + n_cls), log1p of (multiplicity, count per class).
         """
-        f, n_cls = ds_t.f, len(self.pdgids_template) + 1
-        species  = nn.functional.one_hot(self._species_idx(f.in_pid, n_cls), n_cls).float()
-        t        = f.cond("Size") * f.cond("Density") / x0_gcm2(f.cond("Z"), f.cond("A"))
-        chord    = cuboid_chord(f.in_mom.nan_to_num(1.0), f.in_pos.nan_to_num(1.0), self.cuboid_unit)
-        valid    = ds_t.am.out_p
-        out_oh   = nn.functional.one_hot(self._species_idx(f.out_pid, n_cls), n_cls)
-        count    = (out_oh * valid.unsqueeze(-1)).sum(-2).float()
-        n_out    = valid.sum(-1, keepdim=True).float()
-        out_set  = torch.log1p(torch.cat((n_out, count), dim=-1))
-        return torch.cat((f.in_energy, chord, torch.log(t).unsqueeze(-1)), dim=-1), species, out_set
+        f, n_cls, valid = ds_t.f, len(self.pdgids_template) + 1, ds_t.am.out_p
+        species = nn.functional.one_hot(self._species_idx(f.in_pid, n_cls), n_cls).float()
+        t       = f.cond("Size") * f.cond("Density") / x0_gcm2(f.cond("Z"), f.cond("A"))
+        chord   = cuboid_chord(f.in_mom.nan_to_num(1.0), f.in_pos.nan_to_num(1.0), self.cuboid_unit)
+        count   = _count_per_class(self._species_idx(f.out_pid, n_cls), valid, n_cls)
+        n_out   = valid.sum(-1, keepdim=True).float()
+        out_set = torch.log1p(torch.cat((n_out, count), dim=-1))
+        cont    = torch.cat((f.in_energy, chord, torch.log(t).unsqueeze(-1)), dim=-1)   # (E, chord, log t)
+        return cont, species, out_set
 
     def _species_idx(self, pid: Tensor, n_cls: int) -> Tensor:
         """Maps raw pdgids (with ``pdgid_is_idx``: indices) to class indices in ``[0, n_cls)``."""
@@ -210,23 +209,14 @@ class BaseDist:
         if self.trainer.is_global_zero:
             dev = self.trainer.strategy.root_device
             head.to(dev)
-            cont = []   # standardise (E, chord, log t) on the forward training events
-            with torch.no_grad():
-                for b in self._make_loader(self._train_ds, shuffle=False, bs=2**17):
-                    b = b.to(dev)
-                    cont.append(self._head_inputs(b)[0][b.m.fwd])
-            cont = torch.cat(cont)
+            cont = _forward_cont(self, dev)   # standardise (E, chord, log t) on the forward training events
             std  = cont.std(0)
             head.mean.copy_(cont.mean(0))
             head.std.copy_(std.where(std > 1e-6, torch.inf))
-            loader = self._make_loader(self._train_ds, shuffle=True, bs=self.rc.base_pretrain_bs)
-            epochs = chain.from_iterable(repeat(loader))   # one reshuffled epoch after another
-            final  = self.pretrain_base((b.to(dev) for b in islice(epochs, n)), steps=n)
+            final = self.pretrain_base(_reshuffled_batches(self, n, dev), steps=n)
             head.cpu()
             print(f"base_head: pretrained on {n} batches (final NLL {final:.4f}), frozen")
-        weights = self.trainer.strategy.broadcast({k: v.cpu() for k, v in head.state_dict().items()}, src=0)
-        head.load_state_dict(weights)
-        head.requires_grad_(False)
+        _share_frozen(head, self.trainer.strategy)
 
     # ---- the flow's E_dep token in units of the prior -------------------------
 
@@ -238,3 +228,34 @@ class BaseDist:
         """
         _, mu, sig, _, _, _ = self.base_head_params(ds_t)   # by position: a legacy head returns a plain tuple
         return whiten_edep(f, ds_t.m.edep == 1, mu, sig, self.gen_base.e_dep_max, inverse)
+
+
+# ---- plumbing --------------------------------------------------------------------------------------------------------
+
+def _count_per_class(cls: Tensor, valid: Tensor, n_cls: int) -> Tensor:
+    """Counts each event's valid slots per class: (B, n) class indices -> (B, n_cls), float."""
+    return (nn.functional.one_hot(cls, n_cls) * valid.unsqueeze(-1)).sum(-2).float()
+
+
+def _forward_cont(lego: BaseDist, dev) -> Tensor:
+    """Returns the head's ``cont`` inputs of every forward training event, one unshuffled pass on ``dev``."""
+    cont = []
+    with torch.no_grad():
+        for b in lego._make_loader(lego._train_ds, shuffle=False, bs=2**17):
+            b = b.to(dev)
+            cont.append(lego._head_inputs(b)[0][b.m.fwd])
+    return torch.cat(cont)
+
+
+def _reshuffled_batches(lego: BaseDist, n: int, dev):
+    """Yields ``n`` training batches on ``dev``, one reshuffled epoch after another."""
+    loader = lego._make_loader(lego._train_ds, shuffle=True, bs=lego.rc.base_pretrain_bs)
+    epochs = chain.from_iterable(repeat(loader))
+    return (b.to(dev) for b in islice(epochs, n))
+
+
+def _share_frozen(head: nn.Module, strategy) -> None:
+    """Broadcasts rank 0's weights of ``head`` to every rank and freezes it."""
+    weights = strategy.broadcast({k: v.cpu() for k, v in head.state_dict().items()}, src=0)
+    head.load_state_dict(weights)
+    head.requires_grad_(False)

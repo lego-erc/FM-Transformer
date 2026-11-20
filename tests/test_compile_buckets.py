@@ -64,5 +64,5 @@ def test_stacked_intermediates_are_sliced_on_the_batch_axis() -> None:
 def test_forward_reads_compile_buckets_from_odeint_conf() -> None:
     import inspect
 
-    src = inspect.getsource(Solvers._forward)   # forward is the no_grad wrapper around it
+    src = inspect.getsource(Solvers._solve_as_configured)   # _forward's step that reads odeint_conf
     assert 'cfg.get("compile_buckets")' in src

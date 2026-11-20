@@ -51,14 +51,13 @@ def layer_features(layers: Tensor) -> Tensor:
     t_lam  = t / lambda_mm(rho, A)         # and in interaction lengths
     c_x0   = t_x0.cumsum(0) - t_x0 / 2     # the depth of the layer's centre
     c_lam  = t_lam.cumsum(0) - t_lam / 2
-    period = torch.logspace(*torch.tensor([0.2, 60.0], dtype=torch.float64).log10().tolist(), N_FREQ,
-                            dtype=layers.dtype)
-    ph_x0  = 2 * torch.pi * c_x0[:, None] / period
+    period = _periods(layers.dtype)
+    ph_x0  = 2 * torch.pi * c_x0[:, None] / period            # (Lg, N_FREQ)
     ph_lam = 2 * torch.pi * c_lam[:, None] / (period / 10)
-    material = torch.stack([torch.log(t), torch.log(rho), Z / 100, torch.log(A),
-                            torch.log(t_x0), torch.log(t_lam), torch.log(rho * t)], -1)
-    return torch.cat([material, torch.sin(ph_x0), torch.cos(ph_x0), torch.sin(ph_lam), torch.cos(ph_lam),
-                      c_x0[:, None] / 30, c_lam[:, None] / 3], -1)
+    material = [torch.log(t), torch.log(rho), Z / 100, torch.log(A),
+                torch.log(t_x0), torch.log(t_lam), torch.log(rho * t)]
+    depth    = [torch.sin(ph_x0), torch.cos(ph_x0), torch.sin(ph_lam), torch.cos(ph_lam), c_x0 / 30, c_lam / 3]
+    return _columns(*material, *depth)
 
 
 class GeomEncoder(nn.Module):
@@ -80,3 +79,15 @@ class GeomEncoder(nn.Module):
         """Encodes the geometry into its summary tokens (1, K, h_dim)."""
         h = torch.cat([self.summary[None], self.inp(self.feats)], dim=1)
         return self.out(self.enc(h)[:, :self.K])
+
+
+# ---- plumbing ------------------------------------------------------------------------------------------------------
+
+def _periods(dtype) -> Tensor:
+    """Returns the ``N_FREQ`` periods of the depth features, log-spaced from 0.2 to 60."""
+    return torch.logspace(*torch.tensor([0.2, 60.0], dtype=torch.float64).log10().tolist(), N_FREQ, dtype=dtype)
+
+
+def _columns(*features: Tensor) -> Tensor:
+    """Joins per-layer features, each (Lg,) or (Lg, k), into the columns of one (Lg, n) tensor."""
+    return torch.cat([f[:, None] if f.dim() == 1 else f for f in features], -1)

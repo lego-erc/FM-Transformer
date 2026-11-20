@@ -6,8 +6,10 @@ replaces used (inverse normal CDF, inverse CDF of a categorical, ``u < p``). The
 changes is that an event's randomness no longer depends on its batch, its row or which rows a caller subsets, and
 that two models generating the same keyed events share it -- so the difference between them carries no draw luck.
 
-Without ``rng`` every call site keeps its torch draw (bit-identical to before); ``Noise`` is both behind one name.
-Keys must be unique within a sample: two events with one key get the same randomness.
+Without ``rng`` every call site keeps its torch draw (bit-identical to before); ``Noise`` is both behind one name, and
+so are the functions ``uniform_like``, ``normal_like``, ``randint_like``, ``categorical`` and ``rng_sub``
+(``rng=None``: torch's draw). ``rng_on`` checks a caller's ``rng`` and moves its keys to the events' device. Keys must
+be unique within a sample: two events with one key get the same randomness.
 """
 
 import torch
@@ -37,12 +39,7 @@ def species_rank_ids(pid: torch.Tensor) -> torch.Tensor:
     Returns:
         (B, n) int64 ids.
     """
-    order = pid.argsort(dim=1, stable=True)
-    s = pid.gather(1, order)
-    idx = torch.arange(s.shape[1], device=s.device).expand_as(s)
-    start = torch.cat((torch.ones_like(s[:, :1], dtype=torch.bool), s[:, 1:] != s[:, :-1]), dim=1)
-    first = torch.where(start, idx, 0).cummax(dim=1).values
-    return pid * 4096 + torch.empty_like(s).scatter_(1, order, idx - first)
+    return pid * 4096 + _rank_among_equal(pid)
 
 
 class EventRNG:
@@ -63,13 +60,17 @@ class EventRNG:
         return out
 
     def uniform(self, stream: int, elem=0) -> torch.Tensor:
-        """Samples uniforms in (0, 1), float64, at the draw site ``stream`` and the elements ``elem``."""
-        k = self.keys
-        t = lambda v: torch.as_tensor(v, dtype=torch.int64, device=k.device)
-        h = _mix(_mix(_mix(t(self.seed)) + k) + _mix(t(stream)))
-        e = t(elem)
-        h = h.view(-1, *([1] * e.dim())) if e.dim() < 2 else h.view(-1, *([1] * (e.dim() - 1)))
-        z = _mix(h + e)
+        """Samples uniforms in (0, 1), float64, at the draw site ``stream`` and the elements ``elem``.
+
+        ```
+        site = mix(mix(mix(seed) + key) + mix(stream))    per event
+        z    = mix(site + elem)                           per element
+        u    = (the top 53 bits of z + 1/2) / 2^53
+        ```
+        """
+        site = _mix(_mix(_mix(_int64(self.seed, self.keys)) + self.keys) + _mix(_int64(stream, self.keys)))
+        e    = _int64(elem, self.keys)
+        z    = _mix(_per_event(site, e) + e)
         return ((z >> 11) & ((1 << 53) - 1)).double().add_(0.5).mul_(2.0 ** -53)
 
     def normal(self, stream: int, elem=0) -> torch.Tensor:
@@ -87,10 +88,12 @@ class EventRNG:
         and 1-D ``elem``. Zero-weight columns are never hit.
         """
         cdf = probs.double().cumsum(-1)
-        u = self.uniform(stream, elem).to(cdf.device)
-        one = u.dim() == probs.dim() - 1
-        target = (u * cdf[..., -1])[..., None] if one else u * cdf[..., -1:]
-        idx = torch.searchsorted(cdf, target, right=True).clamp_(max=probs.shape[-1] - 1)
+        u   = self.uniform(stream, elem).to(cdf.device)
+        one = u.dim() == probs.dim() - 1   # one index per row: u as a column
+        if one:
+            u = u[..., None]
+        idx = torch.searchsorted(cdf, u * cdf[..., -1:], right=True)   # the first k with u * total < cdf_k
+        idx = idx.clamp_(max=probs.shape[-1] - 1)                       # u * total can round up to the total
         return idx.squeeze(-1) if one else idx
 
 
@@ -118,3 +121,83 @@ class Noise:
         if self.rng is None:
             return torch.rand(self.shape, device=self.device)
         return self.rng.uniform(stream, self.elem)
+
+
+# One call site's two branches each: torch's draw without ``rng``, the keyed one at ``stream`` with it.
+
+def uniform_like(p: torch.Tensor, rng: EventRNG | None, stream: int, elem=0) -> torch.Tensor:
+    """Samples a uniform on the unit interval per event, shaped like ``p``, in its dtype and on its device.
+
+    ``p`` is (B,) for an int ``elem``, (B, n) for a 1-D tensor ``elem`` (the element ids of the keyed draw).
+    """
+    return torch.rand_like(p) if rng is None else rng.uniform(stream, elem).to(p)
+
+
+def normal_like(p: torch.Tensor, rng: EventRNG | None, stream: int, elem=0) -> torch.Tensor:
+    """Samples a standard normal per event, shaped like ``p``, in its dtype and on its device; ``elem`` as above."""
+    return torch.randn_like(p) if rng is None else rng.normal(stream, elem).to(p)
+
+
+def randint_like(high: int, x: torch.Tensor, rng: EventRNG | None, stream: int) -> torch.Tensor:
+    """Samples an integer in ``[0, high)`` per event, shaped like ``x`` (B,) and on its device."""
+    if rng is None:
+        return torch.randint(high, x.shape, device=x.device)
+    return rng.randint(high, stream).view(x.shape).to(x.device)
+
+
+def categorical(probs: torch.Tensor, rng: EventRNG | None, stream: int, elem=0) -> torch.Tensor:
+    """Samples class indices from the unnormalised ``probs`` (B, K).
+
+    One per row for an int ``elem``; ``len(elem)`` per row, with replacement, for a 1-D tensor ``elem`` (the element
+    ids of the keyed draw, as in ``EventRNG.categorical``).
+    """
+    if rng is not None:
+        return rng.categorical(probs, stream, elem)
+    if isinstance(elem, torch.Tensor):
+        return torch.multinomial(probs, len(elem), replacement=True)
+    return torch.multinomial(probs, 1).squeeze(-1)
+
+
+def rng_sub(rng: EventRNG | None, rows) -> EventRNG | None:
+    """Returns ``rng`` for the subset / reordering ``rows`` of the events (None stays None)."""
+    return None if rng is None else rng.sub(rows)
+
+
+def rng_on(rng: EventRNG | None, events: torch.Tensor) -> EventRNG | None:
+    """Returns ``rng`` for the rows of ``events``, its keys on their device (None stays None).
+
+    On the events' device, because rows are subset by device masks and the draws meet device parameters.
+
+    Raises:
+        ValueError: ``rng`` does not hold one key per row of ``events``.
+    """
+    if rng is None:
+        return None
+    if len(rng.keys) != len(events):
+        raise ValueError(f"rng needs one key per event: {len(rng.keys)} keys for {len(events)} events")
+    return EventRNG(rng.keys.to(events.device), rng.seed)
+
+
+# ---- plumbing --------------------------------------------------------------------------------------------------------
+
+def _rank_among_equal(v: torch.Tensor) -> torch.Tensor:
+    """Ranks each entry of ``v`` (B, n) among the entries of its row with the same value, in slot order."""
+    order = v.argsort(dim=1, stable=True)
+    s = v.gather(1, order)
+    idx = torch.arange(s.shape[1], device=s.device).expand_as(s)
+    start = torch.cat((torch.ones_like(s[:, :1], dtype=torch.bool), s[:, 1:] != s[:, :-1]), dim=1)
+    first = torch.where(start, idx, 0).cummax(dim=1).values
+    return torch.empty_like(s).scatter_(1, order, idx - first)
+
+
+def _int64(v, like: torch.Tensor) -> torch.Tensor:
+    """Converts ``v`` to an int64 tensor on the device of ``like``."""
+    return torch.as_tensor(v, dtype=torch.int64, device=like.device)
+
+
+def _per_event(h: torch.Tensor, e: torch.Tensor) -> torch.Tensor:
+    """Shapes the per-event ``h`` (B,) to broadcast against the element ids ``e``.
+
+    A scalar or ids shared by every event (n,) give ``(B, *e.shape)``; per-event ids (B, ...) keep their shape.
+    """
+    return h.view(-1, *([1] * e.dim())) if e.dim() < 2 else h.view(-1, *([1] * (e.dim() - 1)))

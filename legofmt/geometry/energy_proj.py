@@ -39,12 +39,16 @@ class EnergyProjections(LegacyEnergyTransforms):
 
     def to_scalar_e(self, e_mev: Tensor, eps: float = 1e-8) -> Tensor:
         """Converts an energy [MeV] to the incoming scalar, held in [0, 1]."""
-        return (torch.log(e_mev.clamp_min(eps) / self.cutoff) / self.log_range).clamp(0.0, 1.0)
+        E = e_mev.clamp_min(eps)
+        e = torch.log(E / self.cutoff) / self.log_range
+        return e.clamp(0.0, 1.0)
 
     def from_scalar(self, dir_: Tensor, e: Tensor) -> Tensor:
         """Inverts ``to_scalar``: the incoming scalar and a unit direction -> the momentum [MeV]."""
-        return dir_ * (self.cutoff * (self.max_energy / self.cutoff) ** e.clamp(0.0, 1.0))
+        e = e.clamp(0.0, 1.0)
+        return dir_ * (self.cutoff * (self.max_energy / self.cutoff) ** e)
 
     def to_mev(self, e_out: Tensor, e_in: Tensor) -> Tensor:
         """Converts an outgoing scalar to MeV, given its event's incoming scalar ``e_in``."""
-        return self.cutoff * (self.max_energy / self.cutoff) ** ((1 - e_out.clamp(0.0, 1.0)) * e_in.clamp(0.0, 1.0))
+        e_out, e_in = e_out.clamp(0.0, 1.0), e_in.clamp(0.0, 1.0)
+        return self.cutoff * (self.max_energy / self.cutoff) ** ((1 - e_out) * e_in)

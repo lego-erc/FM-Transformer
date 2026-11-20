@@ -18,9 +18,9 @@ why ``edep_by_primary`` exists.
 
 import torch
 
-from legofmt.data.struct import CHANNELS, DataStruct, _F
-
+from legofmt.data.struct import CHANNELS, _F
 from legofmt.geometry.geom_trafos import GeomTrafos
+from legofmt.numerics import masked_mean
 
 _GEOM = GeomTrafos()
 
@@ -45,19 +45,6 @@ PRIMARY_TAGS = {11: "em", -11: "ep", 22: "g", 2212: "p", 2112: "n",
 UNSYNCED_PREFIXES = ("val/w1_edep/", "val/edep_ratio_multi/")
 
 
-def _mom_e_pos(tokens):
-    """Returns the momentum, energy and position channels of particle tokens."""
-    e, mom, pos, *_ = tokens.tensor_split(CHANNELS, dim=-1)
-    return mom, e, pos
-
-
-def _spherical(mom, e, pos):
-    """Returns ``(mom theta, mom phi, energy, pos theta, pos phi)`` per particle."""
-    mom_dir = mom / mom.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-    pos_dir = pos / pos.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-    return torch.cat([_GEOM.to_sph(mom_dir), e, _GEOM.to_sph(pos_dir)], dim=-1)
-
-
 def particle_kinematics(mom, e, pos, active):
     """Returns the five kinematic features of every real particle, (N, 5)."""
     return _spherical(mom, e, pos)[active]
@@ -68,11 +55,10 @@ def event_summary(mom, e, pos, pdgid, active, e_dep):
     kin = _spherical(mom, e, pos)
     feats = []
     for pid in _TYPES:
-        m = ((pdgid == pid) & active).unsqueeze(-1).to(kin.dtype)
-        n = m.sum(1).clamp(min=1)
-        mean = (kin * m).sum(1) / n
-        var = (((kin - mean.unsqueeze(1)) ** 2) * m).sum(1) / n
-        feats += [mean, var.sqrt()]
+        m    = ((pdgid == pid) & active).unsqueeze(-1).to(kin.dtype)   # the event's particles of this species
+        mean = masked_mean(kin, m, dim=1)
+        var  = masked_mean((kin - mean.unsqueeze(1)) ** 2, m, dim=1)
+        feats += [mean, torch.sqrt(var)]
     return torch.cat([*feats, e_dep.unsqueeze(-1)], dim=-1)
 
 
@@ -87,32 +73,30 @@ def standardize(a, b):
     return (a - mu) / sigma, (b - mu) / sigma
 
 
-def _median_heuristic(X, Y, max_samples=2000):
-    """Returns the kernel bandwidth: the median squared distance within the pooled (subsampled) sets."""
-    c = torch.cat([X, Y], dim=0)
-    if c.shape[0] > max_samples:
-        c = c[torch.randperm(c.shape[0], device=c.device)[:max_samples]]
-    D = torch.cdist(c, c).square()
-    off = ~torch.eye(D.shape[0], dtype=torch.bool, device=c.device)
-    return D[off].median().clamp(min=1e-8)
-
-
 def compute_mmd(X, Y, max_samples=2000):
-    """Returns the unbiased MMD of two sets under the Gaussian kernel, each subsampled to bound the N**2 kernels."""
-    X, Y = (a[torch.randperm(a.shape[0], device=a.device)[:max_samples]] if a.shape[0] > max_samples else a
-            for a in (X, Y))
+    """Returns the unbiased MMD of two sets under the Gaussian kernel, each subsampled to bound the N**2 kernels.
+
+    ```
+    MMD**2 = mean_{i != j} k(x_i, x_j) + mean_{i != j} k(y_i, y_j) - 2 mean_{i, j} k(x_i, y_j)
+    k(a, b) = exp(-|a - b|**2 / bw),   bw = the median squared distance within the pooled sets
+    ```
+    """
+    X, Y = _subsample(X, max_samples), _subsample(Y, max_samples)
     bw = _median_heuristic(X, Y)
-    k = lambda a, b: torch.exp(-torch.cdist(a, b).square() / bw)
+    k = lambda a, b: torch.exp(-torch.cdist(a, b) ** 2 / bw)
     Kxx, Kyy, Kxy = k(X, X), k(Y, Y), k(X, Y)
     n, m = X.shape[0], Y.shape[0]
-    mmd_sq = ((Kxx.sum() - Kxx.diag().sum()) / (n * (n - 1)) + (Kyy.sum() - Kyy.diag().sum()) / (m * (m - 1))
-              - 2 * Kxy.mean())
-    return mmd_sq.clamp(min=0).sqrt()
+    mmd_sq = (
+        (Kxx.sum() - Kxx.diag().sum()) / (n * (n - 1))
+        + (Kyy.sum() - Kyy.diag().sum()) / (m * (m - 1))
+        - 2 * Kxy.mean()
+    )
+    return torch.sqrt(mmd_sq.clamp(min=0))
 
 
 def w1_per_feature(X, Y):
     """Returns the 1-Wasserstein distance per feature of two sets of equal size."""
-    return (X.sort(0).values - Y.sort(0).values).abs().mean(0)
+    return torch.abs(X.sort(0).values - Y.sort(0).values).mean(0)
 
 
 def edep_by_primary(edep_real, edep_fake, pdgid_in, n_out) -> dict:
@@ -131,9 +115,9 @@ def edep_by_primary(edep_real, edep_fake, pdgid_in, n_out) -> dict:
         sel = pdgid_in == pid
         if not bool(sel.any()):
             continue
-        out[f"val/w1_edep/{tag}"] = (edep_real[sel].sort().values - edep_fake[sel].sort().values).abs().mean()
+        out[f"val/w1_edep/{tag}"] = torch.abs(edep_real[sel].sort().values - edep_fake[sel].sort().values).mean()
         multi = sel & (n_out >= 2)
-        if int(multi.sum()) >= 32:
+        if int(multi.sum()) >= 32:   # enough events for a mean
             out[f"val/edep_ratio_multi/{tag}"] = edep_fake[multi].mean() / edep_real[multi].mean().clamp(min=1e-8)
     return out
 
@@ -145,58 +129,104 @@ def edep_layer_metrics(real: torch.Tensor, fake: torch.Tensor) -> dict:
     and spread, and the ratio of the mean energy-weighted depth (in layers).
     """
     live = real.mean(0) > 0
-    l = torch.arange(real.shape[1], device=real.device, dtype=real.dtype)
-    depth = lambda E: ((E * l).sum(1) / E.sum(1).clamp(min=1e-12))[E.sum(1) > 0].mean()
+    l    = torch.arange(real.shape[1], device=real.device, dtype=real.dtype)   # each layer's depth
     return {
         "val/layers/mean_ratio": (fake.mean(0) / real.mean(0))[live].median(),
         "val/layers/sd_ratio": (fake.std(0) / real.std(0).clamp(min=1e-12))[live].median(),
-        "val/layers/depth_ratio": depth(fake) / depth(real),
+        "val/layers/depth_ratio": mean_depth(fake, l) / mean_depth(real, l),
     }
+
+
+def mean_depth(E: torch.Tensor, l: torch.Tensor) -> torch.Tensor:
+    """Returns the energy-weighted depth ``sum_l l E_l / sum_l E_l``, averaged over the events with a deposit.
+
+    ``E`` (B, n_layers), ``l`` (n_layers,) the layers' depths.
+    """
+    return ((E * l).sum(1) / E.sum(1).clamp(min=1e-12))[E.sum(1) > 0].mean()
 
 
 class ShowerValMetrics:
     """Generates the batch with the model and returns every metric of the module docstring, by its log name."""
 
     def __call__(self, lego, ds_t) -> dict:
-        gen = _F(self._generate(lego, ds_t))
-        # decode the overflow sentinel as to_mev / denorm_edep_layer do: a generated -overflow_delta
-        # is a truth zero, and compared raw it inflated val/mmd_particle 4.5x on plateSi_131026
-        gen.out_energy.clamp_(0.0, 1.0)
-        gen.edep.clamp_(0.0, 1.0)
+        gen = _overflow_decoded(_F(self._generate(lego, ds_t)))
         active, pdg = ds_t.am.out_p, ds_t.f.out_pid
-        sides = ((ds_t.f.out_cc, ds_t.f.edep), (gen.out_p, gen.edep))  # (outgoing, E_dep) of the truth, generated
-        reps = {
-            "particle": (KIN_NAMES, *(particle_kinematics(*_mom_e_pos(cc), active) for cc, _ in sides)),
-            "summary": (SUMMARY_FEATURE_NAMES, *(event_summary(*_mom_e_pos(cc), pdg, active, ed) for cc, ed in sides)),
+        real, fake  = _mom_e_pos(ds_t.f.out_cc), _mom_e_pos(gen.out_p)
+        out = {
+            **_compare("particle", KIN_NAMES,
+                       particle_kinematics(*real, active), particle_kinematics(*fake, active)),
+            **_compare("summary", SUMMARY_FEATURE_NAMES,
+                       event_summary(*real, pdg, active, ds_t.f.edep), event_summary(*fake, pdg, active, gen.edep)),
+            **edep_by_primary(ds_t.f.edep, gen.edep, ds_t.f.in_pid.long(), active.sum(-1)),
         }
-        out = {}
-        for tag, (names, real, fake) in reps.items():
-            real_s, fake_s = standardize(real, fake)
-            out[f"val/mmd_{tag}"] = compute_mmd(fake_s, real_s)
-            out.update({f"val/w1_{tag}/{n}": w1 for n, w1 in zip(names, w1_per_feature(fake_s, real_s))})
-        out.update(edep_by_primary(ds_t.f.edep, gen.edep, ds_t.f.in_pid.long(), active.sum(-1)))
         if getattr(lego, "edep_ae", None) is not None and ds_t.edep_layers is not None:
-            dp = lego._edep_dp
-            e_in = dp.pen.from_scalar(ds_t.f.in_mom, ds_t.f.in_energy).norm(dim=-1)
-            fake = lego.edep_ae.sample(lego._edep_latents,
-                                       dp.denorm_edep_margin(gen.edep.float(), e_in.float(), ds_t.f.in_pid))
-            out.update(edep_layer_metrics(dp.denorm_edep_layer(ds_t.edep_layers.float()), fake))
+            out.update(edep_layer_metrics(*_layers_mev(lego, ds_t, gen.edep)))
         return out
 
     @staticmethod
     def _generate(lego, ds_t):
-        """Generates with the ``odeint_conf`` solver settings.
-
-        The directions are canonicalised first when ``canon_sym`` is on, exactly as ``Solvers.forward``.
-        """
+        """Generates with the ``odeint_conf`` solver settings, in and out of the flow's frame as ``Solvers.forward``."""
         cfg = lego.rc.odeint_conf
-        sym = getattr(lego, "sym", None)
-        fwd = ds_t.m.fwd
-        if sym is not None:
-            face = sym.face_of(ds_t.f.in_pos)
-            ds_t = DataStruct(lego._canon_dirs(ds_t.f.full, face, fwd), ds_t.m.full, ds_t.am.full)
+        ds_t, frame = lego._enter_frame(ds_t)
         out = lego.solve(ds_t, x_init=lego.gen_base_wrapper(ds_t), step_size=cfg.get("step_size", 0.04),
                          method=cfg.get("method", "midpoint"))
-        if getattr(lego.rc, "dir_zoom", None):
-            out = lego._zoom_dirs(out, ds_t.am.full, fwd, inverse=True, pdgids=ds_t.f.pdgids)
-        return out if sym is None else lego._canon_dirs(out, face, fwd, inverse=True)
+        return lego._leave_frame(out, ds_t, frame)
+
+
+# ---- plumbing --------------------------------------------------------------------------------------------------------
+
+def _mom_e_pos(tokens):
+    """Returns the momentum, energy and position channels of particle tokens."""
+    e, mom, pos, *_ = tokens.tensor_split(CHANNELS, dim=-1)
+    return mom, e, pos
+
+
+def _spherical(mom, e, pos):
+    """Returns ``(mom theta, mom phi, energy, pos theta, pos phi)`` per particle."""
+    mom_sph = _GEOM.to_sph(_unit(mom))
+    pos_sph = _GEOM.to_sph(_unit(pos))
+    return torch.cat([mom_sph, e, pos_sph], dim=-1)
+
+
+def _unit(v):
+    """Returns the directions of ``v`` (..., 3), its norm held at 1e-8 or above."""
+    return v / v.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+
+
+def _subsample(a, max_samples):
+    """Returns at most ``max_samples`` rows of ``a``, a random subset when it has more."""
+    return a[torch.randperm(a.shape[0], device=a.device)[:max_samples]] if a.shape[0] > max_samples else a
+
+
+def _median_heuristic(X, Y, max_samples=2000):
+    """Returns the kernel bandwidth: the median squared distance within the pooled (subsampled) sets."""
+    c = _subsample(torch.cat([X, Y], dim=0), max_samples)
+    D = torch.cdist(c, c) ** 2
+    off = ~torch.eye(D.shape[0], dtype=torch.bool, device=c.device)
+    return D[off].median().clamp(min=1e-8)
+
+
+def _compare(tag, names, real, fake) -> dict:
+    """Returns the MMD and the per-feature W1 of the standardised sets, by log name."""
+    real_s, fake_s = standardize(real, fake)
+    return {f"val/mmd_{tag}": compute_mmd(fake_s, real_s),
+            **{f"val/w1_{tag}/{n}": w1 for n, w1 in zip(names, w1_per_feature(fake_s, real_s))}}
+
+
+def _overflow_decoded(gen: _F) -> _F:
+    """Decodes the overflow sentinel in place, as to_mev / denorm_edep_layer do, and returns ``gen``.
+
+    A generated -overflow_delta is a truth zero: compared raw it inflated val/mmd_particle 4.5x on plateSi_131026.
+    """
+    gen.out_energy.clamp_(0.0, 1.0)
+    gen.edep.clamp_(0.0, 1.0)
+    return gen
+
+
+def _layers_mev(lego, ds_t, gen_edep):
+    """Returns the true and the decoded per-layer E_dep [MeV], (B, n_layers) each (the decoded first: it draws)."""
+    dp   = lego._edep_dp
+    e_in = dp.pen.from_scalar(ds_t.f.in_mom, ds_t.f.in_energy).norm(dim=-1)
+    edep = dp.denorm_edep_margin(gen_edep.float(), e_in.float(), ds_t.f.in_pid)
+    fake = lego.edep_ae.sample(lego._edep_latents, edep)
+    return dp.denorm_edep_layer(ds_t.edep_layers.float()), fake

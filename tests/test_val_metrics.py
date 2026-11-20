@@ -97,6 +97,12 @@ class _StubLego:
     def solve(self, ds_t, x_init, **_kw):
         return x_init
 
+    def _enter_frame(self, ds_t):   # no canon_sym, no dir_zoom: the frame the batch is in
+        return ds_t, None
+
+    def _leave_frame(self, x, ds_t, frame):
+        return x
+
 
 def test_shower_val_metrics_returns_a_finite_dict_of_synced_static_keys():
     B, L = 16, 8

@@ -39,14 +39,6 @@ class CubeSymmetry:
     def __init__(self) -> None:
         self._cache: dict = {}
 
-    def _rot(self, like: torch.Tensor, name: str = "_R") -> torch.Tensor:
-        """Returns the matrix table ``name`` on the device and dtype of ``like`` (cached)."""
-        key = (name, like.device, like.dtype)
-        r = self._cache.get(key)
-        if r is None:
-            r = self._cache[key] = getattr(self, name).to(like)
-        return r
-
     def _mat(self, like, face, g):
         """Returns each event's matrix: its face's rotation, then the stabiliser element ``g`` if given."""
         r = self._rot(like)[face]
@@ -54,8 +46,8 @@ class CubeSymmetry:
 
     def face_of(self, pos):
         """Returns the face a position direction points at: 2 * (its dominant axis) + (it is negative there)."""
-        axis = pos.abs().argmax(-1)
-        neg = pos.gather(-1, axis.unsqueeze(-1)).squeeze(-1) < 0
+        axis = torch.abs(pos).argmax(-1)
+        neg  = _component(pos, axis) < 0
         return 2 * axis + neg.long()
 
     def canonicalize(self, dirs, face, g=None):
@@ -65,3 +57,18 @@ class CubeSymmetry:
     def uncanonicalize(self, dirs, face, g=None):
         """Inverts ``canonicalize``."""
         return torch.einsum("b...i,bij->b...j", dirs, self._mat(dirs, face, g))
+
+    def _rot(self, like: torch.Tensor, name: str = "_R") -> torch.Tensor:
+        """Returns the matrix table ``name`` on the device and dtype of ``like`` (cached)."""
+        key = (name, like.device, like.dtype)
+        r = self._cache.get(key)
+        if r is None:
+            r = self._cache[key] = getattr(self, name).to(like)
+        return r
+
+
+# ---- plumbing --------------------------------------------------------------------------------------------------------
+
+def _component(v: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
+    """Returns each vector's component ``idx``: ``v[..., idx]`` per row."""
+    return v.gather(-1, idx.unsqueeze(-1)).squeeze(-1)

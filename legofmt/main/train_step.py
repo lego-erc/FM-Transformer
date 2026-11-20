@@ -15,10 +15,11 @@ flow map   + fac (lv_f + every exp(-lv_f) L_fm)            on the steps it fires
            + fac lv_f                                      on the others: in expectation the Kendall term
 ```
 
-The formulas are module functions (``sd3_time``, ``loss_cells``, ``kendall_total``); ``TrainStep`` puts the batch
-into the frame the flow learns in, samples the path, and reduces. Inverse events (``mask_conf.p_forward < 1``), the
-``sm_norm`` time and reflow are :mod:`legofmt.legacy.train_step`. ``reduce_loss`` returns ``(total, logs)`` so that
-it runs without a Trainer; ``LEGOLtngDirect`` (``legacy/reflow.py``) reuses it.
+The formulas are module functions (``sd3_time``, ``latent_path``, ``loss_cells``, ``kendall_total``,
+``flow_map_term``); ``TrainStep`` puts the batch into the frame the flow learns in, samples the path, and reduces.
+Inverse events (``mask_conf.p_forward < 1``), the ``sm_norm`` time and reflow are :mod:`legofmt.legacy.train_step`.
+``reduce_loss`` returns ``(total, logs)`` so that it runs without a Trainer; ``LEGOLtngDirect`` (``legacy/reflow.py``)
+reuses it.
 """
 
 import torch
@@ -26,6 +27,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from legofmt.data.struct import DataStruct, _F
+from legofmt.numerics import held
 
 from legofmt.distill.distill import one_step_euler_loss
 from legofmt.log_metrics.val_metrics import UNSYNCED_PREFIXES
@@ -37,6 +39,11 @@ _CELLS = {"energy": slice(0, 1), "out_dir": slice(1, 4), "out_pos": slice(4, 7)}
 def sd3_time(u, s):
     """Returns SD3's mode-sampled time for ``u ~ U(0, 1)`` and scale ``s``; ``s = 0`` is uniform."""
     return 1 - u + s / 3 * (torch.sin(torch.pi / 2 * u) ** 2 - u)
+
+
+def latent_path(z0: Tensor, z1: Tensor, t: Tensor) -> tuple[Tensor, Tensor]:
+    """Returns the edep_ae latent's point ``z_t = z_0 + t (z_1 - z_0)`` and its velocity ``z_1 - z_0``."""
+    return z0 + t * (z1 - z0), z1 - z0
 
 
 def loss_cells(sq: Tensor, gen: Tensor, edep_cell: bool, sq_lat: Tensor | None = None) -> dict[str, Tensor]:
@@ -69,6 +76,14 @@ def kendall_total(cells: dict[str, Tensor], lv: Tensor) -> Tensor:
     return sum(w[i] * L for i, L in enumerate(cells.values())) + lv.sum()
 
 
+def flow_map_term(l_fm: Tensor, fac: float, every: int, lv_f: Tensor | None = None) -> Tensor:
+    """Returns ``fac every exp(-lv_f) L_fm``, the flow-map term on a step it fires (``fac every L_fm`` without lv_f)."""
+    w = fac * every
+    if lv_f is not None:
+        w = w * torch.exp(-lv_f)
+    return w * l_fm
+
+
 class TrainStep:
     """Training-step mixin for :class:`~legofmt.main.modules.LEGOLtng`."""
 
@@ -82,37 +97,33 @@ class TrainStep:
         Returns:
             The loss (a scalar).
         """
-        layers = ds_t.edep_layers
+        layers = ds_t.edep_layers   # taken first: the frame's rewrapped batches drop it
         ds_t, model = self._length_bucket(ds_t)
         with torch.no_grad():
             ds_t = self._flow_frame(ds_t)
             base = self.gen_base_wrapper(ds_t, all_forward=not self.rc.inverse_events)
-            z0, z1 = self._latent_ends(layers, base)
+            z    = self._latent_ends(layers, base)
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
             t = self._sample_t(ds_t)
             if self.reflow_teacher is not None: ds_t = self._reflow_coupling(ds_t, base)   # legacy: reflow
             ds_t = DataStruct(self._edep_whiten(ds_t.f.full, ds_t), ds_t.m.full, ds_t.am.full)   # base's E_dep unit
             path = self.ps.sample(base, ds_t.f.model_in, t)
-            z_t  = None if z0 is None else z0 + path.t * (z1 - z0)
+            z_t, dz = (None, None) if z is None else latent_path(*z, path.t)
 
         v, v_z = self._velocity(model, path, ds_t, pdgid_idx, z_t)
-        sq_lat = None if z_t is None else (v_z - (z1 - z0)) ** 2
+        sq_lat = None if z is None else (v_z - dz) ** 2
         loss, logs = self.reduce_loss((v - path.dx_t) ** 2, ds_t, sq_lat)
-        if logs:
-            self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
-        return self._flow_map_loss(loss, base, ds_t, pdgid_idx, model, z=None if z0 is None else (z0, z1))
+        self._log_step(logs)
+        return self._flow_map_loss(loss, base, ds_t, pdgid_idx, model, z=z)
 
     def training_step(self, batch: DataStruct, _batch_idx: int | Tensor) -> Tensor:
         return self._step(batch, _batch_idx)
 
     @torch.no_grad()
     def validation_step(self, batch: DataStruct, _batch_idx: int | Tensor) -> Tensor:
-        bs = len(batch)
         loss = self._step(batch, _batch_idx)
-        self.log("Validation Loss", loss, on_step=True, on_epoch=True, sync_dist=True, batch_size=bs)
-        for name, val in self.val_metrics(self, batch).items():
-            # population-dependent keys are logged unsynced (deadlock: see UNSYNCED_PREFIXES)
-            self.log(name, val, on_epoch=True, sync_dist=not name.startswith(UNSYNCED_PREFIXES), batch_size=bs)
+        self._log_validation(loss, len(batch))
+        self._log_val_metrics(self.val_metrics(self, batch), len(batch))
         return loss
 
     # ---- the loss -----------------------------------------------------------------------------------------------
@@ -128,22 +139,12 @@ class TrainStep:
         Returns:
             ``(total, logs)``: the loss, and in training the unweighted cells (and the weights' variances) to log.
         """
-        cells = loss_cells(sq, ((ds_t.m.full == 1) & (ds_t.am.full == 1)).unsqueeze(-1), self.rc.edep_cell, sq_lat)
+        cells = loss_cells(sq, _generated(ds_t), self.rc.edep_cell, sq_lat)
         if self.rc.learned_loss_weights:
-            with torch.no_grad():   # in place: below the floor clamp() has zero gradient, and a cell would latch there
-                self.lv.clamp_(min=self.lv_floor)
-            total = kendall_total(cells, self.lv)
+            total = kendall_total(cells, held(self.lv, self.lv_floor))
         else:
             total = sum(cells.values())
-        if not self.training:
-            return total, {}
-
-        logs = {f"loss/{c}": L.detach() for c, L in cells.items()}   # unweighted: comparable across weightings
-        logs["loss/raw"] = (cells["energy"] + cells["out_dir"] + cells["out_pos"]).detach()
-        if self.rc.learned_loss_weights:
-            var = self.lv.detach().exp()
-            logs.update({f"loss_weight/var_{c.removeprefix('out_')}": var[i] for i, c in enumerate(cells)})
-        return total, logs
+        return total, (self._loss_logs(cells) if self.training else {})
 
     def _flow_map_loss(self, loss: Tensor, base: Tensor, ds_t: DataStruct, pdgid_idx: Tensor, model=None,
                        z=None) -> Tensor:
@@ -163,27 +164,16 @@ class TrainStep:
         fac, every = self.rc.one_step_euler_fac, self.rc.one_step_euler_every
         if fac <= 0:
             return loss
-        lv_f = None
-        if hasattr(self, "lv_flow"):
-            # L_fm (~5e-5) runs three decades below the velocity cells, so its weight has a floor of its own;
-            # in place, so the gradient stays live on the floor
-            with torch.no_grad():
-                self.lv_flow.clamp_(min=self.rc.max_loss_weight_flow)
-            lv_f = self.lv_flow.squeeze()
-            loss = loss + fac * lv_f
+        lv_f = self._flow_map_lv()
+        if lv_f is not None:
+            loss = loss + fac * lv_f                                  # the Kendall barrier, on every step
         if self.training and self.global_step % every != 0:
             return loss
 
         l_fm = one_step_euler_loss(self, base, ds_t, pdgid_idx, model, z=z)
-        w = fac * (every if self.training else 1)
-        if lv_f is not None:
-            w = w * torch.exp(-lv_f)
-        if self.training:
-            logs = {"loss/one_step_euler": l_fm.detach()}
-            if lv_f is not None:
-                logs["loss_weight/var_flow"] = lv_f.detach().exp()
-            self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
-        return loss + w * l_fm
+        self._log_step({"loss/one_step_euler": l_fm,
+                        "loss_weight/var_flow": None if lv_f is None else torch.exp(lv_f.detach())})
+        return loss + flow_map_term(l_fm, fac, every if self.training else 1, lv_f)
 
     # ---- the batch, the path, the field ---------------------------------------------------------------------------
 
@@ -201,13 +191,7 @@ class TrainStep:
         ds_t = DataStruct(ds_t.f.full, m, ds_t.am.full)
         if self.rc.overflow_delta > 0:
             ds_t = self._shift_overflow_targets(ds_t)
-        if self.sym is not None:
-            face = self.sym.face_of(ds_t.f.in_pos)
-            g    = torch.randint(8, face.shape, device=face.device) if self.rc.sym_aug else None
-            ds_t = DataStruct(self._canon_dirs(ds_t.f.full, face, ds_t.m.fwd, g=g), m, ds_t.am.full)
-        if self.rc.dir_zoom:
-            ds_t = DataStruct(self._zoom_dirs(ds_t.f.full, ds_t.am.full, ds_t.m.fwd, pdgids=ds_t.f.pdgids), m,
-                              ds_t.am.full)
+        ds_t, _ = self._enter_frame(ds_t, zoom=True, aug=self.rc.sym_aug)
         return ds_t
 
     def _shift_overflow_targets(self, ds_t: DataStruct) -> DataStruct:
@@ -223,14 +207,16 @@ class TrainStep:
         if self.rc.t_dist != "sd3" or self.rc.t_dist_shift != 1.0: return self._sample_t_options(ds_t)   # legacy
         return sd3_time(torch.rand_like(ds_t.f.d), self.rc.t_dist_scale)
 
-    def _latent_ends(self, layers: Tensor | None, base: Tensor) -> tuple[Tensor | None, Tensor | None]:
+    def _latent_ends(self, layers: Tensor | None, base: Tensor) -> tuple[Tensor, Tensor] | None:
         """Returns the edep_ae latent's ``(z_0, z_1)``: noise, and the encoding of the true per-layer deposits.
+
+        None without an edep_ae.
 
         Raises:
             ValueError: the dataset has no per-layer E_dep.
         """
         if self.edep_ae is None:
-            return None, None
+            return None
         if layers is None:
             raise ValueError("model_conf.edep_ae needs a dataset with per-layer E_dep (E_dep_layers).")
         z1 = self.edep_ae.encode(self._edep_dp.denorm_edep_layer(layers).to(base.dtype))
@@ -238,16 +224,55 @@ class TrainStep:
 
     def _velocity(self, model, path, ds_t: DataStruct, pdgid_idx: Tensor,
                   z_t: Tensor | None) -> tuple[Tensor, Tensor | None]:
-        """Returns the field's velocity at ``(x_t, t)``, and the latent's (None without one).
+        """Returns the field's velocity at ``(x_t, t)``, and the latent's (None without one)."""
+        am = ds_t.am.full
+        v  = model(path.x_t, path.t, mask=ds_t.m.full, attn_mask=am, types=self.types_embd[:, :am.shape[1]],
+                   pdgids=pdgid_idx, **self._field_extras(path, z_t))
+        return v if z_t is not None else (v, None)
+
+    # ---- plumbing -------------------------------------------------------------------------------------------------
+
+    def _flow_map_lv(self) -> Tensor | None:
+        """Returns the flow-map term's log-variance held on its floor, or None without learned loss weights.
+
+        L_fm (~5e-5) runs three decades below the velocity cells, so its weight has a floor of its own.
+        """
+        if not hasattr(self, "lv_flow"):
+            return None
+        return held(self.lv_flow, self.rc.max_loss_weight_flow).squeeze()
+
+    def _field_extras(self, path, z_t: Tensor | None) -> dict:
+        """Returns the field's optional inputs: the step ``d = 0`` (``step_cond``), the latent's ``z_t`` (edep_ae).
 
         ``d = 0`` goes in as a tensor, not None: the flow-map calls pass one, and None is a dynamo guard of its own.
         """
-        m, am = ds_t.m.full, ds_t.am.full
         step = {"d": torch.zeros_like(path.t)} if getattr(self.model.vf, "step_cond", False) else {}
         lat  = {} if z_t is None else {"z": z_t}
-        v = model(path.x_t, path.t, mask=m, attn_mask=am, types=self.types_embd[:, :am.shape[1]], pdgids=pdgid_idx,
-                  **step, **lat)
-        return v if lat else (v, None)
+        return {**step, **lat}
+
+    def _loss_logs(self, cells: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Returns the cells unweighted (comparable across weightings), their raw sum, and the learned variances."""
+        logs = {f"loss/{c}": L.detach() for c, L in cells.items()}
+        logs["loss/raw"] = (cells["energy"] + cells["out_dir"] + cells["out_pos"]).detach()
+        if self.rc.learned_loss_weights:
+            var = torch.exp(self.lv.detach())
+            logs.update({f"loss_weight/var_{c.removeprefix('out_')}": var[i] for i, c in enumerate(cells)})
+        return logs
+
+    def _log_step(self, logs: dict) -> None:
+        """Logs a training step's scalars (None: absent), detached and unsynced; nothing outside training."""
+        logs = {k: v.detach() for k, v in logs.items() if v is not None}
+        if self.training and logs:
+            self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
+
+    def _log_validation(self, loss: Tensor, bs: int) -> None:
+        """Logs the validation loss, per step and per epoch, synced."""
+        self.log("Validation Loss", loss, on_step=True, on_epoch=True, sync_dist=True, batch_size=bs)
+
+    def _log_val_metrics(self, metrics: dict, bs: int) -> None:
+        """Logs the validation metrics per epoch; population-dependent keys unsynced (deadlock: UNSYNCED_PREFIXES)."""
+        for name, val in metrics.items():
+            self.log(name, val, on_epoch=True, sync_dist=not name.startswith(UNSYNCED_PREFIXES), batch_size=bs)
 
     # ---- length buckets -------------------------------------------------------------------------------------------
 
@@ -289,3 +314,8 @@ class TrainStep:
                 None if d is None else d[i, :L].contiguous(),
             ), (0, 0, 0, x.shape[1] - L)) for i, L in pieces])
         return run
+
+
+def _generated(ds_t: DataStruct) -> Tensor:
+    """Returns the generated tokens, (B, L, 1): the loss mask on the real tokens."""
+    return ((ds_t.m.full == 1) & (ds_t.am.full == 1)).unsqueeze(-1)

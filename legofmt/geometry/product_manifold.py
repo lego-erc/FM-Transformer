@@ -15,10 +15,10 @@ def sphere_logmap(x, y):
     flow_matching's ``acos(x.y)`` keeps few digits of small angles in fp32 (median relative error 2% at 1e-3 rad, 15% at
     3e-4), the scale of one short flow-map step.
     """
-    u  = (y - x) - (x * (y - x)).sum(-1, keepdim=True) * x
-    su = u.norm(dim=-1, keepdim=True)
-    th = torch.atan2(su, (x * y).sum(-1, keepdim=True))
-    return u * (th / su.clamp_min(torch.finfo(su.dtype).tiny))
+    u     = (y - x) - _dot(x, y - x) * x   # y - x, projected onto the tangent space at x
+    norm  = u.norm(dim=-1, keepdim=True)
+    theta = torch.atan2(norm, _dot(x, y))
+    return u * (theta / norm.clamp_min(torch.finfo(norm.dtype).tiny))
 
 
 def sphere_expmap(x, u):
@@ -27,11 +27,15 @@ def sphere_expmap(x, u):
     ``u = 0`` is every conditioning token of a solve. The division sees 1 where the velocity is below EPS, so the unused
     branch of the ``where`` carries no ``0/0`` (``norm``'s backward is 0 at a zero norm).
     """
-    n = u.norm(dim=-1, keepdim=True)
-    big = n > Sphere.EPS[n.dtype]
-    nu = torch.where(big, n, torch.ones_like(n))
+    n    = u.norm(dim=-1, keepdim=True)
+    big  = n > Sphere.EPS[n.dtype]
+    nu   = torch.where(big, n, torch.ones_like(n))   # |u|, and 1 where it is below EPS
     retr = x + u
-    return torch.where(big, x * torch.cos(nu) + u * torch.sin(nu) / nu, retr / retr.norm(dim=-1, keepdim=True))
+    return torch.where(
+        big,
+        x * torch.cos(nu) + u * torch.sin(nu) / nu,
+        retr / retr.norm(dim=-1, keepdim=True),      # below EPS: the retraction
+    )
 
 
 _SPHERE_MAPS = {"expmap": sphere_expmap, "logmap": sphere_logmap}   # used in place of flow_matching's Sphere methods
@@ -66,3 +70,10 @@ class ProductManifold(Manifold):
 
     def proju(self, x, u):
         return self._batch_map("proju", x, u)
+
+
+# ---- plumbing --------------------------------------------------------------------------------------------------------
+
+def _dot(a, b):
+    """Returns the dot product of ``a`` and ``b`` over the last dimension, kept as a size-1 dimension."""
+    return (a * b).sum(-1, keepdim=True)

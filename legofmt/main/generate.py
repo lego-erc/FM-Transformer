@@ -28,14 +28,14 @@ import torch.nn.functional as F
 from legofmt.cfm.project_model import is_compiled
 from legofmt.compat import dynamic_shape_attention
 from legofmt.data.write.norm import DataPrep
-from legofmt.data.struct import _F, cond_slot, set_layout
+from legofmt.data.struct import _F, cond_slot, set_layout, vocab_index
 from legofmt.geometry.energy_proj import EnergyProjections
 from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.legacy.generate import balance_passthrough, close_balance, generate_in
 from legofmt.main.modules import LEGOLtng
 from legofmt.mod_comps.config import mult_energy_scale
 from legofmt.multiplicity.model import MultModel
-from legofmt.rng import REFILL, EventRNG
+from legofmt.rng import REFILL, categorical, rng_on
 
 # the E_dep cap's margin for checkpoints from before model_conf.edep_excess_mev [MeV]
 _EDEP_EXCESS_MEV = {11: 0.0, -11: 1.022, 22: 0.0, 2212: 0.0, 2112: 10.0, 211: 150.0, -211: 150.0}
@@ -44,20 +44,25 @@ _EDEP_EXCESS_MEV = {11: 0.0, -11: 1.022, 22: 0.0, 2212: 0.0, 2112: 10.0, 211: 15
 def fit_counts(counts: torch.Tensor, max_particles: int, refill) -> torch.Tensor:
     """Fits each event's per-species counts into ``max_particles`` slots (module docstring, ``slots``).
 
+    ```
+    n_s = floor(c_s min(1, M / C)),   C = sum_s c_s,   M = max_particles
+    when C > M, the M - sum_s n_s slots the rounding frees take species sampled ~ c_s
+    ```
+
     Args:
         counts:        (B, S), the sampled counts.
         max_particles: the slots per event.
-        refill:        draws ``(B, max_particles)`` species from (B, S) weights; any species when an event has none.
+        refill:        samples ``(B, max_particles)`` species from (B, S) weights; any species when an event has none.
 
     Returns:
         (B, S), the fitted counts.
     """
-    total     = counts.sum(-1, keepdim=True)
-    weights   = counts.float() + (total == 0)
-    fitted    = (counts * (max_particles / total).clamp(max=1.0)).long()
-    remaining = ((total > max_particles) * (max_particles - fitted.sum(-1, keepdim=True))).clamp(min=0)
-    slots     = torch.arange(max_particles, device=counts.device)
-    return fitted.scatter_add_(-1, refill(weights), (slots < remaining).long())
+    total   = counts.sum(-1, keepdim=True)                                 # C
+    weights = counts.float() + (total == 0)                                # ~ c_s; uniform when C = 0
+    fitted  = (counts * (max_particles / total).clamp(max=1.0)).long()     # n_s
+    freed   = ((total > max_particles) * (max_particles - fitted.sum(-1, keepdim=True))).clamp(min=0)
+    slots   = torch.arange(max_particles, device=counts.device)
+    return fitted.scatter_add_(-1, refill(weights), (slots < freed).long())   # the first `freed` samples count
 
 
 def slot_species(counts: torch.Tensor, max_particles: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -74,11 +79,6 @@ def slot_species(counts: torch.Tensor, max_particles: int) -> tuple[torch.Tensor
     occupied = slots < counts.sum(-1, keepdim=True)
     bounds   = counts.cumsum(-1)[..., :-1].contiguous()
     return occupied, torch.searchsorted(bounds, slots.expand(len(counts), -1).contiguous(), right=True)
-
-
-def _rng_kw(rng, rows=None) -> dict:
-    """Returns ``rng=`` for a call only when keyed, so stubs and subclasses without the argument keep working."""
-    return {} if rng is None else {"rng": rng if rows is None else rng.sub(rows)}
 
 
 class GenerateOut(torch.nn.Module):
@@ -110,18 +110,13 @@ class GenerateOut(torch.nn.Module):
         mult_conf     = torch.load(mult_conf_path, map_location=device, weights_only=False)
         self.gen_mult = MultModel(mult_conf).to(device)
         mm = mult_conf["config"]["mm_conf"]
-        if mm.get("fwd_compile", False) and not is_compiled(self.gen_mult.model):
-            # dynamic: the KV-cache decode grows the cache every step, so a static graph recompiled per
-            # step until the recompile limit sent it to eager -- 115 vs 68 ms per 8192 events (plateSi pair)
-            dynamic_shape_attention()
-            self.gen_mult.model = torch.compile(self.gen_mult.model, dynamic=True)
-        self.pdgid_in      = mm["ptypes_in"].to(device)
-        self.ptypes        = mm["ptypes"].to(device)
-        self.ptype_idx     = torch.searchsorted(self.ptypes, self.pdgids).clamp(max=len(self.ptypes) - 1)
-        self.ptype_in_mask = self.ptypes[self.ptype_idx] == self.pdgids   # the flow's species the mult model counts
-        self.n_mult_cond   = (len(mm["cond_scalars"]) if mm.get("cond_scalars")
-                              else self.gen_mult.proj_in_.in_features - 7)
-        self.mult_e_scale  = mult_energy_scale(mult_conf, rc)
+        self._compile_mult(mm)
+        self.pdgid_in     = mm["ptypes_in"].to(device)
+        self.ptypes       = mm["ptypes"].to(device)
+        self.ptype_idx, self.ptype_in_mask = vocab_index(self.ptypes, self.pdgids)   # the flow's species it counts
+        self.n_mult_cond  = (len(mm["cond_scalars"]) if mm.get("cond_scalars")
+                             else self.gen_mult.proj_in_.in_features - 7)
+        self.mult_e_scale = mult_energy_scale(mult_conf, rc)
 
         set_layout(self.cond_names)
         if couple_in_out_pdgids:
@@ -151,42 +146,30 @@ class GenerateOut(torch.nn.Module):
         Raises:
             ValueError: ``rng`` does not hold one key per event.
         """
-        if rng is not None and len(rng.keys) != len(cond):
-            raise ValueError(f"rng needs one key per event: {len(rng.keys)} keys for {len(cond)} events")
-        if rng is not None:  # keys on the events' device: rows are subset by device masks, draws meet device params
-            rng = EventRNG(rng.keys.to(cond.device), rng.seed)
-
+        rng  = rng_on(rng, cond)
         cond = self._model_cond(cond, prepped)
         cond_fm, mask, attn_mask = self.gen_batch(cond, passthrough=passthrough, **_rng_kw(rng))
-        incoming = cond[:, self.n_cond:]
-        e_in     = self.pen.from_scalar(incoming[:, 1:4], incoming[:, 0:1]).norm(dim=-1)
-        pid_in   = incoming[:, -1].long()
+        e_in, pid_in = self._incoming_energy_pid(cond)
 
-        pt_mask = mask.sum(-1) == 0
+        pt_mask = mask.sum(-1) == 0                                             # nothing to generate
         pt_mask = balance_passthrough(self, pt_mask, attn_mask, e_in, pid_in)   # legacy: energy_balance
         sols, mask, attn_mask = self._flow(cond_fm, mask, attn_mask, pt_mask, rng)
 
-        _F(sols).pdgids.copy_(F.pad(self.pdgids.to(sols.dtype), (1, 0))[_F(sols).pdgids.long()])
-        _F(sols).edep.copy_(self._clamp_edep(_F(sols).edep, e_in, pid_in))
+        out = _F(sols)
+        out.pdgids.copy_(self._pdgids_of(out.pdgids))
+        out.edep.copy_(self._clamp_edep(out.edep, e_in, pid_in))
         close_balance(self, sols, e_in, pid_in)   # legacy: energy_balance, exit_consistency
         self.edep_layers = self._edep_layers(sols, pt_mask, e_in, pid_in, rng)
         return sols, mask, attn_mask
 
-    def _flow(self, cond_fm, mask, attn_mask, pt_mask, rng):
-        """Runs the flow on the events that interact; a pass-through event keeps its tokens as built.
-
-        Returns:
-            ``(sols, mask, attn_mask)``.
-        """
-        if pt_mask.all():
-            return cond_fm.clone(), mask, attn_mask
-        if not pt_mask.any():
-            return self.model((cond_fm, mask, attn_mask), **_rng_kw(rng))
-        keep = ~pt_mask
-        sub, _, _ = self.model((cond_fm[keep], mask[keep], attn_mask[keep]), **_rng_kw(rng, keep))
-        sols = cond_fm.clone()
-        sols[keep] = sub.to(sols.dtype)
-        return sols, mask, attn_mask
+    def _model_cond(self, cond: torch.Tensor, prepped: bool) -> torch.Tensor:
+        """Returns ``cond`` on the model's scales (module docstring); ``prepped`` input already is."""
+        if prepped:
+            return cond.clone()
+        scalars, mom, pos, pid = cond.split((self.n_cond, 3, 3, 1), dim=-1)
+        pos     = self._on_cube(mom, pos)
+        dir_, e = self.pen.to_scalar(mom)
+        return torch.cat((scalars, e, dir_, pos, pid), dim=-1)
 
     def _clamp_edep(self, edep: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor) -> torch.Tensor:
         """Caps the E_dep token at ``norm_edep_layer(E_in + excess(species))``, out of place.
@@ -196,11 +179,9 @@ class GenerateOut(torch.nn.Module):
         ``_EDEP_EXCESS_MEV``; a species without one stays uncapped. Out of place, so the density design can
         differentiate through it.
         """
-        margins = self.dp.edep_excess_mev or _EDEP_EXCESS_MEV
-        own     = pid_in[..., None] == pid_in.new_tensor(list(margins))   # (..., n_species), one-hot or all false
-        excess  = (own * e_in.new_tensor(list(margins.values()))).sum(-1)
-        capped  = own.any(-1) & ~self.dp.edep_margin_mask(pid_in)
-        return torch.where(capped, torch.minimum(edep, self.dp.norm_edep_layer(e_in + excess).to(edep)), edep)
+        excess, capped = self._edep_excess(pid_in, e_in)
+        cap = self.dp.norm_edep_layer(e_in + excess).to(edep)
+        return torch.where(capped, torch.minimum(edep, cap), edep)
 
     def _edep_layers(self, sols, pt_mask, e_in, pid_in, rng):
         """Returns the per-layer E_dep [MeV] the edep_ae decodes from the final E_dep token (None without an AE).
@@ -212,18 +193,9 @@ class GenerateOut(torch.nn.Module):
             return None
         layers, run = sols.new_zeros(sols.shape[0], ae.n_layers), ~pt_mask
         if run.any():
-            edep = self.dp.denorm_edep_margin(_F(sols).edep[run].float(), e_in[run].float(), pid_in[run])
-            layers[run] = ae.sample(self.model._edep_latents, edep, **_rng_kw(rng, run))
+            edep_mev    = self.dp.denorm_edep_margin(_F(sols).edep[run].float(), e_in[run].float(), pid_in[run])
+            layers[run] = ae.sample(self.model._edep_latents, edep_mev, **_rng_kw(rng, run))
         return layers
-
-    def _model_cond(self, cond: torch.Tensor, prepped: bool) -> torch.Tensor:
-        """Returns ``cond`` on the model's scales (module docstring); ``prepped`` input already is."""
-        if prepped:
-            return cond.clone()
-        scalars, mom, pos, pid = cond.split((self.n_cond, 3, 3, 1), dim=-1)
-        pos = F.normalize(self.proj_ray(torch.cat((mom, pos), dim=-1))[..., 3:] / self.cuboid_dim.to(pos), dim=-1)
-        dir_, e = self.pen.to_scalar(mom)
-        return torch.cat((scalars, e, dir_, pos, pid), dim=-1)
 
     # ---- the multiplicity model -------------------------------------------------------------------------------------
 
@@ -240,9 +212,12 @@ class GenerateOut(torch.nn.Module):
             returns them (``MultModel.log_prob`` scores them).
         """
         mult_in, pdgid_in_idx = self._mult_in(cond)
-        pt_mask = (self.gen_mult.sample_passthrough(mult_in, pdgid_in_idx, **_rng_kw(rng)) if passthrough
-                   else torch.zeros(len(cond), dtype=torch.bool, device=cond.device))
-        return pt_mask, self.gen_mult((mult_in, None, pdgid_in_idx), pt_mask=pt_mask, **_rng_kw(rng))
+        if passthrough:
+            pt_mask = self.gen_mult.sample_passthrough(mult_in, pdgid_in_idx, **_rng_kw(rng))
+        else:   # the interacting branch: nothing passes through
+            pt_mask = torch.zeros(len(cond), dtype=torch.bool, device=cond.device)
+        counts = self.gen_mult((mult_in, None, pdgid_in_idx), pt_mask=pt_mask, **_rng_kw(rng))
+        return pt_mask, counts
 
     def passthrough_prob(self, cond: torch.Tensor, prepped: bool = False) -> torch.Tensor:
         """Returns P(the incoming particle passes through unchanged).
@@ -261,14 +236,11 @@ class GenerateOut(torch.nn.Module):
         Raises:
             ValueError: an incoming species the multiplicity model was not trained on.
         """
-        pdgid_in = cond[:, -1].long()
-        pdgid_in_idx = torch.searchsorted(self.pdgid_in, pdgid_in).clamp(max=len(self.pdgid_in) - 1)
-        if (self.pdgid_in[pdgid_in_idx] != pdgid_in).any():
-            raise ValueError(f"incoming pdgid(s) not in the mult model's ptypes_in={self.pdgid_in.tolist()}")
-        mult_in = torch.cat((cond[:, :self.n_mult_cond], cond[:, self.n_cond:-1]), dim=-1)
+        scalars, e, dirs, pid = cond.split((self.n_cond, 1, 6, 1), dim=-1)
+        pdgid_in_idx = self._mult_species(pid[:, 0].long())
         if self.mult_e_scale != 1.0:
-            mult_in[:, self.n_mult_cond] = (mult_in[:, self.n_mult_cond] * self.mult_e_scale).clamp(0.0, 1.0)
-        return mult_in, pdgid_in_idx
+            e = (e * self.mult_e_scale).clamp(0.0, 1.0)
+        return torch.cat((scalars[:, :self.n_mult_cond], e, dirs), dim=-1), pdgid_in_idx
 
     # ---- the flow's tokens ------------------------------------------------------------------------------------------
 
@@ -288,29 +260,21 @@ class GenerateOut(torch.nn.Module):
         Returns:
             ``(cond_fm, mask, attn_mask)``.
         """
-        max_particles = self.max_seq_l - (self.n_prefix + 1)
-        slots  = torch.arange(max_particles, device=counts.device)
-        refill = ((lambda w: torch.multinomial(w, max_particles, replacement=True)) if rng is None
-                  else (lambda w: rng.categorical(w, REFILL, slots)))
-        counts = fit_counts(counts[:, self.ptype_idx] * self.ptype_in_mask, max_particles, refill)
-        occupied, species = slot_species(counts, max_particles)
+        n_slots = self.max_seq_l - (self.n_prefix + 1)
+        slots   = torch.arange(n_slots, device=counts.device)
+        counts  = fit_counts(counts[:, self.ptype_idx] * self.ptype_in_mask,      # the flow's species
+                             n_slots, lambda w: categorical(w, rng, REFILL, slots))
+        occupied, species = slot_species(counts, n_slots)
 
-        scalars, incoming = cond[:, :self.n_cond], cond[:, self.n_cond:].clone()
-        incoming[:, -1] = self.model.convert_pdgids(incoming[:, -1])   # its pdgid as a vocabulary index
-        cond_fm  = F.pad(incoming[:, None, :].expand(-1, 1 + max_particles, -1), (0, 0, self.n_prefix, 0))
-        given    = [cond_slot(n) for n in self.cond_names]   # the cond scalars' prefix tokens
-        cond_fm[:, given, 0] = scalars
-        _F(cond_fm).non_p[..., 1:-1] = 1
-        _F(cond_fm).out_pid.copy_(occupied * (species + 1))
+        tok = _F(self._tokens(cond, n_slots))   # [cond scalars, E_dep, incoming, a copy of the incoming per slot]
+        tok.out_pid.copy_(occupied * (species + 1))                        # 0: an empty slot
+        attn_mask = F.pad(occupied, (self.n_prefix + 1, 0), value=True)   # the prefix, the incoming, occupied slots
+        mask      = self._generated(attn_mask)                             # E_dep and the occupied slots
 
-        attn_mask = F.pad(occupied, (self.n_prefix + 1, 0), value=True)
-        mask      = attn_mask.long()
-        mask[:, given + [self.n_prefix]] = 0   # the cond scalars and the incoming particle are given
-
-        _F(cond_fm).edep.masked_fill_(pt_mask, 0.0)
-        _F(cond_fm).out_energy.masked_fill_(pt_mask[:, None], 0.0)
-        mask.masked_fill_(pt_mask[:, None], 0)
-        return cond_fm, mask, attn_mask
+        tok.edep.masked_fill_(pt_mask, 0.0)                  # a pass-through event deposits nothing,
+        tok.out_energy.masked_fill_(pt_mask[:, None], 0.0)   # every slot holds the full-energy atom,
+        mask.masked_fill_(pt_mask[:, None], 0)               # and nothing is generated
+        return tok.full, mask, attn_mask
 
     # ---- Geant4-shaped arguments ------------------------------------------------------------------------------------
 
@@ -326,16 +290,11 @@ class GenerateOut(torch.nn.Module):
                 scalar, not MeV, always on the ``norm_edep_layer`` scale that callers decode with ``edep_log_min``
                 (a ``model_conf.edep_margin`` token is re-encoded on it here).
         """
-        sols, _, _ = self(self._g4_cond(n, pos, mom, energy, density, size, pdgids, Z, A), passthrough=passthrough,
-                          **_rng_kw(rng))
+        cond = self._g4_cond(n, pos, mom, energy, density, size, pdgids, Z, A)
+        sols, _, _ = self(cond, passthrough=passthrough, **_rng_kw(rng))
         s = _F(sols)
-        edep = s.edep
-        if self.dp.edep_margin:
-            e_in = self.dp.pen.from_scalar(s.in_mom, s.in_energy).norm(dim=-1)
-            edep = self.dp.norm_edep_layer(self.dp.denorm_edep_margin(edep.double(), e_in.double(),
-                                                                      s.in_pid)).to(edep.dtype)
         out = {
-            "per_event": {"E_dep": edep, **{k: s.cond(k) for k in self.cond_names}},
+            "per_event": {"E_dep": self._edep_on_layer_scale(s), **{k: s.cond(k) for k in self.cond_names}},
             "per_particle": {"Incoming": s.in_p, "Outgoing": s.out_p},
             "per_voxel": {"E_dep": sols.new_empty(sols.shape[0], 0, 4)},
         }
@@ -346,6 +305,93 @@ class GenerateOut(torch.nn.Module):
     def passthrough_prob_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None):
         """Returns ``passthrough_prob`` for the arguments of ``gen_model_w_g4_args``."""
         return self.passthrough_prob(self._g4_cond(n, pos, mom, energy, density, size, pdgids, Z, A))
+
+    # ---- plumbing ---------------------------------------------------------------------------------------------------
+
+    def _compile_mult(self, mm: dict) -> None:
+        """Compiles the multiplicity model's trunk when ``mm_conf.fwd_compile`` asks for it.
+
+        Dynamic: the KV-cache decode grows the cache every step, so a static graph recompiled per step until the
+        recompile limit sent it to eager -- 115 vs 68 ms per 8192 events (plateSi pair).
+        """
+        if mm.get("fwd_compile", False) and not is_compiled(self.gen_mult.model):
+            dynamic_shape_attention()
+            self.gen_mult.model = torch.compile(self.gen_mult.model, dynamic=True)
+
+    def _incoming_energy_pid(self, cond: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns the incoming particle's energy [MeV] and pdgid, (B,) each, from the model-layout ``cond``."""
+        _, e, dir_, _, pid = cond.split((self.n_cond, 1, 3, 3, 1), dim=-1)
+        return self.pen.from_scalar(dir_, e).norm(dim=-1), pid[:, 0].long()
+
+    def _on_cube(self, mom: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
+        """Returns the incoming position ray-traced onto the cube along ``mom``, as the direction of x / cuboid_dim."""
+        traced = self.proj_ray(torch.cat((mom, pos), dim=-1))[..., 3:]
+        return F.normalize(traced / self.cuboid_dim.to(pos), dim=-1)
+
+    def _mult_species(self, pdgid_in: torch.Tensor) -> torch.Tensor:
+        """Returns the incoming species' index into the multiplicity model's ``ptypes_in``.
+
+        Raises:
+            ValueError: a species it was not trained on.
+        """
+        pdgid_in_idx, known = vocab_index(self.pdgid_in, pdgid_in)
+        if not known.all():
+            raise ValueError(f"incoming pdgid(s) not in the mult model's ptypes_in={self.pdgid_in.tolist()}")
+        return pdgid_in_idx
+
+    def _flow(self, cond_fm, mask, attn_mask, pt_mask, rng):
+        """Runs the flow on the events that interact; a pass-through event keeps its tokens as built.
+
+        Returns:
+            ``(sols, mask, attn_mask)``.
+        """
+        if pt_mask.all():
+            return cond_fm.clone(), mask, attn_mask
+        if not pt_mask.any():
+            return self.model((cond_fm, mask, attn_mask), **_rng_kw(rng))
+        keep = ~pt_mask
+        sub, _, _ = self.model((cond_fm[keep], mask[keep], attn_mask[keep]), **_rng_kw(rng, keep))
+        sols = cond_fm.clone()
+        sols[keep] = sub.to(sols.dtype)
+        return sols, mask, attn_mask
+
+    def _pdgids_of(self, idx: torch.Tensor) -> torch.Tensor:
+        """Maps the species indices ``idx`` (0: none) back to pdgids."""
+        return F.pad(self.pdgids.to(idx.dtype), (1, 0))[idx.long()]
+
+    def _edep_excess(self, pid_in: torch.Tensor, e_in: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns each event's E_dep excess [MeV] by its incoming species, and whether that species is capped."""
+        margins = self.dp.edep_excess_mev or _EDEP_EXCESS_MEV
+        own     = pid_in[..., None] == pid_in.new_tensor(list(margins))   # (..., n_species), one-hot or all false
+        excess  = (own * e_in.new_tensor(list(margins.values()))).sum(-1)
+        return excess, own.any(-1) & ~self.dp.edep_margin_mask(pid_in)
+
+    def _tokens(self, cond: torch.Tensor, n_slots: int) -> torch.Tensor:
+        """Returns the tokens before the slots get their species, (B, n_prefix + 1 + n_slots, 8).
+
+        The cond scalars in channel 0 of their prefix tokens, every prefix token's directions the (1, 1, 1) filler;
+        the incoming token, its pdgid a vocabulary index, in its own place and in every slot.
+        """
+        scalars, incoming = cond[:, :self.n_cond], cond[:, self.n_cond:].clone()
+        incoming[:, -1] = self.model.convert_pdgids(incoming[:, -1])
+        tok = F.pad(incoming[:, None, :].expand(-1, 1 + n_slots, -1), (0, 0, self.n_prefix, 0))
+        tok[:, [cond_slot(n) for n in self.cond_names], 0] = scalars
+        _F(tok).non_p[..., 1:-1] = 1
+        return tok
+
+    def _generated(self, attn_mask: torch.Tensor) -> torch.Tensor:
+        """Returns the loss mask: ``attn_mask`` without the given tokens, the cond scalars and the incoming particle."""
+        mask = attn_mask.long()
+        mask[:, [cond_slot(n) for n in self.cond_names] + [self.n_prefix]] = 0
+        return mask
+
+    def _edep_on_layer_scale(self, s: _F) -> torch.Tensor:
+        """Returns the E_dep token on the ``norm_edep_layer`` scale: a ``model_conf.edep_margin`` token re-encoded."""
+        if not self.dp.edep_margin:
+            return s.edep
+        e_in = self.dp.pen.from_scalar(s.in_mom, s.in_energy).norm(dim=-1)
+        edep = self.dp.denorm_edep_margin(s.edep.double(), e_in.double(), s.in_pid)
+        return self.dp.norm_edep_layer(edep).to(s.edep.dtype)
 
     def _g4_cond(self, n, pos, mom, energy, density, size, pdgids, Z, A):
         """Builds ``cond`` from Geant4-shaped arguments, each of size 1 or B, every event repeated ``n`` times."""
@@ -385,3 +431,10 @@ class GenerateOut(torch.nn.Module):
 class GenerateIn(GenerateOut):
     """The reverse direction: the incoming particle from the outgoing set (legacy, needs ``train_inverse``)."""
     __call__ = generate_in
+
+
+# ---- plumbing --------------------------------------------------------------------------------------------------------
+
+def _rng_kw(rng, rows=None) -> dict:
+    """Returns ``rng=`` for a call only when keyed, so stubs and subclasses without the argument keep working."""
+    return {} if rng is None else {"rng": rng if rows is None else rng.sub(rows)}

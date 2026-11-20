@@ -1,22 +1,25 @@
 """The flow-map term ``L_fm``: self-distillation of the field into few-step sampling.
 
 ```
-step      d = 2**-k,  k ~ U{0, ..., sections - 1};   t_0 ~ the grid of d in [0, 1)
-teacher   two half steps from x_0 = x_{t_0}, without gradient:
-            x_mid = exp_{x_0}(d/2 v(x_0, t_0; d/2))
-            x_end = exp_{x_mid}(d/2 v(x_mid, t_0 + d/2; d/2))
+step      d = 2**-k,  k ~ U{0, ..., sections - 1};   t0 ~ the grid of d in [0, 1)
+teacher   two half steps from s0 = s_{t0}, without gradient:
+            s_mid = exp_{s0}(d/2 v(s0, t0; d/2))
+            s_end = exp_{s_mid}(d/2 v(s_mid, t0 + d/2; d/2))
           the smallest step's teacher is called with d = 0: the plain velocity anchors the ladder, and without it
           the bottom rung would supervise nothing
-target    log_{x_0}(x_end) / d          averaged through the logmap, the factors being spheres
-L_fm      the mean of |v(x_0, t_0; d) - target|**2 over the generated entries
+target    log_{s0}(s_end) / d          averaged through the logmap, the factors being spheres
+L_fm      the mean of |v(s0, t0; d) - target|**2 over the generated entries
 ```
 
-The ``edep_ae`` latent takes the same two half steps (Euclidean), and its error joins the mean as K more entries.
-``one_step_euler_loss`` takes the LightningModule as its first argument.
+``s = (x, z)`` is the state of ``cfm/state.py``: the tokens and the ``edep_ae`` latent, which takes the same two half
+steps (Euclidean, from its straight path ``z0 = z_0 + t0 (z_1 - z_0)``) and whose error joins the mean as K more
+entries. Only the generated tokens move. ``one_step_euler_loss`` takes the LightningModule as its first argument.
 """
 
 import torch
 from torch import Tensor
+
+from legofmt.cfm.state import LatentManifold, State
 
 
 def one_step_euler_loss(lego, base: Tensor, ds_t, pdgid_idx: Tensor, model=None, z=None) -> Tensor:
@@ -43,32 +46,66 @@ def one_step_euler_loss(lego, base: Tensor, ds_t, pdgid_idx: Tensor, model=None,
 
 def _one_step_euler_loss_fp32(lego, base: Tensor, ds_t, pdgid_idx: Tensor, model, z=None) -> Tensor:
     """Computes ``L_fm`` (module docstring); ``one_step_euler_loss`` calls it outside autocast, with its arguments."""
-    mask, am = ds_t.m.full, ds_t.am.full
-    gen = (mask == 1).unsqueeze(-1)
-    g   = gen & am.unsqueeze(-1)
-    ckw = dict(mask=mask, attn_mask=am, types=lego.types_embd[:, :mask.shape[1]], pdgids=pdgid_idx)
-    man = lego.model.manifold
-    field = lambda x, t, zz, **kw: (model(x, t, **kw, **ckw), None) if zz is None else model(x, t, z=zz, **kw, **ckw)
-
+    field, man, gen = _ladder_inputs(lego, ds_t, pdgid_idx, model)
     sections = lego.rc.one_step_euler_sections
     with torch.no_grad():
-        step = 2.0 ** -(torch.randint(1, sections + 1, (base.shape[0], 1), device=base.device) - 1).to(base.dtype)
-        t0   = (torch.rand_like(step) * (1.0 / step).round()).floor() * step  # grid-aligned start
-        x0   = lego.ps.sample(base, ds_t.f.model_in.float(), t0.squeeze(-1)).x_t
-        z0   = None if z is None else z[0] + t0 * (z[1] - z[0])
-        half = step / 2
-        h    = half.unsqueeze(-1)
-        # the smallest step's teacher uses d=0, anchoring the bootstrap ladder
-        d_t  = torch.where(half >= 2.0 ** -(sections - 1), half, torch.zeros_like(half))
-        s1, w1 = field(x0, t0, z0, d=d_t)
-        x_mid = torch.where(gen, man.expmap(x0, h * s1), x0)
-        z_mid = None if z is None else z0 + half * w1
-        s2, w2 = field(x_mid, t0 + half, z_mid, d=d_t)
-        x_end = torch.where(gen, man.expmap(x_mid, h * s2), x_mid)
-        tgt   = man.logmap(x0, x_end) / step.unsqueeze(-1)
-        tgt_z = None if z is None else (z_mid + half * w2 - z0) / step
-    s_pred, p_z = field(x0, t0, z0, d=step)
-    err, n = ((s_pred - tgt) ** 2 * g).sum(), g.sum() * s_pred.shape[-1]
-    if z is not None:
-        err, n = err + ((p_z - tgt_z) ** 2).sum(), n + p_z.numel()
+        k     = _uniform_rung(sections, base)                                     # k ~ U{0, ..., sections - 1}
+        d     = 2.0 ** -k
+        t0    = (torch.rand_like(d) * (1.0 / d).round()).floor() * d               # on the grid of d
+        s0    = _on_path(lego, base, ds_t, z, t0)                                  # s_{t0}
+        half  = d / 2
+        d_t   = torch.where(half >= 2.0 ** -(sections - 1), half, torch.zeros_like(half))   # the smallest: d = 0
+        s_mid = _moved(gen, s0,    man.expmap(s0,    _per_event(half) * field(s0, t0, d=d_t)))
+        s_end = _moved(gen, s_mid, man.expmap(s_mid, _per_event(half) * field(s_mid, t0 + half, d=d_t)))
+        tgt   = man.logmap(s0, s_end) / _per_event(d)
+    return _mean_squared_error(field(s0, t0, d=d), tgt, gen & ds_t.am.full.unsqueeze(-1), latent=z is not None)
+
+
+# ---- plumbing ------------------------------------------------------------------------------------------------------
+
+def _ladder_inputs(lego, ds_t, pdgid_idx: Tensor, model):
+    """Returns the field and the manifold's maps on a ``State``, and the generated tokens (B, L, 1).
+
+    The field is ``model`` with the batch's keyword inputs; an empty latent passes through as its own velocity.
+    """
+    mask = ds_t.m.full
+    ckw  = dict(mask=mask, attn_mask=ds_t.am.full, types=lego.types_embd[:, :mask.shape[1]], pdgids=pdgid_idx)
+
+    def field(s, t, **kw):
+        if s.z.shape[-1] == 0:
+            return State(model(s.x, t, **kw, **ckw), s.z)
+        return State(*model(s.x, t, z=s.z, **kw, **ckw))
+    return field, LatentManifold(lego.model.manifold), (mask == 1).unsqueeze(-1)
+
+
+def _uniform_rung(sections: int, base: Tensor) -> Tensor:
+    """Samples one rung ``k`` per event, uniform on {0, ..., sections - 1}: (B, 1) in the dtype of ``base``."""
+    return (torch.randint(1, sections + 1, (base.shape[0], 1), device=base.device) - 1).to(base.dtype)
+
+
+def _on_path(lego, base: Tensor, ds_t, z, t0: Tensor) -> State:
+    """Returns the state at ``t0``: the tokens on the training path, the latent on its straight path.
+
+    The path runs from ``base`` to the data; the latent's is ``z_0 + t0 (z_1 - z_0)``, an empty (B, 0) without one.
+    """
+    x_t = lego.ps.sample(base, ds_t.f.model_in.float(), t0.squeeze(-1)).x_t
+    z_t = t0.new_zeros(len(t0), 0) if z is None else z[0] + t0 * (z[1] - z[0])
+    return State(x_t, z_t)
+
+
+def _per_event(c: Tensor) -> State:
+    """Shapes one scalar per event (B, 1) for the tokens (B, 1, 1) and for the latent (B, 1)."""
+    return State(c.unsqueeze(-1), c)
+
+
+def _moved(gen: Tensor, s: State, s_new: State) -> State:
+    """Returns ``s_new`` on the generated tokens and the latent, ``s`` on every other token."""
+    return State(torch.where(gen, s_new.x, s.x), s_new.z)
+
+
+def _mean_squared_error(pred: State, tgt: State, cells: Tensor, latent: bool) -> Tensor:
+    """Returns the mean of ``|pred - tgt|**2`` over the token entries in ``cells`` and every latent entry."""
+    err, n = ((pred.x - tgt.x) ** 2 * cells).sum(), cells.sum() * pred.x.shape[-1]
+    if latent:
+        err, n = err + ((pred.z - tgt.z) ** 2).sum(), n + pred.z.numel()
     return err / n.clamp(min=1)

@@ -6,9 +6,29 @@ out of that face. With ``cuboid_dim`` (``d``) the cube is the cuboid of those
 edge ratios through the point (half-sizes ``|x/d|_inf * d``). Applied at prep
 time (``proj_ray``) and again in ``GenerateOut``. It is not recorded in the
 checkpoint, so ``no_raytrace`` models must stub ``gen.proj_ray``.
+
+```
+x' = x + p t,   t = min over the axes of (h sign(p) - x) / p,   h = |x / d|_inf d
+```
 """
 
 import torch
+
+from legofmt.geometry.geom_trafos import on_position
+
+
+def exit_time(p, x, d):
+    """Returns the ray parameter t at which x + p t first leaves, through x, the cuboid of edge ratios ``d``.
+
+    ```
+    t = min over the axes of (h sign(p) - x) / p,   h = |x / d|_inf d   the half-sizes of the cuboid through x
+    ```
+    """
+    sign = torch.where(p > 0, 1.0, -1.0).to(p.dtype)
+    h    = (torch.abs(x) / d).max(dim=-1, keepdim=True).values * d
+    p    = sign * torch.abs(p).clamp(min=1e-8)   # |p| held at 1e-8 or above, its sign kept
+    t    = (h * sign - x) / p
+    return t.min(-1, keepdim=True).values
 
 
 class CubeTrace:
@@ -28,14 +48,8 @@ class CubeTrace:
 
     def get_time(self, p, x):
         """Returns the ray parameter t at which x + p*t first exits the cuboid of shape ``cuboid_dim`` through x."""
-        p_sign = torch.where(p > 0, 1.0, -1.0).to(p.dtype)
-        d = self.cuboid_dim.to(x)
-        x_abs_max = (x.abs() / d).max(dim=-1, keepdim=True).values * d
-        p_ = p_sign * p.abs().clamp(min=1e-8)
-        return ((x_abs_max * p_sign - x) / p_).min(-1, keepdim=True).values
+        return exit_time(p, x, self.cuboid_dim.to(x))
 
     def project_particles_cc(self, cc):
-        """Advances the position by p*get_time(p, x); momentum passes through unchanged."""
-        p, x = cc.split(3, -1)
-        t = self.get_time(p, x)
-        return torch.cat((p, x + p * t), -1)
+        """Advances the position x to x + p t, t = ``get_time(p, x)``; momentum passes through unchanged."""
+        return on_position(cc, lambda p, x: x + p * self.get_time(p, x))

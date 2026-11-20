@@ -22,15 +22,20 @@ missing energy ``cap - edep``, so a contained shower's narrow peak below ``e_in`
 the training data's largest ``edep - e_in`` (``model_conf.edep_excess_mev``). The per-layer deposits, and the token of
 an incoming species not in ``model_conf.edep_margin_species``, take the layer scale.
 
+The two E_dep scales are ``LayerScale`` and ``MarginScale`` below, as formulas; ``DataPrep`` picks one per token and
+applies it.
+
 Superseded: the linear E_dep scale and hand-set margins (:mod:`legofmt.legacy.norm`), ``energy_kin: false`` and
 ``proj_ray: false`` (one line each in ``cc_trafo``).
 """
+
+from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from legofmt.compat import dataset_already_normalised
+from legofmt.compat import dataset_already_normalised, edep_margin_keys
 from legofmt.data.struct import _F, cond_scalars, set_layout
 from legofmt.geometry.energy_proj import EnergyProjections
 from legofmt.geometry.raytracing_proj import CubeTrace
@@ -38,6 +43,63 @@ from legofmt.legacy.norm import HAND_SET_MARGIN_MEV, denorm_edep_linear, norm_ed
 from legofmt.mod_comps.config import build_manifold
 
 _MISSING_MEV = 1e-3   # the smallest missing energy cap - edep the margin scale resolves
+
+
+def token_energy(e: Tensor, cutoff: float) -> Tensor:
+    """Returns the particles' energy channel, (B, 1 + n_out, 1) with the incoming particle first.
+
+    ```
+    incoming   e_in                                           [MeV]; norm_e puts it on the model scale at load time
+    outgoing   1 - log(e_out / cutoff) / log(e_in / cutoff)   held in [0, 1]
+    ```
+    """
+    log_e = torch.log(e.clamp_min(1e-8) / cutoff)   # every particle's, in one call
+    log_e_in, log_e_out = log_e[:, :1], log_e[:, 1:]
+    e_out = 1 - (log_e_out / log_e_in.clamp_min(1e-6)).clamp(0, 1)
+    return torch.cat((e[:, :1], e_out), dim=1)
+
+
+class LayerScale(NamedTuple):
+    """E_dep's layer scale, held in [0, 1].
+
+    ```
+    norm     u    = log(edep / e_min) / width,   width = log(max_energy / e_min)    0 below e_min, 1 from max_energy on
+    denorm   edep = e_min exp(u width)                                               0 where u <= 0
+    ```
+    """
+    e_min: float
+    width: float
+
+    def norm(self, edep):
+        e_min, width = self
+        return (torch.log((edep / e_min).clamp_min(1.0)) / width).clamp_max(1.0)
+
+    def denorm(self, u):
+        e_min, width = self
+        return torch.where(u > 0, e_min * torch.exp(u.clamp(0.0, 1.0) * width), 0.0)
+
+
+class MarginScale(NamedTuple):
+    """The E_dep token's margin scale, per event, held in [0, 1].
+
+    ```
+    norm     z    = logit(edep / cap),   u = (z - z_lo) / (z_hi - z_lo)       0 at zero, 1 from the cap on
+    denorm   edep = cap sigmoid(z_lo + u (z_hi - z_lo))                       0 where u <= 0
+    ```
+    """
+    cap:  Tensor
+    z_lo: Tensor
+    z_hi: Tensor
+
+    def norm(self, edep):
+        cap, z_lo, z_hi = self
+        z = torch.logit((edep / cap).clamp(0.0, 1.0))
+        return ((z - z_lo) / (z_hi - z_lo)).clamp(0.0, 1.0)
+
+    def denorm(self, u):
+        cap, z_lo, z_hi = self
+        edep = cap * torch.sigmoid(z_lo + u.clamp(0.0, 1.0) * (z_hi - z_lo))
+        return torch.where(u > 0, edep, 0.0)
 
 
 class DataPrep:
@@ -49,28 +111,14 @@ class DataPrep:
     """
 
     def __init__(self, config: dict):
-        config = config.get("config", config)
-        if "model_conf" in config:   # a full config
-            conf = config["model_conf"]
-            cutoff_mev, self.proj_ray = config["dl_conf"]["lds_args"].get("cutoff_mev"), conf.get("proj_ray", True)
-            self.manifold = build_manifold(conf["manifold"])
-        else:                        # the flat dict
-            conf = config
-            cutoff_mev, self.proj_ray = conf.get("cutoff_mev"), conf.get("proj_ray")
-            self.manifold = build_manifold(conf["manifold"]) if conf.get("manifold") else None
-        self.pen = EnergyProjections(cutoff_mev=cutoff_mev, max_energy=conf.get("max_energy"))
-        self.ppa = CubeTrace(conf.get("cuboid_dim"))
-        self.energy_kin = conf.get("energy_kin", True)
-
-        self.edep_log_min = conf.get("edep_log_min")
-        self.edep_margin = conf.get("edep_margin", conf.get("edep_wall", False))                   # edep_wall*: the
-        self.edep_margin_species = conf.get("edep_margin_species", conf.get("edep_wall_species"))  # keys until 11.2026
+        conf, cutoff_mev, self.proj_ray, self.manifold = _read_config(config)
+        self.pen             = EnergyProjections(cutoff_mev=cutoff_mev, max_energy=conf.get("max_energy"))
+        self.ppa             = CubeTrace(conf.get("cuboid_dim"))
+        self.energy_kin      = conf.get("energy_kin", True)
+        self.edep_log_min    = conf.get("edep_log_min")
+        self.edep_margin, self.edep_margin_species = edep_margin_keys(conf)
         self.edep_excess_mev = conf.get("edep_excess_mev")
-        if self.edep_margin and self.edep_excess_mev is not None:
-            missing = set(self.edep_margin_species or ()) - set(self.edep_excess_mev)
-            if missing:
-                raise ValueError(f"edep_margin_species {sorted(missing)} have no entry in model_conf.edep_excess_mev: "
-                                 "no such incoming species in the training data, so no cap")
+        _check_margins(self.edep_margin, self.edep_margin_species, self.edep_excess_mev)
         set_layout(conf.get("cond_scalars", ("Density",)))   # process-global
 
     def __call__(self, batch: tuple) -> tuple:
@@ -93,13 +141,21 @@ class DataPrep:
             ``(f, m, am)``, with the per-layer E_dep [MeV] as a 4th tensor when ``per_event`` carries it.
         """
         particles, m, am, per_event = batch
-        e_kin = particles[..., 0:1] if self.energy_kin else None
-        tokens = torch.cat((self.cc_trafo(particles[..., 1:7], e_kin=e_kin), particles[..., 7:]), dim=-1)
+        e_kin, cc, pid = particles.tensor_split((1, 7), dim=-1)   # [E_kin, p (3), x (3), pdgid]
+        e_kin = e_kin if self.energy_kin else None                 # false: legacy, |p|
+        tokens = torch.cat((self.cc_trafo(cc, e_kin=e_kin), pid), dim=-1)
         return self.format_add((tokens, m, am, per_event))
 
     @torch.no_grad()
     def cc_trafo(self, cc: Tensor, e_kin: Tensor | None = None) -> Tensor:
         """Converts MeV momenta and positions to (energy, unit momentum direction, unit position direction).
+
+        ```
+        energy     incoming   e_in [MeV]                                      token_energy
+                   outgoing   1 - log(e_out / cutoff) / log(e_in / cutoff)
+        momentum              p / |p|
+        position              x / cuboid_dim, normalised       the incoming x first ray-traced along p onto the cube
+        ```
 
         Args:
             cc:    (B, 1 + n_out, 6), momentum and position per particle, the incoming one first; NaN is padding.
@@ -108,22 +164,22 @@ class DataPrep:
         Returns:
             (B, 1 + n_out, 7), on the manifold; the incoming energy stays in MeV.
         """
-        mom, pos = cc.nan_to_num(1).split(3, -1)
-        e_mev = (e_kin.nan_to_num(1) if e_kin is not None
-                 else mom.norm(dim=-1, keepdim=True))   # energy_kin false (legacy): |p|, saturates for hadrons
-
-        log_e   = torch.log(e_mev.clamp_min(1e-8) / self.pen.cutoff)
-        e_out   = 1 - (log_e[:, 1:] / log_e[:, :1].clamp_min(1e-6)).clamp(0, 1)
-        energy  = torch.cat((e_mev[:, :1], e_out), dim=1)
-        mom_dir = F.normalize(mom, dim=-1)
-        if self.proj_ray:   # the incoming position, traced along its momentum onto the cube; false: legacy
-            pos = pos.select_scatter(self.ppa(torch.cat((mom_dir[:, 0], pos[:, 0]), dim=-1))[..., 3:], dim=1, index=0)
-        pos_dir = F.normalize(pos / self.ppa.cuboid_dim.to(pos), dim=-1)
+        e, p, x = _unpadded(cc, e_kin)
+        energy  = token_energy(e, self.pen.cutoff)
+        mom_dir = F.normalize(p, dim=-1)
+        x       = self._ray_traced(mom_dir, x)
+        pos_dir = F.normalize(x / self.ppa.cuboid_dim.to(x), dim=-1)
         return self.manifold.projx(torch.cat((energy, mom_dir, pos_dir), dim=-1))
 
     @torch.no_grad()
     def format_add(self, batch: tuple) -> tuple:
         """Prepends the prefix tokens: the conditioning scalars and the generated E_dep (the layout of ``struct.py``).
+
+        ```
+        prefix token   [value, 1, 1, 1, 1, 1, 1, 0]       for cond_scalars[0], E_dep, cond_scalars[1:], in this order
+        m              1 on E_dep, 0 on the other ones    E_dep is the one generated prefix token
+        am             True on every prefix token
+        ```
 
         Args:
             batch: ``(tokens, m, am, per_event)``: (B, 1 + n_out, 8) particle tokens, their masks, and the per-event
@@ -135,14 +191,11 @@ class DataPrep:
         """
         tokens, m, am, per_event = batch
         first, *rest = cond_scalars()
-        names = (first, "E_dep", *rest)
-        prefix = tokens.new_tensor([0, 1, 1, 1, 1, 1, 1, 0]).repeat(len(tokens), len(names), 1)
-        prefix[..., 0] = torch.stack([per_event[n].reshape(len(tokens)) for n in names], dim=1)
-
-        f = torch.cat((prefix, tokens), dim=1).nan_to_num()
-        m = F.pad(m, (len(names), 0))
-        m[:, 1] = 1   # E_dep, the one generated prefix token
-        am = F.pad(am, (len(names), 0), value=True)
+        values = [per_event[name] for name in (first, "E_dep", *rest)]
+        f  = torch.cat((_prefix_tokens(values, like=tokens), tokens), dim=1).nan_to_num()
+        m  = _prepend(m, len(values))
+        m[:, 1] = 1   # E_dep
+        am = _prepend(am, len(values), value=True)
         return (f, m, am, per_event["E_dep_layers"]) if "E_dep_layers" in per_event else (f, m, am)
 
     # ---- stored tokens -> the model scale -----------------------------------------------------------------------
@@ -151,9 +204,13 @@ class DataPrep:
     def norm_e(self, batch: tuple, inplace: bool = False) -> tuple:
         """Converts the two channels that depend on ``max_energy`` from MeV to the model scale.
 
-        The incoming energy becomes ``log(e_in / cutoff) / log(max_energy / cutoff)``, the E_dep token its scale
-        (``norm_edep_margin``), the per-layer deposits theirs (``norm_edep_layer``). A dataset written before the
-        energy split is passed through; see ``compat.dataset_already_normalised``.
+        ```
+        E_dep token   norm_edep_margin(edep, e_in, pid)                  first: it reads e_in in MeV
+        e_in          log(e_in / cutoff) / log(max_energy / cutoff)      held in [0, 1]
+        edep_layers   norm_edep_layer(edep_layers)
+        ```
+
+        A dataset written before the energy split is passed through; see ``compat.dataset_already_normalised``.
 
         Args:
             batch:   ``(f, m, am[, edep_layers])``.
@@ -170,26 +227,22 @@ class DataPrep:
         s.in_energy.copy_(self.pen.to_scalar_e(s.in_energy))
         return (s.full, m, am, *map(self.norm_edep_layer, edep_layers))
 
-    # ---- E_dep: the layer scale ---------------------------------------------------------------------------------
+    # ---- E_dep: the layer scale (LayerScale) ---------------------------------------------------------------------
 
     def norm_edep_layer(self, edep: Tensor) -> Tensor:
-        """Converts E_dep from MeV to the layer scale, held in [0, 1]: a deposit below ``e_min`` (zero too) gives 0."""
+        """Converts E_dep from MeV to the layer scale: a deposit below ``e_min`` (zero too) gives 0."""
         if not self.edep_log_min: return norm_edep_linear(edep, self.pen.max_energy)   # legacy
-        e_min = self.edep_log_min
-        width = torch.log(torch.tensor(self.pen.max_energy / e_min)).item()
-        return (torch.log((edep / e_min).clamp_min(1.0)) / width).clamp_max(1.0)
+        return self._layer_scale().norm(edep)
 
     def denorm_edep_layer(self, u: Tensor) -> Tensor:
-        """Converts E_dep from the layer scale to MeV: ``e_min exp(u log(max_energy / e_min))``, 0 where ``u <= 0``."""
+        """Converts E_dep from the layer scale to MeV: 0 where ``u <= 0``."""
         if not self.edep_log_min: return denorm_edep_linear(u, self.pen.max_energy)   # legacy
-        e_min = self.edep_log_min
-        width = torch.log(torch.tensor(self.pen.max_energy / e_min)).item()
-        return torch.where(u > 0, e_min * torch.exp(u.clamp(0.0, 1.0) * width), 0.0)
+        return self._layer_scale().denorm(u)
 
-    # ---- E_dep: the margin scale (the token) --------------------------------------------------------------------
+    # ---- E_dep: the margin scale (MarginScale), the token's ------------------------------------------------------
 
     def norm_edep_margin(self, edep: Tensor, e_in: Tensor, pid: Tensor) -> Tensor:
-        """Converts the E_dep token from MeV to the margin scale, held in [0, 1]: ``cap`` gives 1, zero gives 0.
+        """Converts the E_dep token from MeV to the margin scale, in float64: ``cap`` gives 1, zero gives 0.
 
         Where ``edep_margin_mask`` is false, the token takes the layer scale.
 
@@ -202,13 +255,11 @@ class DataPrep:
             The token, in the shape and dtype of ``edep``.
         """
         if not self.edep_margin: return self.norm_edep_layer(edep)
-        cap, z_lo, z_hi = self._edep_margin_range(e_in.double(), pid)
-        z = torch.logit((edep.double() / cap).clamp(0.0, 1.0))   # -inf at zero, +inf from the cap on
-        u = ((z - z_lo) / (z_hi - z_lo)).clamp(0.0, 1.0).to(edep.dtype)
+        u = self._margin_scale(e_in.double(), pid).norm(edep.double()).to(edep.dtype)
         return torch.where(self.edep_margin_mask(pid), u, self.norm_edep_layer(edep))
 
     def denorm_edep_margin(self, u: Tensor, e_in: Tensor, pid: Tensor) -> Tensor:
-        """Converts the E_dep token from the margin scale to MeV: ``cap sigmoid(z_lo + u (z_hi - z_lo))``.
+        """Converts the E_dep token from the margin scale to MeV, in float64.
 
         ``u <= 0`` decodes to zero, ``u > 1`` to the cap. Where ``edep_margin_mask`` is false, the token is on the
         layer scale.
@@ -222,9 +273,7 @@ class DataPrep:
             The deposit [MeV], in the shape and dtype of ``u``.
         """
         if not self.edep_margin: return self.denorm_edep_layer(u)
-        cap, z_lo, z_hi = self._edep_margin_range(e_in.double(), pid)
-        edep = cap * torch.sigmoid(z_lo + u.double().clamp(0.0, 1.0) * (z_hi - z_lo))
-        edep = torch.where(u > 0, edep, 0.0).to(u.dtype)
+        edep = self._margin_scale(e_in.double(), pid).denorm(u.double()).to(u.dtype)
         return torch.where(self.edep_margin_mask(pid), edep, self.denorm_edep_layer(u))
 
     def edep_margin_mask(self, pid: Tensor) -> Tensor:
@@ -233,23 +282,103 @@ class DataPrep:
         if self.edep_margin_species is None: return torch.ones_like(pid, dtype=torch.bool)
         return torch.isin(pid, pid.new_tensor(self.edep_margin_species))
 
-    def _edep_margin_range(self, e_in: Tensor, pid: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        """Returns ``(cap, z_lo, z_hi)``; a species without a margin of its own gets the widest."""
-        margins = self.edep_excess_mev or HAND_SET_MARGIN_MEV   # legacy: a checkpoint from before edep_excess_mev
-        own = pid[..., None] == pid.new_tensor(list(margins))   # (..., n_species), one-hot or all false
-        mev = e_in.new_tensor(list(margins.values()))
-        cap = e_in + torch.where(own.any(-1), (own * mev).sum(-1), mev.max())
-        return cap, torch.log((self.edep_log_min or 1e-6) / cap), torch.log(cap / _MISSING_MEV)
-
     @staticmethod
     def edep_excess_max(f: Tensor) -> dict[int, float]:
         """Returns, per incoming pdgid, the largest ``edep - e_in`` [MeV] (>= 0) in a stored file: the margin.
+
+        ```
+        margin(species) = max(0, max over the species' events of edep - e_in)
+        ```
 
         ``f`` holds MeV channels (before ``norm_e``). The result is meta.json's ``edep_excess_max_mev``, which becomes
         ``model_conf.edep_excess_mev``.
         """
         s = _F(f)
         e_in = s.in_energy.reshape(-1).double()
+        excess = s.edep.reshape(-1).double() - e_in
         species, idx = s.in_pid.reshape(-1).unique(return_inverse=True)
-        excess = e_in.new_zeros(len(species)).scatter_reduce(0, idx, s.edep.reshape(-1).double() - e_in, "amax")
-        return dict(zip(species.long().tolist(), excess.tolist()))   # the zeros: an excess >= 0
+        margin = e_in.new_zeros(len(species)).scatter_reduce(0, idx, excess, "amax")   # per species; the zeros: >= 0
+        return dict(zip(species.long().tolist(), margin.tolist()))
+
+    # ---- plumbing ------------------------------------------------------------------------------------------------
+
+    def _ray_traced(self, mom_dir: Tensor, x: Tensor) -> Tensor:
+        """Returns ``x`` with the incoming particle's position traced along its momentum onto the cube.
+
+        ``proj_ray: false`` (legacy) leaves it as it is.
+        """
+        if not self.proj_ray: return x   # legacy
+        incoming = torch.cat((mom_dir[:, 0], x[:, 0]), dim=-1)
+        return x.select_scatter(self.ppa(incoming)[..., 3:], dim=1, index=0)
+
+    def _layer_scale(self) -> LayerScale:
+        """Returns the layer scale; ``width`` is a float32 log, as stored scales were made."""
+        e_min = self.edep_log_min
+        return LayerScale(e_min, torch.log(torch.tensor(self.pen.max_energy / e_min)).item())
+
+    def _margin_scale(self, e_in: Tensor, pid: Tensor) -> MarginScale:
+        """Returns each event's margin scale.
+
+        ```
+        cap  = e_in + margin(species)        a species without a margin of its own gets the widest
+        z_lo = log(e_min / cap)
+        z_hi = log(cap / 1e-3 MeV)
+        ```
+        """
+        margins = self.edep_excess_mev or HAND_SET_MARGIN_MEV   # legacy: a checkpoint from before edep_excess_mev
+        own = pid[..., None] == pid.new_tensor(list(margins))   # (..., n_species), one-hot or all false
+        mev = e_in.new_tensor(list(margins.values()))
+        cap = e_in + torch.where(own.any(-1), (own * mev).sum(-1), mev.max())
+        return MarginScale(cap, torch.log((self.edep_log_min or 1e-6) / cap), torch.log(cap / _MISSING_MEV))
+
+
+# ---- plumbing --------------------------------------------------------------------------------------------------------
+
+def _read_config(config: dict) -> tuple:
+    """Returns ``(conf, cutoff_mev, proj_ray, manifold)`` of a full config or of the flat dict.
+
+    The flat dict is ``scripts/gen_data.py``'s and ``MultModel``'s; ``MultModel``'s has no manifold, it only calls
+    ``norm_e``.
+    """
+    config = config.get("config", config)
+    if "model_conf" in config:   # a full config
+        conf = config["model_conf"]
+        return (conf, config["dl_conf"]["lds_args"].get("cutoff_mev"), conf.get("proj_ray", True),
+                build_manifold(conf["manifold"]))
+    manifold = build_manifold(config["manifold"]) if config.get("manifold") else None
+    return config, config.get("cutoff_mev"), config.get("proj_ray"), manifold
+
+
+def _unpadded(cc: Tensor, e_kin: Tensor | None) -> tuple[Tensor, Tensor, Tensor]:
+    """Returns ``(e, p, x)`` [MeV, mm] with the NaN padding set to 1, so that it stays finite through the formulas.
+
+    ``e`` is ``e_kin``, or ``|p|`` without it (``energy_kin: false``, legacy: it saturates for hadrons).
+    """
+    p, x = cc.nan_to_num(1).split(3, -1)
+    e = e_kin.nan_to_num(1) if e_kin is not None else p.norm(dim=-1, keepdim=True)   # legacy
+    return e, p, x
+
+
+def _prefix_tokens(values: list, like: Tensor) -> Tensor:
+    """Returns the (B, len(values), 8) prefix tokens ``[value, 1, 1, 1, 1, 1, 1, 0]``, in ``like``'s dtype, device."""
+    prefix = like.new_tensor([0, 1, 1, 1, 1, 1, 1, 0]).repeat(len(like), len(values), 1)
+    prefix[..., 0] = torch.stack([v.reshape(len(like)) for v in values], dim=1)
+    return prefix
+
+
+def _prepend(mask: Tensor, n: int, value=None) -> Tensor:
+    """Returns the (B, L) ``mask`` with ``n`` tokens prepended: ``value``, or 0."""
+    return F.pad(mask, (n, 0), value=value)
+
+
+def _check_margins(margin, species, excess_mev) -> None:
+    """Raises if a species on the margin scale has no margin.
+
+    Raises:
+        ValueError: an ``edep_margin_species`` entry is missing from ``edep_excess_mev``.
+    """
+    if margin and excess_mev is not None:
+        missing = set(species or ()) - set(excess_mev)
+        if missing:
+            raise ValueError(f"edep_margin_species {sorted(missing)} have no entry in model_conf.edep_excess_mev: "
+                             "no such incoming species in the training data, so no cap")

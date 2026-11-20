@@ -36,6 +36,13 @@ _OT_COUPLING_REQUIRES_LAP = (
 _BLOCKED = 1e6   # the cost of a blocked pair
 
 
+def distance(manifold, a: Tensor, b: Tensor) -> Tensor:
+    """Computes ``d_k(a, b)`` of one manifold factor: the arc on a sphere, the Euclidean distance otherwise."""
+    if isinstance(manifold, Sphere):
+        return torch.acos((a * b).sum(-1).float().clamp(-1 + 1e-6, 1 - 1e-6))
+    return (a - b).norm(dim=-1).float()
+
+
 def ot_couple(base: Tensor, ds_t: DataStruct, manifold) -> Tensor:
     """Permutes each event's base slots onto its data slots by optimal assignment.
 
@@ -52,21 +59,32 @@ def ot_couple(base: Tensor, ds_t: DataStruct, manifold) -> Tensor:
     """
     if batch_linear_assignment is None:
         raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
-    base    = base.where(ds_t.am.full.unsqueeze(-1), ds_t.f.model_in)
-    out     = _F(base).out_p                                                    # a view: writing it permutes base
-    valid   = ds_t.am.out_p
-    pid     = ds_t.f.out_pid
-    blocked = (valid[:, :, None] != valid[:, None, :]) | (pid[:, :, None] != pid[:, None, :])
-
-    data_i  = ds_t.f.out_cc[:, :, None].split(manifold.ambient_dims, dim=-1)    # per factor (B, n, 1, .)
-    base_j  = out[:, None].split(manifold.ambient_dims, dim=-1)                 # per factor (B, 1, n, .)
-    cost    = sum(
-        (torch.acos((a * b).sum(-1).float().clamp(-1 + 1e-6, 1 - 1e-6)) if isinstance(mf, Sphere)
-         else (a - b).norm(dim=-1).float()) ** 2
-        for mf, a, b in zip(manifold.manifolds, data_i, base_j)
-    ) + _BLOCKED * blocked
-
-    assign  = (_lap_cuda_unchecked(cost, validation="off") if cost.is_cuda and _lap_cuda_unchecked is not None
-               else batch_linear_assignment(cost)).long()
-    out[:]  = torch.take_along_dim(out, assign.unsqueeze(-1), dim=1)
+    base   = base.where(ds_t.am.full.unsqueeze(-1), ds_t.f.model_in)
+    out    = _F(base).out_p                                            # a view: writing it permutes base
+    cost   = (
+        _pair_cost(ds_t.f.out_cc, out, manifold)
+        + _BLOCKED * _blocked(ds_t.am.out_p, ds_t.f.out_pid)
+    )
+    out[:] = torch.take_along_dim(out, _assign(cost).unsqueeze(-1), dim=1)
     return base
+
+
+# ---- plumbing --------------------------------------------------------------------------------------------------------
+
+def _pair_cost(data: Tensor, base: Tensor, manifold) -> Tensor:
+    """Computes ``cost[b, i, j] = sum_k d_k(data_i, base_j)^2`` (B, n, n) over the manifold's factors."""
+    data_i = data[:, :, None].split(manifold.ambient_dims, dim=-1)   # per factor (B, n, 1, .)
+    base_j = base[:, None].split(manifold.ambient_dims, dim=-1)      # per factor (B, 1, n, .)
+    return sum(distance(mf, a, b) ** 2 for mf, a, b in zip(manifold.manifolds, data_i, base_j))
+
+
+def _blocked(valid: Tensor, pid: Tensor) -> Tensor:
+    """Returns the pairs (B, n, n) whose slots differ in pdgid, or of which one is padding."""
+    return (valid[:, :, None] != valid[:, None, :]) | (pid[:, :, None] != pid[:, None, :])
+
+
+def _assign(cost: Tensor) -> Tensor:
+    """Solves the assignment of each event's cost matrix (unchecked on CUDA: our costs are finite and square)."""
+    if cost.is_cuda and _lap_cuda_unchecked is not None:
+        return _lap_cuda_unchecked(cost, validation="off").long()
+    return batch_linear_assignment(cost).long()

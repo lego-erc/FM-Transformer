@@ -16,6 +16,17 @@ from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from legofmt.legacy.optimizers import schedulefree_adamw
 
 
+def muon_lr_ratio(rows: int, cols: int, adjusted: bool) -> float:
+    """Returns Muon's learning-rate ratio for a weight flattened to ``(rows, cols)``.
+
+    ```
+    ratio = sqrt(max(1, rows / cols))      adjusted (use_adjusted_lr): the original Muon's
+          = 0.2 sqrt(max(rows, cols))      else: Moonlight's RMS matching
+    ```
+    """
+    return max(1.0, rows / cols) ** 0.5 if adjusted else 0.2 * max(rows, cols) ** 0.5
+
+
 class BatchedMuon(torch.optim.Optimizer):
     """``pytorch_optimizer.Muon``'s update (Nesterov momentum -> Newton-Schulz
     orthogonalisation for >=2-D weights, AdamW for the rest, decoupled weight
@@ -41,34 +52,19 @@ class BatchedMuon(torch.optim.Optimizer):
         super().__init__(params, {})
         self._shape_groups = {}  # id(group) -> [(param indices, lr ratio)], shapes are fixed
 
-    def _groups_by_shape(self, group, ps):
-        # keyed on the live parameter set, not the group: the index is into `ps`,
-        # which drops parameters without gradients, so a freeze after the first
-        # step (a pretrained head) would otherwise index past the end
-        key = (id(group), tuple(id(p) for p in ps))
-        if key not in self._shape_groups:
-            by_shape = defaultdict(list)  # >2-D weights flatten to (dim0, -1), as in pytorch_optimizer
-            for i, p in enumerate(ps):
-                by_shape[(p.shape[0], p[0].numel())].append(i)
-            # pytorch_optimizer's get_adjusted_lr: the original Muon sqrt(max(1, rows/cols)) if
-            # use_adjusted_lr, else Moonlight's RMS-matching 0.2*sqrt(max(rows, cols)) -- always applied
-            self._shape_groups[key] = [
-                (idx, max(1.0, r / c) ** 0.5 if group["use_adjusted_lr"] else 0.2 * max(r, c) ** 0.5)
-                for (r, c), idx in by_shape.items()
-            ]
-        return self._shape_groups[key]
-
     @torch.no_grad()
     def step(self, closure=None):
+        """Applies one step: the weight decay, then Muon to the >=2-D weights and AdamW to the rest.
+
+        ```
+        p *= 1 - lr wd      weight_decouple; else g += wd p
+        ```
+        """
         loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
-        for group in self.param_groups:
-            ps = [p for p in group["params"] if p.grad is not None]
-            if not ps:
-                continue
-            grads = [p.grad for p in ps]
+        for group, ps, grads in self._groups_with_grads():
             lr, wd = group["lr"], group["weight_decay"]
             group["step"] += 1
             if wd > 0 and group["weight_decouple"]:
@@ -82,30 +78,74 @@ class BatchedMuon(torch.optim.Optimizer):
         return loss
 
     def _muon_update(self, group, ps, grads, lr) -> None:
-        bufs = [self.state[p].setdefault("momentum_buffer", torch.zeros_like(p)) for p in ps]
-        torch._foreach_lerp_(bufs, grads, 1.0 - group["momentum"])
-        updates = torch._foreach_lerp(grads, bufs, group["momentum"]) if group["nesterov"] else bufs
+        """Updates >=2-D weights with Muon.
+
+        ```
+        buf  = mu buf + (1 - mu) g
+        upd  = mu buf + (1 - mu) g             nesterov; else upd = buf
+        p   -= lr ratio NS(upd)                NS: Newton-Schulz orthogonalisation of upd as a (rows, cols) matrix
+        ```
+
+        ``mu`` is ``momentum``, ``ratio`` is ``muon_lr_ratio``. One NS call takes each group of equal-shape matrices.
+        """
+        mu   = group["momentum"]
+        bufs = self._state(ps, "momentum_buffer")
+        torch._foreach_lerp_(bufs, grads, 1.0 - mu)                                  # buf
+        upd  = torch._foreach_lerp(grads, bufs, mu) if group["nesterov"] else bufs    # upd
         for idx, ratio in self._groups_by_shape(group, ps):
-            stacked = torch.stack([updates[i].view(len(updates[i]), -1) for i in idx])
-            o = zero_power_via_newton_schulz_5(stacked, num_steps=group["ns_steps"])
-            o = o.contiguous().to(ps[idx[0]].dtype)  # one cast for the whole group; unbind/view below are free
-            torch._foreach_add_(
-                [ps[i] for i in idx], [oi.view(ps[i].shape) for i, oi in zip(idx, o.unbind(0))], alpha=-lr * ratio,
-            )
+            ns = _newton_schulz(upd, idx, ps, group["ns_steps"])
+            torch._foreach_add_([ps[i] for i in idx], ns, alpha=-lr * ratio)            # p
 
     def _adamw_update(self, group, ps, grads, lr) -> None:
-        """Updates 1-D params (gates, biases, scales) with plain AdamW."""
+        """Updates 1-D params (gates, biases, scales) with plain AdamW.
+
+        ```
+        m   = b1 m + (1 - b1) g
+        v   = b2 v + (1 - b2) g^2
+        p  -= lr sqrt(1 - b2^t) / (1 - b1^t) m / (sqrt(v) + eps)
+        ```
+        """
         b1, b2 = group["betas"]
-        st = group["step"]
-        exp_avg    = [self.state[p].setdefault("exp_avg", torch.zeros_like(p)) for p in ps]
-        exp_avg_sq = [self.state[p].setdefault("exp_avg_sq", torch.zeros_like(p)) for p in ps]
-        torch._foreach_lerp_(exp_avg, grads, 1.0 - b1)
-        torch._foreach_mul_(exp_avg_sq, b2)
-        torch._foreach_addcmul_(exp_avg_sq, grads, grads, value=1.0 - b2)
-        denom = torch._foreach_sqrt(exp_avg_sq)
+        t = group["step"]
+        m = self._state(ps, "exp_avg")
+        v = self._state(ps, "exp_avg_sq")
+        torch._foreach_lerp_(m, grads, 1.0 - b1)                   # m
+        torch._foreach_mul_(v, b2)                                  # v
+        torch._foreach_addcmul_(v, grads, grads, value=1.0 - b2)
+        denom = torch._foreach_sqrt(v)                              # sqrt(v) + eps
         torch._foreach_add_(denom, group["eps"])
-        # p -= lr * (m / bc1) / ((sqrt(v) + eps) / sqrt(bc2)), constants folded into `value`
-        torch._foreach_addcdiv_(ps, exp_avg, denom, value=-lr * (1.0 - b2 ** st) ** 0.5 / (1.0 - b1 ** st))
+        torch._foreach_addcdiv_(ps, m, denom, value=-lr * (1.0 - b2 ** t) ** 0.5 / (1.0 - b1 ** t))   # p
+
+    # ---- plumbing ------------------------------------------------------------------------------------------------
+
+    def _groups_with_grads(self):
+        """Yields ``(group, ps, grads)`` of every group with a gradient, ``ps`` its parameters that have one."""
+        for group in self.param_groups:
+            ps = [p for p in group["params"] if p.grad is not None]
+            if ps:
+                yield group, ps, [p.grad for p in ps]
+
+    def _state(self, ps, name):
+        """Returns the state ``name`` of every parameter, zeros at the first step."""
+        return [self.state[p].setdefault(name, torch.zeros_like(p)) for p in ps]
+
+    def _groups_by_shape(self, group, ps):
+        """Returns the groups of equal-shape matrices among ``ps`` (indices), each with its ``muon_lr_ratio``.
+
+        ``(rows, cols)`` is a weight flattened to ``(dim0, -1)``, as pytorch_optimizer's ``get_adjusted_lr`` does.
+        """
+        # keyed on the live parameter set, not the group: the index is into `ps`,
+        # which drops parameters without gradients, so a freeze after the first
+        # step (a pretrained head) would otherwise index past the end
+        key = (id(group), tuple(id(p) for p in ps))
+        if key not in self._shape_groups:
+            by_shape = defaultdict(list)  # >2-D weights flatten to (dim0, -1), as in pytorch_optimizer
+            for i, p in enumerate(ps):
+                by_shape[(p.shape[0], p[0].numel())].append(i)
+            self._shape_groups[key] = [
+                (idx, muon_lr_ratio(r, c, group["use_adjusted_lr"])) for (r, c), idx in by_shape.items()
+            ]
+        return self._shape_groups[key]
 
 
 def muon_factory(params, **kw):
@@ -137,10 +177,6 @@ OPTIMIZERS = {"muon": muon_factory, "schedulefree": schedulefree_adamw}   # sche
 SCHEDULERS = {"warmup_cosine": warmup_cosine}
 
 
-def _get(reg, k):
-    return reg[k] if isinstance(k, str) else k
-
-
 def build_optimizer(params, opt_conf):
     """Returns (optimizer, lr_scheduler_dict | None) ready for Lightning."""
     cfg = {**opt_conf}
@@ -151,3 +187,17 @@ def build_optimizer(params, opt_conf):
     sc = {**sc}
     interval = sc.pop("interval", "step")
     return opt, {"scheduler": _get(SCHEDULERS, sc.pop("cls"))(opt, **sc), "interval": interval}
+
+
+# ---- plumbing --------------------------------------------------------------------------------------------------------
+
+def _get(reg, k):
+    return reg[k] if isinstance(k, str) else k
+
+
+def _newton_schulz(upd, idx, ps, steps):
+    """Returns NS(upd[i]) of the equal-shape parameters in ``idx`` from one batched call, in their shape and dtype."""
+    stacked = torch.stack([upd[i].view(len(upd[i]), -1) for i in idx])
+    o = zero_power_via_newton_schulz_5(stacked, num_steps=steps)
+    o = o.contiguous().to(ps[idx[0]].dtype)  # one cast for the whole group; unbind/view below are free
+    return [oi.view(ps[i].shape) for i, oi in zip(idx, o.unbind(0))]

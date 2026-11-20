@@ -42,18 +42,8 @@ from legofmt.compat import fp32_attention, legacy_param_rename, needs_fp32_atten
 from legofmt.legacy.cfm_trafo_x import LegacyField
 
 
-def _prepend(tokens: Tensor, c: Tensor, generated: bool, h: Tensor, emb: Tensor, gen: Tensor, attn_mask: Tensor):
-    """Prepends ``tokens`` (B, n, D) to the sequence ``(h, emb, gen, attn_mask)``.
-
-    They get the time embedding ``c`` (B, 1, D), are attended, and are generated or conditioning tokens.
-    """
-    n = tokens.shape[1]
-    c = c.expand(-1, n, -1)
-    return (torch.cat((tokens + c, h), dim=1), torch.cat((c, emb), dim=1),
-            F.pad(gen, (n, 0), value=generated), F.pad(attn_mask, (n, 0), value=True))
-
-
 class CFMTrafo_x(LegacyField):
+    """The flow's vector field: a transformer over the event's tokens (module docstring)."""
 
     def __init__(
         self,
@@ -88,14 +78,7 @@ class CFMTrafo_x(LegacyField):
         self.step_cond = step_cond
         self.lat_dim   = lat_dim
 
-        # geometry tokens (model_args.geom_encoder): they stand in for the cond-scalar tokens, which hide_scalars
-        # masks out of the attention (E_dep is token 1, the incoming particle token n_prefix)
-        self.geom = None
-        if geom_encoder is not None:
-            g = dict(geom_encoder)
-            n_prefix, self.geom_hide = g.pop("n_prefix"), g.pop("hide_scalars")
-            self.register_buffer("geom_scalar_tokens", torch.tensor([0, *range(2, n_prefix)]), persistent=False)
-            self.geom = GeomEncoder(g.pop("layers"), h_dim, **g)
+        self._add_geometry_tokens(geom_encoder, h_dim)   # model_args.geom_encoder; self.geom None without
 
         # the encoder
         self.vf = ContinuousTransformerWrapper(
@@ -115,9 +98,7 @@ class CFMTrafo_x(LegacyField):
                 **kwargs,
             ),
         )
-        if needs_fp32_attention(kwargs):
-            fp32_attention(self.vf)
-        self._per_event_cond = time_cond and per_event_gammas(self.vf.attn_layers)
+        self._per_event_cond = self._patch_encoder(kwargs, time_cond)   # fp32 attention, per-event gammas
 
         # token embedding and read-out: per value of the mask, the type and the pdgid a linear map in ([:, 0]: W, bi: b)
         # and one out ([:, 1]: V, bo: a)
@@ -157,26 +138,6 @@ class CFMTrafo_x(LegacyField):
             self.step_gain = nn.Parameter(torch.zeros(1))
 
         self._init_legacy(time_cond, dim_in_out, grad_ckpt)
-
-    def _one_hot(self, mask: Tensor, types: Tensor, pdgids: Tensor) -> Tensor:
-        """Builds each token's one-hot over the three vocabularies: its mask value, its type, its pdgid.
-
-        The index-selected linear maps become one matmul on it.
-
-        Args:
-            mask:   (B, L), 1 on generated tokens.
-            types:  (1, L), each position's type.
-            pdgids: (B, L, 1), each token's species index (``_F.pdgids``).
-
-        Returns:
-            (B, L, nvtypes + ntypes + npdgids).
-        """
-        B, L = mask.shape[:2]
-        return torch.cat((
-            F.one_hot(mask.reshape(B, L).long(), self.nvtypes),
-            F.one_hot(types.view(-1)[:L], self.ntypes).expand(B, -1, -1),
-            F.one_hot(pdgids.reshape(B, L).long(), self.npdgids),
-        ), dim=-1).to(self.cond_w_mask.dtype)
 
     def _embed(self, x: Tensor, oh: Tensor) -> Tensor:
         """Embeds the tokens ``x``: ``h_i = mean_k(W_k[c_ik] x_i + b_k[c_ik])``.
@@ -231,25 +192,98 @@ class CFMTrafo_x(LegacyField):
         Returns:
             ``v`` (B, L, in_dim); with ``lat_dim`` ``(v, v_z)``, the latent's velocity (B, lat_dim).
         """
-        if self._needs_legacy(t, d): return self._legacy_forward(x, mask, attn_mask, types, pdgids, t, d, z)
-        B, L  = x.shape[:2]
-        gen   = mask == 1
+        if self._needs_legacy(t, d): return self._legacy_forward(x, mask, attn_mask, types, pdgids, t, d, z)  # legacy
+        gen          = mask == 1
+        c_con, c_gen = self._time_conditions(t, d, len(x))     # emb(1, 0), emb(t, d)
+        oh           = self._one_hot(mask, types, pdgids)
+        emb          = torch.where(gen.unsqueeze(-1), c_gen, c_con)
+        h            = self._embed(x, oh) + emb
+        h, emb, gen, attn_mask = self._with_extra_tokens(h, emb, gen, attn_mask, c_con, c_gen, z)   # [z | g | x]
+        h            = self._encode(h, emb, gen, attn_mask, c_con, c_gen)
+        v            = self._project_out(h[:, -x.shape[1]:], mask, oh)
+        return (v, self.lat_out(h[:, 0])) if self.lat_dim else v
+
+    # ---- plumbing -----------------------------------------------------------------------------------------------
+
+    def _add_geometry_tokens(self, geom_encoder: dict | None, h_dim: int) -> None:
+        """Builds ``self.geom``, the encoder of the geometry tokens (``model_args.geom_encoder``); None without.
+
+        The tokens stand in for the cond-scalar tokens, which ``hide_scalars`` masks out of the attention (E_dep is
+        token 1, the incoming particle token n_prefix).
+        """
+        self.geom = None
+        if geom_encoder is not None:
+            g = dict(geom_encoder)
+            n_prefix, self.geom_hide = g.pop("n_prefix"), g.pop("hide_scalars")
+            self.register_buffer("geom_scalar_tokens", torch.tensor([0, *range(2, n_prefix)]), persistent=False)
+            self.geom = GeomEncoder(g.pop("layers"), h_dim, **g)
+
+    def _patch_encoder(self, kwargs: dict, time_cond: bool) -> bool:
+        """Patches the encoder: fp32 attention where the options need it, and the norms' per-event condition.
+
+        Returns whether the norms read the per-event condition (``event_cond.py``).
+        """
+        if needs_fp32_attention(kwargs):
+            fp32_attention(self.vf)
+        return time_cond and per_event_gammas(self.vf.attn_layers)
+
+    def _one_hot(self, mask: Tensor, types: Tensor, pdgids: Tensor) -> Tensor:
+        """Builds each token's one-hot over the three vocabularies: its mask value, its type, its pdgid.
+
+        The index-selected linear maps become one matmul on it.
+
+        Args:
+            mask:   (B, L), 1 on generated tokens.
+            types:  (1, L), each position's type.
+            pdgids: (B, L, 1), each token's species index (``_F.pdgids``).
+
+        Returns:
+            (B, L, nvtypes + ntypes + npdgids).
+        """
+        B, L = mask.shape[:2]
+        return torch.cat((
+            F.one_hot(mask.reshape(B, L).long(), self.nvtypes),
+            F.one_hot(types.view(-1)[:L], self.ntypes).expand(B, -1, -1),
+            F.one_hot(pdgids.reshape(B, L).long(), self.npdgids),
+        ), dim=-1).to(self.cond_w_mask.dtype)
+
+    def _time_conditions(self, t: Tensor, d: Tensor | None, B: int) -> tuple[Tensor, Tensor]:
+        """Returns the conditioning tokens' ``emb(1, 0)`` and the generated tokens' ``emb(t, d)``, each (B, 1, D)."""
         c_con = self._time_emb(t.new_ones(1, 1), None if d is None else d.new_zeros(1, 1)).expand(B, 1, -1)
         c_gen = self._time_emb(t, d).expand(B, 1, -1)
+        return c_con, c_gen
 
-        oh  = self._one_hot(mask, types, pdgids)
-        emb = torch.where(gen.unsqueeze(-1), c_gen, c_con)
-        h   = self._embed(x, oh) + emb
+    def _with_extra_tokens(self, h: Tensor, emb: Tensor, gen: Tensor, attn_mask: Tensor, c_con: Tensor,
+                           c_gen: Tensor, z: Tensor | None) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Prepends the geometry tokens (conditioning) and the latent token (generated), where the field has them.
+
+        Returns the sequence ``(h, emb, gen, attn_mask)`` with them; ``geom_hide`` masks the cond-scalar tokens out of
+        the attention.
+        """
         seq = (h, emb, gen, attn_mask)
         if self.geom is not None:   # K conditioning tokens
             if self.geom_hide:
                 seq = (h, emb, gen, attn_mask.index_fill(1, self.geom_scalar_tokens, False))
-            seq = _prepend(self.geom().to(h.dtype).expand(B, -1, -1), c_con, False, *seq)
+            seq = _prepend(self.geom().to(h.dtype).expand(len(h), -1, -1), c_con, False, *seq)
         if self.lat_dim:            # one generated token
             seq = _prepend(self.lat_in(z.to(h.dtype)).unsqueeze(1), c_gen, True, *seq)
-        h, emb, gen, attn_mask = seq
+        return seq
 
-        h = self.vf.attn_layers(self.vf.emb_dropout(h), mask=attn_mask,
-                                condition=per_event_condition(emb, c_con, c_gen, gen) if self._per_event_cond else emb)
-        v = self._project_out(h[:, -L:], mask, oh)
-        return (v, self.lat_out(h[:, 0])) if self.lat_dim else v
+    def _encode(self, h: Tensor, emb: Tensor, gen: Tensor, attn_mask: Tensor, c_con: Tensor, c_gen: Tensor) -> Tensor:
+        """Runs the encoder on ``h`` with the time condition ``emb``, handed to the norms per event where it can be."""
+        h         = self.vf.emb_dropout(h)
+        condition = per_event_condition(emb, c_con, c_gen, gen) if self._per_event_cond else emb
+        return self.vf.attn_layers(h, mask=attn_mask, condition=condition)
+
+
+# ---- plumbing ------------------------------------------------------------------------------------------------------
+
+def _prepend(tokens: Tensor, c: Tensor, generated: bool, h: Tensor, emb: Tensor, gen: Tensor, attn_mask: Tensor):
+    """Prepends ``tokens`` (B, n, D) to the sequence ``(h, emb, gen, attn_mask)``.
+
+    They get the time embedding ``c`` (B, 1, D), are attended, and are generated or conditioning tokens.
+    """
+    n = tokens.shape[1]
+    c = c.expand(-1, n, -1)
+    return (torch.cat((tokens + c, h), dim=1), torch.cat((c, emb), dim=1),
+            F.pad(gen, (n, 0), value=generated), F.pad(attn_mask, (n, 0), value=True))

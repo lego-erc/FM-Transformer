@@ -8,17 +8,6 @@ from torch import Tensor, nn
 from legofmt.base.base_dists import BaseParams
 
 
-@contextmanager
-def ieee_fp32():
-    """Runs float32 matmuls at full precision inside the block, whatever ``torch.set_float32_matmul_precision`` says."""
-    prec = torch.get_float32_matmul_precision()
-    torch.set_float32_matmul_precision("highest")
-    try:
-        yield
-    finally:
-        torch.set_float32_matmul_precision(prec)
-
-
 class BaseHead(nn.Module):
     """The base head: an MLP from an event's features to every parameter of its prior.
 
@@ -69,16 +58,14 @@ class BaseHead(nn.Module):
         """
         B = len(cont)
         with ieee_fp32(), torch.autocast(cont.device.type, enabled=False):
-            # the batch goes through twice in one pass: [:B] as given, [B:] with the outgoing set zeroed
-            cont    = ((cont - self.mean) / self.std).repeat(2, 1)
-            species = species.repeat(2, 1)
-            out_set = torch.cat((out_set, torch.zeros_like(out_set)))
-
-            slopes = (species.unsqueeze(-1) * torch.cat((cont, out_set), -1).unsqueeze(1)).flatten(1)
-            h      = nn.functional.mish(self.l0(torch.cat((cont, species, out_set), -1)) + self.k0(slopes))
+            c, s, o = _seen_then_blind((cont - self.mean) / self.std, species, out_set)   # rows [B:]: o zeroed
+            h = nn.functional.mish(
+                self.l0(torch.cat((c, s, o), -1))
+                + self.k0(_outer(s, torch.cat((c, o), -1)))
+            )
             energy, e_dep, angles = self.re(self.ge(h)), self.rd(self.gd(h)), self.ra(self.ga(h))
 
-        log_sm, log_q     = energy[B:].chunk(2, -1)   # the energy group: from the blind pass
+        log_sm, log_q     = energy[B:].chunk(2, -1)   # the energy group: from the blind rows
         mu, log_sig       = e_dep[:B].unbind(-1)
         log_kappa, log_pw = angles[:B].chunk(2, -1)
         return BaseParams(   # each parameter inside its distribution's range
@@ -89,3 +76,26 @@ class BaseHead(nn.Module):
             edep_mu  = mu,
             edep_sig = torch.exp(log_sig),
         )
+
+
+# ---- plumbing --------------------------------------------------------------------------------------------------------
+
+@contextmanager
+def ieee_fp32():
+    """Runs float32 matmuls at full precision inside the block, whatever ``torch.set_float32_matmul_precision`` says."""
+    prec = torch.get_float32_matmul_precision()
+    torch.set_float32_matmul_precision("highest")
+    try:
+        yield
+    finally:
+        torch.set_float32_matmul_precision(prec)
+
+
+def _seen_then_blind(c: Tensor, s: Tensor, o: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    """Stacks the batch twice, the second copy with the outgoing set ``o`` zeroed, so that one pass serves both."""
+    return c.repeat(2, 1), s.repeat(2, 1), torch.cat((o, torch.zeros_like(o)))
+
+
+def _outer(a: Tensor, b: Tensor) -> Tensor:
+    """Computes the outer product of ``a`` and ``b`` per row, flattened: (B, i), (B, j) -> (B, i j)."""
+    return (a.unsqueeze(-1) * b.unsqueeze(1)).flatten(1)

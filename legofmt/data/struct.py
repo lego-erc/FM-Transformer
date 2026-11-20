@@ -13,7 +13,8 @@ am        (B, L)   True on a real token, False on padding
 
 Where a token sits depends on ``cond_scalars``, so never index the sequence directly: use ``_F`` (the features),
 ``_M`` (a mask) and ``DataStruct`` (a batch). The layout is process-global module state set by ``set_layout``, so
-constructing a model or a loader mutates it.
+constructing a model or a loader mutates it. ``with_dirs`` replaces the directions of some tokens, ``vocab_index``
+looks species ids up in a sorted vocabulary.
 """
 
 import torch
@@ -60,7 +61,26 @@ def cond_slot(name: str) -> int:
 
 
 class _F:
-    """Named views into the features ``f`` (..., L, 8): writing through one writes ``f``."""
+    """Named views into the features ``f`` (..., L, 8): writing through one writes ``f``.
+
+    ```
+    view                  tokens                         columns                      shape
+    d                     cond_scalars[0] (token 0)      value                        (...)
+    edep                  E_dep (token 1)                value                        (...)
+    cond(name)            that conditioning scalar       value                        (...)
+    non_p / non_cc        prefix                         all 8 / the manifold's 7     (..., n_prefix, 8 / 7)
+    in_p / in_cc          incoming                       all 8 / the manifold's 7     (..., 1, 8 / 7)
+    out_p / out_cc        outgoing                       all 8 / the manifold's 7     (..., n_out, 8 / 7)
+    model_in              every token                    the manifold's 7             (..., L, 7)
+    energy / pdgids       every token                    energy / pdgid               (..., L, 1)
+    mom / pos             every token                    momentum / position dir.     (..., L, 3)
+    in_energy             incoming                       energy                       (..., 1)
+    in_mom / in_pos       incoming                       momentum / position dir.     (..., 3)
+    in_pid                incoming                       pdgid                        (...)
+    out_energy / out_pid  outgoing                       energy / pdgid               (..., n_out)
+    out_mom / out_pos     outgoing                       momentum / position dir.     (..., n_out, 3)
+    ```
+    """
 
     def __init__(self, f: Tensor) -> None:
         self.full = f
@@ -94,6 +114,10 @@ class _F:
     def energy(self) -> Tensor: return self.full[..., 0:1]
     @property
     def pdgids(self) -> Tensor: return self.full[..., -1:]
+    @property
+    def mom(self) -> Tensor: return self.full[..., 1:4]
+    @property
+    def pos(self) -> Tensor: return self.full[..., 4:7]
 
     # A particle's columns: the incoming particle (..., .) ...
     @property
@@ -128,6 +152,29 @@ class _M:
     def out_p(self) -> Tensor: return self.full[..., n_prefix() + 1:]
     @property
     def fwd(self) -> Tensor: return self.full[..., n_prefix()] == 0   # of m: the incoming particle is given
+
+
+def with_dirs(x: Tensor, tokens: Tensor, mom: Tensor | None = None, pos: Tensor | None = None) -> Tensor:
+    """Returns the tokens ``x`` (..., L, 8) with the momentum and / or position directions of ``tokens`` replaced.
+
+    Args:
+        x:      the tokens.
+        tokens: (..., L), the tokens that take the new directions; the others keep theirs.
+        mom:    (..., L, 3), the new momentum directions, or None to keep them.
+        pos:    (..., L, 3), the new position directions, or None to keep them.
+    """
+    energy, mom_x, pos_x, pid = x.tensor_split(CHANNELS, dim=-1)
+    new = torch.cat((energy, mom_x if mom is None else mom, pos_x if pos is None else pos, pid), dim=-1)
+    return torch.where(tokens.unsqueeze(-1), new, x)
+
+
+def vocab_index(vocab: Tensor, ids: Tensor) -> tuple[Tensor, Tensor]:
+    """Returns each id's index into the sorted ``vocab`` and whether the id is in it.
+
+    The index of an id that is not in ``vocab`` is its insertion point, held inside the vocabulary.
+    """
+    idx = torch.searchsorted(vocab, ids).clamp(max=len(vocab) - 1)
+    return idx, vocab[idx] == ids
 
 
 class DataStruct:

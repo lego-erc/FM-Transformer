@@ -28,7 +28,7 @@ from packaging.version import Version
 from flow_matching.utils.manifolds import Euclidean, Sphere
 from x_transformers.attend import Attend
 
-from legofmt.data.struct import _F
+from legofmt.data.struct import _F, set_layout
 from legofmt.geometry.product_manifold import ProductManifold
 
 
@@ -228,3 +228,48 @@ def dataset_already_normalised(f: torch.Tensor, max_energy: float) -> bool:
         )
         return True
     return False
+
+
+# The 2026-09 loss-weighting rename and the removal of the t-bins: `uncert_bins` 16 vs 1 measured as a null on
+# generated E_dep (paired dW1 +0.015 +- 0.124 MeV against a 0.75 seed sd), so the per-t-bin table is gone and `lv` is
+# one cell per channel. A saved `lv` of size `bins*3` collapses through the mean of its variances, because a converged
+# Kendall cell sits at `lv = log(L)`.
+_RENAMED_KEYS = {
+    "uncert_weighting": "learned_loss_weights",
+    "uncert_min": "max_loss_weight",
+    "uncert_min_flow": "max_loss_weight_flow",
+    "uncert_lv": "loss_weights",
+}
+
+
+def migrate_loss_weight_keys(model_conf: dict) -> dict:
+    """Rewrites the pre-2026-09 ``uncert_*`` keys and drops the removed t-bin axis."""
+    for old, new in _RENAMED_KEYS.items():
+        if old in model_conf:
+            model_conf.setdefault(new, model_conf.pop(old))
+    model_conf.pop("uncert_bins", None)
+    lv = (model_conf.get("loss_weights") or {}).get("lv")
+    n_cells = 3 + int(model_conf.get("edep_cell", False)) + int(model_conf.get("edep_ae") is not None)  # + lat
+    if lv is not None and lv.numel() > n_cells:
+        model_conf["loss_weights"]["lv"] = torch.log(torch.exp(lv.view(-1, n_cells)).mean(0))
+    return model_conf
+
+
+def edep_margin_keys(conf: dict) -> tuple:
+    """Returns ``(edep_margin, edep_margin_species)``, read through their names until 11.2026, ``edep_wall*``."""
+    return (conf.get("edep_margin", conf.get("edep_wall", False)),
+            conf.get("edep_margin_species", conf.get("edep_wall_species")))
+
+
+def edep_excess_from_data(config: dict) -> None:
+    """Fills ``model_conf.edep_excess_mev`` from the data file, in place.
+
+    For a margin model on a dataset whose meta.json predates ``edep_excess_max_mev``; any other config is left as it
+    is.
+    """
+    model_conf = config["model_conf"]
+    if edep_margin_keys(model_conf)[0] and "edep_excess_mev" not in model_conf:
+        from legofmt.data.write.norm import DataPrep
+        set_layout(model_conf["cond_scalars"])
+        f = torch.load(config["dl_conf"]["data_path"], map_location="cpu", mmap=True)[0]
+        model_conf["edep_excess_mev"] = DataPrep.edep_excess_max(f)
