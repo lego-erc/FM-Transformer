@@ -12,6 +12,9 @@ import torch
 
 
 class CubeSymmetry:
+    """The cube rotations that bring a face onto the canonical (+x) one, and that face's stabiliser."""
+
+    # one rotation per face, indexed 2 * axis + (the face is on the negative side)
     _R = torch.tensor([
         [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
         [[-1, 0, 0], [0, -1, 0], [0, 0, 1]],
@@ -37,6 +40,7 @@ class CubeSymmetry:
         self._cache: dict = {}
 
     def _rot(self, like: torch.Tensor, name: str = "_R") -> torch.Tensor:
+        """Returns the matrix table ``name`` on the device and dtype of ``like`` (cached)."""
         key = (name, like.device, like.dtype)
         r = self._cache.get(key)
         if r is None:
@@ -44,16 +48,20 @@ class CubeSymmetry:
         return r
 
     def _mat(self, like, face, g):
+        """Returns each event's matrix: its face's rotation, then the stabiliser element ``g`` if given."""
         r = self._rot(like)[face]
         return r if g is None else self._rot(like, "_S")[g] @ r
 
     def face_of(self, pos):
+        """Returns the face a position direction points at: 2 * (its dominant axis) + (it is negative there)."""
         axis = pos.abs().argmax(-1)
         neg = pos.gather(-1, axis.unsqueeze(-1)).squeeze(-1) < 0
         return 2 * axis + neg.long()
 
     def canonicalize(self, dirs, face, g=None):
+        """Rotates ``dirs`` (B, ..., 3) into the canonical frame of each event's ``face`` (and by ``g``)."""
         return torch.einsum("b...i,bij->b...j", dirs, self._mat(dirs, face, g).mT)
 
     def uncanonicalize(self, dirs, face, g=None):
+        """Inverts ``canonicalize``."""
         return torch.einsum("b...i,bij->b...j", dirs, self._mat(dirs, face, g))

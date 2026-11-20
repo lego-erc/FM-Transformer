@@ -62,8 +62,10 @@ def cuboid_chord(u: torch.Tensor, pos: torch.Tensor, d: torch.Tensor) -> torch.T
 
 
 class GeomTrafos:
+    """The coordinate maps between cartesian unit vectors and spherical (theta, phi), and onto the cuboid."""
 
     def _batched(self, coords, c_dims, f_name):
+        """Applies ``f_name`` to each group of ``c_dims`` trailing channels."""
         out = getattr(self, f_name)(coords.unfold(-1, c_dims, c_dims))
         return out.flatten(-2, -1)
 
@@ -72,7 +74,8 @@ class GeomTrafos:
         if sph.shape[-1] != 2:
             return self._batched(sph, 2, "to_cc")
         theta, phi = sph.movedim(-1, 0)
-        return torch.stack((phi.cos() * theta.sin(), phi.sin() * theta.sin(), theta.cos()), dim=-1)
+        return torch.stack((torch.cos(phi) * torch.sin(theta), torch.sin(phi) * torch.sin(theta), torch.cos(theta)),
+                           dim=-1)
 
     def to_sph(self, cc):
         """Converts cartesian unit vectors to spherical (theta, phi), batched over trailing triples."""
@@ -98,9 +101,10 @@ class GeomTrafos:
 
     def rotate(self, sph, alpha, beta):
         """Rotates about the x-axis by alpha, then about the z-axis by beta, in spherical coords."""
-        st, ct = sph[..., 0:1].sin(), sph[..., 0:1].cos()
-        sp, cp = sph[..., 1:2].sin(), sph[..., 1:2].cos()
-        sa, ca = alpha.sin(), alpha.cos()
+        theta, phi = sph[..., 0:1], sph[..., 1:2]
+        st, ct = torch.sin(theta), torch.cos(theta)
+        sp, cp = torch.sin(phi), torch.cos(phi)
+        sa, ca = torch.sin(alpha), torch.cos(alpha)
         theta = safe_acos(st * sp * sa + ct * ca)
         y, x = st * sp * ca - ct * sa, st * cp
         phi = safe_atan2(y, x) + beta

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import torch
 
-from legofmt.distill.reflow import LEGOLtngDirect, _teacher_from_state
+from legofmt.legacy.reflow import LEGOLtngDirect, _teacher_from_state
 from legofmt.main.modules import LEGOLtng
 from test_helpers import _fake_batch, _tiny_config
 

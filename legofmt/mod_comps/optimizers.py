@@ -3,8 +3,8 @@
 ``BatchedMuon`` reimplements ``pytorch_optimizer.Muon``'s update with
 ``torch._foreach`` ops and one Newton-Schulz call per group of equal-shape
 matrices; both models' steps are kernel-launch-bound, so the library version's
-per-matrix Python loop dominated the step. ``opt_train`` / ``opt_eval`` are the
-schedule-free train/eval switch, shared by both LightningModules.
+per-matrix Python loop dominated the step. The recipe is ``muon`` with the
+``warmup_cosine`` schedule; schedule-free AdamW is :mod:`legofmt.legacy.optimizers`.
 """
 
 from collections import defaultdict
@@ -12,6 +12,8 @@ from collections import defaultdict
 import torch
 from pytorch_optimizer.optimizer.shampoo_utils import zero_power_via_newton_schulz_5
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
+
+from legofmt.legacy.optimizers import schedulefree_adamw
 
 
 class BatchedMuon(torch.optim.Optimizer):
@@ -118,11 +120,6 @@ def muon_factory(params, **kw):
     ], **kw)
 
 
-def schedulefree_adamw(params, **kw):
-    from schedulefree import AdamWScheduleFree
-    return AdamWScheduleFree(params, **kw)
-
-
 def warmup_cosine(opt, total_steps, warmup_frac=0.05, eta_min=1e-6):
     """Constructs a linear warmup over ``warmup_frac``, then a cosine to ``eta_min``.
 
@@ -136,7 +133,7 @@ def warmup_cosine(opt, total_steps, warmup_frac=0.05, eta_min=1e-6):
     ])
 
 
-OPTIMIZERS = {"muon": muon_factory, "schedulefree": schedulefree_adamw}
+OPTIMIZERS = {"muon": muon_factory, "schedulefree": schedulefree_adamw}   # schedulefree: legacy
 SCHEDULERS = {"warmup_cosine": warmup_cosine}
 
 
@@ -154,18 +151,3 @@ def build_optimizer(params, opt_conf):
     sc = {**sc}
     interval = sc.pop("interval", "step")
     return opt, {"scheduler": _get(SCHEDULERS, sc.pop("cls"))(opt, **sc), "interval": interval}
-
-
-def opt_is_schedulefree(opt) -> bool:
-    """Returns whether ``opt`` needs the explicit train/eval switch schedule-free carries."""
-    return callable(getattr(opt, "train", None))
-
-
-def opt_train(opt) -> None:
-    if opt_is_schedulefree(opt):
-        opt.train()
-
-
-def opt_eval(opt) -> None:
-    if opt_is_schedulefree(opt):
-        opt.eval()

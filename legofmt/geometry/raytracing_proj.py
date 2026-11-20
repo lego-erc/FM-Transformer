@@ -12,6 +12,11 @@ import torch
 
 
 class CubeTrace:
+    """Callable: ``(mom, pos)`` 6-vectors -> the same with the position advanced to the cuboid's surface.
+
+    Args:
+        cuboid_dim: the cuboid's edge lengths; only their ratios are used. None: a cube.
+    """
 
     def __init__(self, cuboid_dim=None):
         # edge lengths of a cuboid target; only their ratios are used, so a cube is exactly [1, 1, 1]

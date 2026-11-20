@@ -1,10 +1,18 @@
-"""Flow-map self-distillation, for few-step sampling.
+"""The flow-map term ``L_fm``: self-distillation of the field into few-step sampling.
 
-``one_step_euler_loss`` takes the LightningModule as its first argument. The
-target for step ``d`` is two no-grad half-steps at ``d/2``, averaged through
-``logmap`` rather than Euclidean-ly because the factors are spheres. Its
-bootstrap ladder is anchored at ``d=0`` deliberately -- without that the bottom
-rung supervises nothing.
+```
+step      d = 2**-k,  k ~ U{0, ..., sections - 1};   t_0 ~ the grid of d in [0, 1)
+teacher   two half steps from x_0 = x_{t_0}, without gradient:
+            x_mid = exp_{x_0}(d/2 v(x_0, t_0; d/2))
+            x_end = exp_{x_mid}(d/2 v(x_mid, t_0 + d/2; d/2))
+          the smallest step's teacher is called with d = 0: the plain velocity anchors the ladder, and without it
+          the bottom rung would supervise nothing
+target    log_{x_0}(x_end) / d          averaged through the logmap, the factors being spheres
+L_fm      the mean of |v(x_0, t_0; d) - target|**2 over the generated entries
+```
+
+The ``edep_ae`` latent takes the same two half steps (Euclidean), and its error joins the mean as K more entries.
+``one_step_euler_loss`` takes the LightningModule as its first argument.
 """
 
 import torch
@@ -12,9 +20,20 @@ from torch import Tensor
 
 
 def one_step_euler_loss(lego, base: Tensor, ds_t, pdgid_idx: Tensor, model=None, z=None) -> Tensor:
-    """Computes the ``one_step_euler`` loss in fp32.
+    """Computes ``L_fm`` in fp32.
 
     The loss is ~5e-5 and bf16 autocast inflates it ~390x, so the ladder runs outside autocast.
+
+    Args:
+        lego:      the ``LEGOLtng``.
+        base:      (B, L, 7), the batch's x_0.
+        ds_t:      the batch, in the frame and units of the velocity loss.
+        pdgid_idx: the tokens' species indices.
+        model:     the field to call (default ``lego.model``).
+        z:         ``(z_0, z_1)`` of the ``edep_ae`` latent, or None.
+
+    Returns:
+        The loss (a scalar).
     """
     with torch.autocast(base.device.type, enabled=False):
         z = None if z is None else tuple(a.float() for a in z)
@@ -23,11 +42,7 @@ def one_step_euler_loss(lego, base: Tensor, ds_t, pdgid_idx: Tensor, model=None,
 
 
 def _one_step_euler_loss_fp32(lego, base: Tensor, ds_t, pdgid_idx: Tensor, model, z=None) -> Tensor:
-    """Computes the ``one_step_euler`` loss; ``one_step_euler_loss`` calls it outside autocast.
-
-    ``z`` = (base, target) of the ``model_conf.edep_ae`` latent: it takes the same two teacher half-steps (Euclidean)
-    and its error joins the mean as K more cells.
-    """
+    """Computes ``L_fm`` (module docstring); ``one_step_euler_loss`` calls it outside autocast, with its arguments."""
     mask, am = ds_t.m.full, ds_t.am.full
     gen = (mask == 1).unsqueeze(-1)
     g   = gen & am.unsqueeze(-1)

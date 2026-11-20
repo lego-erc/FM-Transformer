@@ -1,8 +1,10 @@
-"""Reflow, and the one-step ``Direct`` variants.
+"""Reflow's teacher, and the one-step ``Direct`` models: both superseded by the flow-map term (``distill/distill.py``).
 
 Reflow re-couples the base to a frozen teacher's transport of it. A ``reflow_path`` teacher is used from step 0;
 ``reflow_start_epoch > 0`` makes the student's end-of-epoch snapshot the teacher from that epoch on (self-reflow
-without a path, a refresh with one). Neither set: no reflow.
+without a path, a refresh with one). Neither set: no reflow. The training-step side is
+:mod:`legofmt.legacy.train_step`, which imports the builders here lazily (this module subclasses the production
+classes, so nothing in production may import it at module level).
 ``LEGOLtngDirect`` / ``GenerateOutDirect`` drop time conditioning and predict
 the residual ``target - base`` in a single forward.
 """

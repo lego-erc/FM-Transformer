@@ -2,7 +2,7 @@
 checkpoints still run unchanged:
 
     time_cond: false   no time: one learned condition for every token (``global_cond``); the one-step models of
-                       ``legofmt.distill.reflow`` are built this way
+                       ``legofmt.legacy.reflow`` are built this way
     per-token t / d    times of shape (B, L) in place of one per event (B, 1)
     dim_in_out         a linear map into and out of the encoder (it has to equal ``h_dim``)
     grad_ckpt          gradient checkpointing of every encoder block

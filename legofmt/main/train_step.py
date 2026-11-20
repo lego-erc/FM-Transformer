@@ -18,7 +18,7 @@ flow map   + fac (lv_f + every exp(-lv_f) L_fm)            on the steps it fires
 The formulas are module functions (``sd3_time``, ``loss_cells``, ``kendall_total``); ``TrainStep`` puts the batch
 into the frame the flow learns in, samples the path, and reduces. Inverse events (``mask_conf.p_forward < 1``), the
 ``sm_norm`` time and reflow are :mod:`legofmt.legacy.train_step`. ``reduce_loss`` returns ``(total, logs)`` so that
-it runs without a Trainer; ``LEGOLtngDirect`` (``distill/reflow.py``) reuses it.
+it runs without a Trainer; ``LEGOLtngDirect`` (``legacy/reflow.py``) reuses it.
 """
 
 import torch

@@ -38,6 +38,8 @@ _SPHERE_MAPS = {"expmap": sphere_expmap, "logmap": sphere_logmap}   # used in pl
 
 
 class ProductManifold(Manifold):
+    """The product of ``manifolds``, factor i on the next ``ambient_dims[i]`` channels of the last dimension."""
+
     def __init__(self, manifolds: list, ambient_dims: tuple):
         if len(manifolds) != len(ambient_dims):
             raise ValueError("Number of Manifolds must match ambient_dims length!")
@@ -47,6 +49,7 @@ class ProductManifold(Manifold):
         self.ambient_dims = ambient_dims
 
     def _batch_map(self, fn_name, *tensors):
+        """Applies each factor's ``fn_name`` to its own channels and concatenates the results."""
         fns = [_SPHERE_MAPS[fn_name] if isinstance(man, Sphere) and fn_name in _SPHERE_MAPS else getattr(man, fn_name)
                for man in self.manifolds]
         parts = zip(*(t.split(self.ambient_dims, dim=-1) for t in tensors))

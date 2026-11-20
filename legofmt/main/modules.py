@@ -25,6 +25,7 @@ from legofmt.base.interface import BaseDist, build_base_head
 from legofmt.base.gen_base import GenerateBase
 from legofmt.legacy.base_nn import LegacyBaseDist
 from legofmt.legacy.edep_token import LegacyEdepToken
+from legofmt.legacy.optimizers import ScheduleFreeSwitch, opt_is_schedulefree
 from legofmt.legacy.train_step import LegacyTrainStep
 
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
@@ -44,12 +45,13 @@ from legofmt.geometry.geom_trafos import zoom_polar
 from legofmt.geometry.symmetry_projections import CubeSymmetry
 
 from legofmt.mod_comps.config import resolve_legoltng_config
-from legofmt.mod_comps.optimizers import build_optimizer, opt_eval, opt_is_schedulefree, opt_train
+from legofmt.mod_comps.optimizers import build_optimizer
 
 from legofmt.log_metrics.val_metrics import ShowerValMetrics
 
 
-class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, BaseDist, Solvers, ltng.LightningModule):
+class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, BaseDist, Solvers, ScheduleFreeSwitch,
+               ltng.LightningModule):
     """The flow-matching model: the field, its base distribution, training and solving.
 
     Args:
@@ -227,24 +229,10 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
             return self.opt
         return {"optimizer": self.opt, "lr_scheduler": self._lr_sched}
 
-    def _opt_train(self) -> None:
-        opt_train(self.opt)
-
-    def _opt_eval(self) -> None:
-        opt_eval(self.opt)
-
     @torch.no_grad()
     def on_fit_start(self) -> None:
         if self.rc.ot_coupling and ot_coupling.batch_linear_assignment is None:
             raise RuntimeError(ot_coupling._OT_COUPLING_REQUIRES_LAP)
         if self.reflow_teacher is not None: self.reflow_teacher.to(self.device)   # legacy: reflow
         self.model.train()
-        self._opt_train()
-
-    def on_validation_model_eval(self) -> None:
-        super().on_validation_model_eval()
-        self._opt_eval()
-
-    def on_validation_model_train(self) -> None:
-        super().on_validation_model_train()
-        self._opt_train()
+        self._opt_train()   # legacy: schedule-free

@@ -1,4 +1,4 @@
-"""Offline smoke tests of :class:`legofmt.distill.reflow.GenerateOutDirect` and ``GenerateIn``: tiny checkpoints
+"""Offline smoke tests of :class:`legofmt.legacy.reflow.GenerateOutDirect` and ``GenerateIn``: tiny checkpoints
 written to disk (no HF download), one end-to-end forward on a synthetic ``cond``."""
 
 from __future__ import annotations
@@ -8,7 +8,7 @@ import torch
 
 from test_helpers import _gun_cond, _save_flow_ckpt, _save_mult_ckpt
 from legofmt.data.struct import _F
-from legofmt.distill.reflow import GenerateOutDirect as GenerateOut
+from legofmt.legacy.reflow import GenerateOutDirect as GenerateOut
 from legofmt.main.generate import GenerateIn
 from legofmt.main.modules import LEGOLtng as LEGOLtngVelocity
 

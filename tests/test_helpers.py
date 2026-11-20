@@ -12,7 +12,7 @@ from legofmt.data.load.packed import load_dataset
 from legofmt.data.struct import DataStruct, _F
 from legofmt.data.write.norm import DataPrep
 from legofmt.data.write.pack import pack
-from legofmt.distill.reflow import LEGOLtngDirect
+from legofmt.legacy.reflow import LEGOLtngDirect
 
 MANIFOLD = [{"name": "euclidean", "dim": 1},
             {"name": "sphere", "dim": 3}, {"name": "sphere", "dim": 3}]

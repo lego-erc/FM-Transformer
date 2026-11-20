@@ -1,4 +1,4 @@
-"""Training-side behaviour of the tiny in-memory flow models: :class:`legofmt.distill.reflow.LEGOLtngDirect`
+"""Training-side behaviour of the tiny in-memory flow models: :class:`legofmt.legacy.reflow.LEGOLtngDirect`
 (imported here as ``LEGOLtng``) and the velocity ``LEGOLtngVelocity`` -- reflow, the step-conditioned flow map,
 overflow_delta and the learned loss weights."""
 
@@ -12,7 +12,7 @@ import torch
 
 from test_helpers import _fake_batch, _tiny_config, _vf_kwargs
 from legofmt.data.struct import DataStruct, _F
-from legofmt.distill.reflow import LEGOLtngDirect as LEGOLtng
+from legofmt.legacy.reflow import LEGOLtngDirect as LEGOLtng
 from legofmt.main.modules import LEGOLtng as LEGOLtngVelocity
 
 

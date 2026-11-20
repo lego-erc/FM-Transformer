@@ -185,7 +185,7 @@ def test_validation_rolls_out_with_the_token() -> None:
 
 
 def test_deep_head_is_residual_and_configurable() -> None:
-    from legofmt.multiplicity.model import _ResidualHead
+    from legofmt.legacy.mult_model import ResidualHead as _ResidualHead
     m = _model(passthrough_head=True, passthrough_depth=2, passthrough_dim=32)
     assert isinstance(m.pt_head, _ResidualHead)
     assert len(m.pt_head.blocks) == 2

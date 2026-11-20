@@ -7,7 +7,7 @@
                      ``reflow_start_epoch > 0`` the student's end-of-epoch snapshot from that epoch on
 
 ``LegacyTrainStep`` follows ``TrainStep`` in ``LEGOLtng``'s bases; ``TrainStep._step`` dispatches to it in one line
-each. ``LEGOLtngDirect`` (``distill/reflow.py``) reuses ``_sample_mask`` and ``_teacher_transport``.
+each. ``LEGOLtngDirect`` (``legacy/reflow.py``) reuses ``_sample_mask`` and ``_teacher_transport``.
 """
 
 import torch
@@ -56,7 +56,7 @@ class LegacyTrainStep:
         """Loads the ``reflow_path`` teacher, or sets none; not a submodule, so outside state_dict and DDP."""
         teacher = None
         if self.rc.reflow_path is not None:
-            from legofmt.distill.reflow import _build_reflow_teacher  # avoids import cycle
+            from legofmt.legacy.reflow import _build_reflow_teacher  # avoids import cycle
             teacher = _build_reflow_teacher(self.rc.reflow_path)
         object.__setattr__(self, "reflow_teacher", teacher)
 
@@ -69,7 +69,7 @@ class LegacyTrainStep:
             return
         vf = uncompiled(self.model).vf
         if self.reflow_teacher is None:  # self-reflow: teacher = snapshot of the student
-            from legofmt.distill.reflow import _teacher_from_state  # avoids import cycle
+            from legofmt.legacy.reflow import _teacher_from_state  # avoids import cycle
             teacher = _teacher_from_state(self.rc.config, vf.state_dict())
             object.__setattr__(self, "reflow_teacher", teacher.to(self.device))
         else:  # refresh: teacher = last epoch's student

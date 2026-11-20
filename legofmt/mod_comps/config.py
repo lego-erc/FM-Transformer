@@ -414,6 +414,9 @@ def _resolve_fresh_mult(config: dict) -> ResolvedMultConfig:
     if "bs" in mm_conf and dl_conf.get("bs", mm_conf["bs"]) != mm_conf["bs"]:
         raise ValueError(f"mm_conf.bs={mm_conf['bs']} (the loader's) != dl_conf.bs={dl_conf['bs']}: set one")
     mm_conf.setdefault("cond_scalars", tuple(meta.get("cond_scalars", ("Density",))))
+    if meta.get("cond_scalars") and tuple(meta["cond_scalars"]) != tuple(mm_conf["cond_scalars"]):
+        raise ValueError(f"mm_conf.cond_scalars={tuple(mm_conf['cond_scalars'])} != dataset layout "
+                         f"{tuple(meta['cond_scalars'])}")
     set_layout(tuple(mm_conf["cond_scalars"]))  # before MultLoader, which reads layout-dependent accessors
     n_prefix = len(mm_conf["cond_scalars"]) + 1
     mm_conf.setdefault("max_out_particles", meta["ntokens"] - (n_prefix + 1))

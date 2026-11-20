@@ -1,66 +1,50 @@
-"""Energy <-> model-scalar conversion.
+"""``EnergyProjections``: MeV <-> the model's energy scalars.
 
-``to_scalar`` maps MeV to ``log(|p|/cutoff) / log(max_energy/cutoff)`` clamped to
-``[0, 1]``. For outgoing tokens ``DataPrep.cc_trafo`` then stores ``1 - e_out/e_in``
--- inverted and relative to the incoming particle -- which is why ``to_mev``
-reads ``(1 - e_model) * e_in``.
+```
+incoming   e     = log(E / cutoff) / log(max_energy / cutoff)             held in [0, 1]
+outgoing   e_out = 1 - log(E_out / cutoff) / log(E_in / cutoff)           inverted, and relative to the incoming
+                                                                          particle (written by DataPrep.cc_trafo)
+back       E     = cutoff (max_energy / cutoff) ** e
+           E_out = cutoff (max_energy / cutoff) ** ((1 - e_out) e)        e: the incoming scalar
+```
+
+The pre-token 6-column transforms (``norm_type``) are :mod:`legofmt.legacy.energy_proj`.
 """
 
 import torch
 from torch import Tensor
 
+from legofmt.legacy.energy_proj import LegacyEnergyTransforms
 
-class EnergyProjections:
 
-    def __init__(
-        self,
-        norm_type: str | bool = "in_frac",
-        cutoff_mev: float = 10.0,
-        max_energy: float | None = None,
-    ):
-        self.func = getattr(self, norm_type) if isinstance(norm_type, str) else self.identity
+class EnergyProjections(LegacyEnergyTransforms):
+    """The energy scales of one model.
+
+    Args:
+        norm_type:  legacy: the pre-token transform a call applies.
+        cutoff_mev: the dataset's energy cutoff [MeV].
+        max_energy: the top of the incoming scale [MeV].
+    """
+
+    def __init__(self, norm_type: str | bool = "in_frac", cutoff_mev: float = 10.0, max_energy: float | None = None):
+        super().__init__(norm_type)
         self.cutoff = cutoff_mev
         self.max_energy = max_energy
-        self.log_range = torch.tensor(max_energy / cutoff_mev).log().item() if max_energy else None
-
-    def __call__(self, *args, **kwargs):
-        return self.func(*args, **kwargs)
+        self.log_range = torch.log(torch.tensor(max_energy / cutoff_mev)).item() if max_energy else None
 
     def to_scalar(self, mom: Tensor, eps: float = 1e-8) -> tuple[Tensor, Tensor]:
+        """Splits a momentum [MeV] into its unit direction and the incoming scalar of its magnitude."""
         norm = mom.norm(dim=-1, keepdim=True)
         return mom / norm.clamp_min(eps), self.to_scalar_e(norm, eps)
 
     def to_scalar_e(self, e_mev: Tensor, eps: float = 1e-8) -> Tensor:
-        """Converts an MeV magnitude to the bounded [0, 1] log scalar: ``to_scalar``'s energy half."""
+        """Converts an energy [MeV] to the incoming scalar, held in [0, 1]."""
         return (torch.log(e_mev.clamp_min(eps) / self.cutoff) / self.log_range).clamp(0.0, 1.0)
 
     def from_scalar(self, dir_: Tensor, e: Tensor) -> Tensor:
-        """Inverts ``to_scalar``: bounded scalar + unit direction -> momentum vector."""
-        norm = self.cutoff * (self.max_energy / self.cutoff) ** e.clamp(0.0, 1.0)
-        return dir_ * norm
+        """Inverts ``to_scalar``: the incoming scalar and a unit direction -> the momentum [MeV]."""
+        return dir_ * (self.cutoff * (self.max_energy / self.cutoff) ** e.clamp(0.0, 1.0))
 
-    def to_mev(self, e_model: Tensor, e_in: Tensor) -> Tensor:
-        s_out = (1 - e_model.clamp(0.0, 1.0)) * e_in.clamp(0.0, 1.0)
-        return self.cutoff * (self.max_energy / self.cutoff) ** s_out
-
-    # Legacy prefix-free 6-column transforms (token 0 = the incoming particle), kept
-    # for lego_eval's EnergyProjections("in_frac_log"); they do NOT follow the
-    # padded _F layout.
-    def identity(self, p_x: Tensor) -> Tensor:
-        return p_x
-
-    def log(self, p_x: Tensor) -> Tensor:
-        p, x = p_x.split(3, -1)
-        p_norm = p.norm(dim=-1, keepdim=True).clamp_min(1e-8)
-        return torch.cat((p * (1 - p_norm.log()) / p_norm, x), -1)
-
-    def in_frac(self, p_x: Tensor) -> Tensor:
-        p, x = p_x.split(3, -1)
-        in_norm = p[:, 0:1].norm(dim=-1, keepdim=True)
-        p_normed = torch.cat((p[:, :1], p[:, 1:] / in_norm), dim=1)
-        return torch.cat((p_normed, x), -1)
-
-    def in_frac_log(self, p_x: Tensor) -> Tensor:
-        p_x = self.in_frac(p_x)
-        p_x[:, 1:] = self.log(p_x[:, 1:])
-        return p_x
+    def to_mev(self, e_out: Tensor, e_in: Tensor) -> Tensor:
+        """Converts an outgoing scalar to MeV, given its event's incoming scalar ``e_in``."""
+        return self.cutoff * (self.max_energy / self.cutoff) ** ((1 - e_out.clamp(0.0, 1.0)) * e_in.clamp(0.0, 1.0))

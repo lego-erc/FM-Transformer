@@ -1,14 +1,24 @@
-"""Vendored from lego-eval (metrics.py + summary.py); legofmt cannot import
-lego_eval (circular). w1_per_feature is the equal-N specialisation.
+"""Validation metrics of the flow: generated against true events of one batch (``ShowerValMetrics``).
 
-Two known warts: ``standardize`` pools real+fake statistics and the MMD
-bandwidth is re-derived per call, so neither number is comparable across runs;
-the event summaries cover only e-/e+/gamma (zero features for hadronic runs).
-``edep_by_primary`` exists because of that second one -- see its docstring."""
+```
+particle   every outgoing particle as (mom theta, mom phi, energy, pos theta, pos phi)
+summary    per event the mean and std of those five over its e-, e+ and gamma, and E_dep
+both       standardised by the pooled mean / std, then
+             MMD   unbiased, Gaussian kernel exp(-|x - y|**2 / bw), bw = the median squared distance
+             W1    per feature, mean |sort(x) - sort(y)| at equal N
+E_dep      per incoming species: W1, and generated / true mean on events with a secondary (edep_by_primary)
+layers     the edep_ae decoder's per-layer deposits against the true ones (edep_layer_metrics)
+```
+
+Vendored from lego-eval (metrics.py + summary.py): legofmt cannot import lego_eval (circular). Two known warts:
+``standardize`` pools real and generated statistics and the MMD bandwidth is derived per call, so neither number is
+comparable across runs; and the event summaries cover only e-/e+/gamma (zero features for hadronic runs), which is
+why ``edep_by_primary`` exists.
+"""
 
 import torch
 
-from legofmt.data.struct import DataStruct, _F
+from legofmt.data.struct import CHANNELS, DataStruct, _F
 
 from legofmt.geometry.geom_trafos import GeomTrafos
 
@@ -35,17 +45,26 @@ PRIMARY_TAGS = {11: "em", -11: "ep", 22: "g", 2212: "p", 2112: "n",
 UNSYNCED_PREFIXES = ("val/w1_edep/", "val/edep_ratio_multi/")
 
 
+def _mom_e_pos(tokens):
+    """Returns the momentum, energy and position channels of particle tokens."""
+    e, mom, pos, *_ = tokens.tensor_split(CHANNELS, dim=-1)
+    return mom, e, pos
+
+
 def _spherical(mom, e, pos):
+    """Returns ``(mom theta, mom phi, energy, pos theta, pos phi)`` per particle."""
     mom_dir = mom / mom.norm(dim=-1, keepdim=True).clamp(min=1e-8)
     pos_dir = pos / pos.norm(dim=-1, keepdim=True).clamp(min=1e-8)
     return torch.cat([_GEOM.to_sph(mom_dir), e, _GEOM.to_sph(pos_dir)], dim=-1)
 
 
 def particle_kinematics(mom, e, pos, active):
+    """Returns the five kinematic features of every real particle, (N, 5)."""
     return _spherical(mom, e, pos)[active]
 
 
 def event_summary(mom, e, pos, pdgid, active, e_dep):
+    """Returns each event's summary: the mean and std of the kinematics per species of ``_TYPES``, then E_dep."""
     kin = _spherical(mom, e, pos)
     feats = []
     for pid in _TYPES:
@@ -69,6 +88,7 @@ def standardize(a, b):
 
 
 def _median_heuristic(X, Y, max_samples=2000):
+    """Returns the kernel bandwidth: the median squared distance within the pooled (subsampled) sets."""
     c = torch.cat([X, Y], dim=0)
     if c.shape[0] > max_samples:
         c = c[torch.randperm(c.shape[0], device=c.device)[:max_samples]]
@@ -78,7 +98,7 @@ def _median_heuristic(X, Y, max_samples=2000):
 
 
 def compute_mmd(X, Y, max_samples=2000):
-    # unbiased MMD, Gaussian RBF with median-heuristic bandwidth; subsampled to bound the N^2 kernels
+    """Returns the unbiased MMD of two sets under the Gaussian kernel, each subsampled to bound the N**2 kernels."""
     X, Y = (a[torch.randperm(a.shape[0], device=a.device)[:max_samples]] if a.shape[0] > max_samples else a
             for a in (X, Y))
     bw = _median_heuristic(X, Y)
@@ -91,6 +111,7 @@ def compute_mmd(X, Y, max_samples=2000):
 
 
 def w1_per_feature(X, Y):
+    """Returns the 1-Wasserstein distance per feature of two sets of equal size."""
     return (X.sort(0).values - Y.sort(0).values).abs().mean(0)
 
 
@@ -134,31 +155,31 @@ def edep_layer_metrics(real: torch.Tensor, fake: torch.Tensor) -> dict:
 
 
 class ShowerValMetrics:
+    """Generates the batch with the model and returns every metric of the module docstring, by its log name."""
 
     def __call__(self, lego, ds_t) -> dict:
         gen = _F(self._generate(lego, ds_t))
         # decode the overflow sentinel as to_mev / denorm_edep_layer do: a generated -overflow_delta
         # is a truth zero, and compared raw it inflated val/mmd_particle 4.5x on plateSi_131026
-        gen.out_p[..., 0].clamp_(0.0, 1.0)
+        gen.out_energy.clamp_(0.0, 1.0)
         gen.edep.clamp_(0.0, 1.0)
-        active, pdg = ds_t.am.out_p, ds_t.f.out_p[..., -1]
+        active, pdg = ds_t.am.out_p, ds_t.f.out_pid
         sides = ((ds_t.f.out_cc, ds_t.f.edep), (gen.out_p, gen.edep))  # (outgoing, E_dep) of the truth, generated
-        split = lambda cc: (cc[..., 1:4], cc[..., 0:1], cc[..., 4:7])   # mom, e, pos
         reps = {
-            "particle": (KIN_NAMES, *(particle_kinematics(*split(cc), active) for cc, _ in sides)),
-            "summary": (SUMMARY_FEATURE_NAMES, *(event_summary(*split(cc), pdg, active, ed) for cc, ed in sides)),
+            "particle": (KIN_NAMES, *(particle_kinematics(*_mom_e_pos(cc), active) for cc, _ in sides)),
+            "summary": (SUMMARY_FEATURE_NAMES, *(event_summary(*_mom_e_pos(cc), pdg, active, ed) for cc, ed in sides)),
         }
         out = {}
         for tag, (names, real, fake) in reps.items():
             real_s, fake_s = standardize(real, fake)
             out[f"val/mmd_{tag}"] = compute_mmd(fake_s, real_s)
             out.update({f"val/w1_{tag}/{n}": w1 for n, w1 in zip(names, w1_per_feature(fake_s, real_s))})
-        out.update(edep_by_primary(ds_t.f.edep, gen.edep, ds_t.f.in_p[..., 0, -1].long(), active.sum(-1)))
+        out.update(edep_by_primary(ds_t.f.edep, gen.edep, ds_t.f.in_pid.long(), active.sum(-1)))
         if getattr(lego, "edep_ae", None) is not None and ds_t.edep_layers is not None:
             dp = lego._edep_dp
-            e_in = dp.pen.from_scalar(ds_t.f.in_cc[:, 0, 1:4], ds_t.f.in_cc[:, 0, 0:1]).norm(dim=-1)
+            e_in = dp.pen.from_scalar(ds_t.f.in_mom, ds_t.f.in_energy).norm(dim=-1)
             fake = lego.edep_ae.sample(lego._edep_latents,
-                                       dp.denorm_edep_margin(gen.edep.float(), e_in.float(), ds_t.f.in_p[:, 0, -1]))
+                                       dp.denorm_edep_margin(gen.edep.float(), e_in.float(), ds_t.f.in_pid))
             out.update(edep_layer_metrics(dp.denorm_edep_layer(ds_t.edep_layers.float()), fake))
         return out
 
@@ -170,13 +191,12 @@ class ShowerValMetrics:
         """
         cfg = lego.rc.odeint_conf
         sym = getattr(lego, "sym", None)
+        fwd = ds_t.m.fwd
         if sym is not None:
-            fwd  = ds_t.m.full[:, lego.rc.n_prefix] == 0
-            face = sym.face_of(ds_t.f.in_cc[..., 0, 4:7])
+            face = sym.face_of(ds_t.f.in_pos)
             ds_t = DataStruct(lego._canon_dirs(ds_t.f.full, face, fwd), ds_t.m.full, ds_t.am.full)
         out = lego.solve(ds_t, x_init=lego.gen_base_wrapper(ds_t), step_size=cfg.get("step_size", 0.04),
                          method=cfg.get("method", "midpoint"))
         if getattr(lego.rc, "dir_zoom", None):
-            out = lego._zoom_dirs(out, ds_t.am.full, ds_t.m.full[:, lego.rc.n_prefix] == 0, inverse=True,
-                                  pdgids=ds_t.f.pdgids)
+            out = lego._zoom_dirs(out, ds_t.am.full, fwd, inverse=True, pdgids=ds_t.f.pdgids)
         return out if sym is None else lego._canon_dirs(out, face, fwd, inverse=True)
