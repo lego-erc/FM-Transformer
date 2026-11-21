@@ -54,7 +54,7 @@ def rotated(theta, phi, alpha, beta):
 
 def on_cuboid(x, d):
     """Scales the directions ``x`` onto the surface of the cuboid with half-widths ``d``: ``x / |x|_inf * d``."""
-    norm = torch.abs(x).max(-1, keepdim=True).values.clamp_min(1e-8)   # |x|_inf, held at 1e-8 or above
+    norm = torch.abs(x).amax(-1, keepdim=True).clamp(min=1e-8)   # |x|_inf, held at 1e-8 or above
     return x / norm * d
 
 
@@ -101,7 +101,7 @@ def from_polar_about(theta, u, perp, sin):
     """Returns the unit vectors at the polar angle ``theta`` about ``u``, in the plane of ``u`` and ``perp``."""
     return (
         torch.cos(theta) * u
-        + torch.sin(theta) * perp / sin.clamp_min(1e-30)   # sin = 0: v on +-u, which the caller keeps
+        + torch.sin(theta) * perp / sin.clamp(min=1e-30)   # sin = 0: v on +-u, which the caller keeps
     )
 
 
@@ -138,7 +138,7 @@ def cuboid_chord(u: torch.Tensor, pos: torch.Tensor, d: torch.Tensor) -> torch.T
     Counting both sides gives the same chord whether the entry or the exit point is stored.
     """
     d      = d.to(u)
-    norm   = torch.abs(pos).amax(-1, keepdim=True).clamp_min(1e-8)   # |pos|_inf, held at 1e-8 or above
+    norm   = torch.abs(pos).amax(-1, keepdim=True).clamp(min=1e-8)   # |pos|_inf, held at 1e-8 or above
     p      = pos / norm * d                                           # the surface point
     # an axis the line is parallel to gets 4.0, beyond any face, so it never ends the chord
     moving = torch.abs(u) > 1e-6
@@ -192,7 +192,7 @@ class GeomTrafos:
 
 def on_position(p_and_x, new_position):
     """Replaces the position half ``x`` of ``(mom, pos)`` 6-vectors by ``new_position(p, x)``; ``p`` passes through."""
-    p, x = p_and_x.split(3, -1)
+    p, x = p_and_x.split(3, dim=-1)
     return torch.cat((p, new_position(p, x)), dim=-1)
 
 
@@ -203,7 +203,7 @@ def _per_group(formula, packed, n, unit=False):
     The components are views of ``packed`` (CPU's atan2 picks its kernel by the input's strides).
     """
     one    = packed.shape[-1] == n
-    groups = packed if one else packed.unfold(-1, n, n)
+    groups = packed if one else packed.unflatten(-1, (-1, n))
     if unit:
         groups = F.normalize(groups, dim=-1)
     out = torch.stack(formula(*groups.unbind(-1)), dim=-1)
@@ -212,7 +212,7 @@ def _per_group(formula, packed, n, unit=False):
 
 def _against_axis(theta, phi, axis_sph):
     """Packs ``(theta, phi)`` as (..., 2), and spreads the axis' spherical angles over theta's shape, each (..., 1)."""
-    axis_theta, axis_phi = axis_sph.expand((*theta.shape, -1)).split(1, -1)
+    axis_theta, axis_phi = axis_sph.expand((*theta.shape, -1)).split(1, dim=-1)
     return torch.stack((theta, phi), dim=-1), axis_theta, axis_phi
 
 

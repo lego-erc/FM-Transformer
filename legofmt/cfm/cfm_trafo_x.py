@@ -148,13 +148,13 @@ class CFMTrafo_x(LegacyField):
         w  = torch.cat((self.cond_w_mask[:, 0], self.cond_w_types[:, 0], self.cond_w_pdgids[:, 0]))
         b  = torch.cat((self.cond_bi_mask, self.cond_bi_types, self.cond_bi_pdgids))
         xo = (oh.unsqueeze(-1) * x.unsqueeze(-2)).flatten(-2)  # (B, L, K * in_dim)
-        return (xo @ w.transpose(1, 2).reshape(-1, self.h_dim) + oh @ b) / 3
+        return (xo @ w.transpose(1, 2).flatten(0, 1) + oh @ b) / 3
 
     def _project_out(self, h: Tensor, mask: Tensor, oh: Tensor) -> Tensor:
         """Reads the velocity out of ``h``: ``v_i = mean_k(V_k[c_ik] h_i + a_k[c_ik])``, zero on conditioning tokens."""
         w   = torch.cat((self.cond_w_mask[:, 1], self.cond_w_types[:, 1], self.cond_w_pdgids[:, 1]))
         b   = torch.cat((self.cond_bo_mask, self.cond_bo_types, self.cond_bo_pdgids))
-        out = (h @ w.permute(1, 0, 2).reshape(self.h_dim, -1)).view(*h.shape[:-1], -1, self.in_dim)
+        out = (h @ w.transpose(0, 1).flatten(1)).unflatten(-1, (-1, self.in_dim))
         out = torch.einsum("blki,blk->bli", out, oh) + oh @ b
         return (mask == 1).unsqueeze(-1) * out / 3
 
@@ -243,7 +243,7 @@ class CFMTrafo_x(LegacyField):
         B, L = mask.shape[:2]
         return torch.cat((
             F.one_hot(mask.reshape(B, L).long(), self.nvtypes),
-            F.one_hot(types.view(-1)[:L], self.ntypes).expand(B, -1, -1),
+            F.one_hot(types.flatten()[:L], self.ntypes).expand(B, -1, -1),
             F.one_hot(pdgids.reshape(B, L).long(), self.npdgids),
         ), dim=-1).to(self.cond_w_mask.dtype)
 

@@ -33,8 +33,8 @@ from torch import Tensor
 
 from legofmt.numerics import safe_pow
 
-_LOG_SQRT_2_OVER_PI = float(torch.log(torch.tensor(2 / torch.pi, dtype=torch.float64))) / 2   # half-normal's constant
-_LOG_SQRT_2PI       = float(torch.log(torch.tensor(2 * torch.pi, dtype=torch.float64))) / 2   # normal's constant
+_LOG_SQRT_2_OVER_PI = torch.log(torch.tensor(2 / torch.pi, dtype=torch.float64)).item() / 2   # half-normal's constant
+_LOG_SQRT_2PI       = torch.log(torch.tensor(2 * torch.pi, dtype=torch.float64)).item() / 2   # normal's constant
 
 
 class Energy(NamedTuple):

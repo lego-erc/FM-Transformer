@@ -35,11 +35,11 @@ class EnergyProjections(LegacyEnergyTransforms):
     def to_scalar(self, mom: Tensor, eps: float = 1e-8) -> tuple[Tensor, Tensor]:
         """Splits a momentum [MeV] into its unit direction and the incoming scalar of its magnitude."""
         norm = mom.norm(dim=-1, keepdim=True)
-        return mom / norm.clamp_min(eps), self.to_scalar_e(norm, eps)
+        return mom / norm.clamp(min=eps), self.to_scalar_e(norm, eps)
 
     def to_scalar_e(self, e_mev: Tensor, eps: float = 1e-8) -> Tensor:
         """Converts an energy [MeV] to the incoming scalar, held in [0, 1]."""
-        E = e_mev.clamp_min(eps)
+        E = e_mev.clamp(min=eps)
         e = torch.log(E / self.cutoff) / self.log_range
         return e.clamp(0.0, 1.0)
 

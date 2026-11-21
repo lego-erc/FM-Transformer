@@ -6,6 +6,7 @@ against it lives in ``legofmt.cfm.path_sampler``.
 """
 
 import torch
+import torch.nn.functional as F
 from flow_matching.utils.manifolds import Manifold, Sphere
 
 
@@ -18,7 +19,7 @@ def sphere_logmap(x, y):
     u     = (y - x) - _dot(x, y - x) * x   # y - x, projected onto the tangent space at x
     norm  = u.norm(dim=-1, keepdim=True)
     theta = torch.atan2(norm, _dot(x, y))
-    return u * (theta / norm.clamp_min(torch.finfo(norm.dtype).tiny))
+    return u * (theta / norm.clamp(min=torch.finfo(norm.dtype).tiny))
 
 
 def sphere_expmap(x, u):
@@ -29,12 +30,12 @@ def sphere_expmap(x, u):
     """
     n    = u.norm(dim=-1, keepdim=True)
     big  = n > Sphere.EPS[n.dtype]
-    nu   = torch.where(big, n, torch.ones_like(n))   # |u|, and 1 where it is below EPS
+    nu   = torch.where(big, n, 1.0)   # |u|, and 1 where it is below EPS
     retr = x + u
     return torch.where(
         big,
         x * torch.cos(nu) + u * torch.sin(nu) / nu,
-        retr / retr.norm(dim=-1, keepdim=True),      # below EPS: the retraction
+        F.normalize(retr, dim=-1),   # below EPS: the retraction
     )
 
 

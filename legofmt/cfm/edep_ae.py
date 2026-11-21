@@ -60,9 +60,9 @@ class EdepLayerAE(nn.Module):
         ``a`` is (B, n_layers), the mixture's parameters (B, n_layers, n_mix); ``log sig`` is held in [-7, 3].
         """
         M = self.n_mix
-        h = self.dec(torch.cat([z * self.z_sd + self.z_mu, torch.log(tot)], -1))
-        a, log_w, mu, log_sig = h.view(-1, self.n_layers, 1 + 3 * M).split((1, M, M, M), -1)
-        return a[..., 0], F.log_softmax(log_w, -1), mu, log_sig.clamp(-7, 3)
+        h = self.dec(torch.cat((z * self.z_sd + self.z_mu, torch.log(tot)), dim=-1))
+        a, log_w, mu, log_sig = h.unflatten(-1, (self.n_layers, 1 + 3 * M)).split((1, M, M, M), dim=-1)
+        return a.squeeze(-1), torch.log_softmax(log_w, dim=-1), mu, log_sig.clamp(-7, 3)
 
     def nll(self, E: Tensor) -> Tensor:
         """Returns the mean per-layer negative log-likelihood of deposits (B, n_layers).
@@ -75,7 +75,7 @@ class EdepLayerAE(nn.Module):
         ``- log E_l`` makes it the density of E, not of log E. Every event needs a deposit.
         """
         a, log_w, mu, log_sig = self._head(self.encode(E), E.sum(-1, keepdim=True))
-        log_e = torch.log(E.clamp(min=1e-12))[..., None]
+        log_e = torch.log(E.clamp(min=1e-12)).unsqueeze(-1)
         log_n = -0.5 * ((log_e - mu) / torch.exp(log_sig)) ** 2 - log_sig - _HALF_LOG_2PI
         log_p = torch.logsumexp(log_w + log_n, -1) - log_e[..., 0]          # density of E, not of log E
         return -torch.where(E <= 0, F.logsigmoid(a), F.logsigmoid(-a) + log_p).mean()
@@ -129,7 +129,7 @@ def build_edep_ae(spec: dict) -> EdepLayerAE:
 
 def _pick(p: Tensor, k: Tensor) -> Tensor:
     """Returns each layer's entry of the mixture component ``k`` (B, n_layers, 1): (B, n_layers)."""
-    return p.gather(-1, k)[..., 0]
+    return p.gather(-1, k).squeeze(-1)
 
 
 def _layer_noise(a: Tensor, log_w: Tensor, rng) -> tuple[Tensor, Tensor, Tensor]:
@@ -140,7 +140,7 @@ def _layer_noise(a: Tensor, log_w: Tensor, rng) -> tuple[Tensor, Tensor, Tensor]
     """
     layer = torch.arange(a.shape[-1], device=a.device)
     k = (torch.distributions.Categorical(logits=log_w).sample() if rng is None
-         else rng.categorical(log_w.softmax(-1), AE_MIX, layer))[..., None]
+         else rng.categorical(torch.softmax(log_w, dim=-1), AE_MIX, layer)).unsqueeze(-1)
     n = normal_like(a, rng, AE_NORM, layer)
     u = uniform_like(a, rng, AE_ZERO, layer)
     return k, n, u

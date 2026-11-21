@@ -24,6 +24,7 @@ other than the recipe's and inverse-mask events (``mask_conf.p_forward < 1``) th
 from itertools import chain, islice, repeat
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from legofmt.base.base_dists import BaseParams
@@ -153,7 +154,7 @@ class BaseDist:
             out_set: (B, 1 + n_cls), log1p of (multiplicity, count per class).
         """
         f, n_cls, valid = ds_t.f, len(self.pdgids_template) + 1, ds_t.am.out_p
-        species = nn.functional.one_hot(self._species_idx(f.in_pid, n_cls), n_cls).float()
+        species = F.one_hot(self._species_idx(f.in_pid, n_cls), n_cls).float()
         t       = f.cond("Size") * f.cond("Density") / x0_gcm2(f.cond("Z"), f.cond("A"))
         chord   = cuboid_chord(f.in_mom.nan_to_num(1.0), f.in_pos.nan_to_num(1.0), self.cuboid_unit)
         count   = _count_per_class(self._species_idx(f.out_pid, n_cls), valid, n_cls)
@@ -212,7 +213,7 @@ class BaseDist:
             cont = _forward_cont(self, dev)   # standardise (E, chord, log t) on the forward training events
             std  = cont.std(0)
             head.mean.copy_(cont.mean(0))
-            head.std.copy_(std.where(std > 1e-6, torch.inf))
+            head.std.copy_(torch.where(std > 1e-6, std, torch.inf))
             final = self.pretrain_base(_reshuffled_batches(self, n, dev), steps=n)
             head.cpu()
             print(f"base_head: pretrained on {n} batches (final NLL {final:.4f}), frozen")
@@ -234,7 +235,7 @@ class BaseDist:
 
 def _count_per_class(cls: Tensor, valid: Tensor, n_cls: int) -> Tensor:
     """Counts each event's valid slots per class: (B, n) class indices -> (B, n_cls), float."""
-    return (nn.functional.one_hot(cls, n_cls) * valid.unsqueeze(-1)).sum(-2).float()
+    return (F.one_hot(cls, n_cls) * valid.unsqueeze(-1)).sum(-2).float()
 
 
 def _forward_cont(lego: BaseDist, dev) -> Tensor:

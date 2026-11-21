@@ -65,7 +65,7 @@ def migrate_legacy_mult_heads(state_dict: dict, max_seq_len: int) -> dict:
     out = {k: v for k, v in state_dict.items() if not k.startswith(("proj_out_.", "embd_in_."))}
     if has_legacy_proj:
         rows = range(max_seq_len)
-        out["proj_out_w"] = torch.stack([state_dict[f"proj_out_.{i}.weight"].t().contiguous() for i in rows])
+        out["proj_out_w"] = torch.stack([state_dict[f"proj_out_.{i}.weight"].mT.contiguous() for i in rows])
         out["proj_out_b"] = torch.stack([state_dict[f"proj_out_.{i}.bias"] for i in rows])
     if has_legacy_embd:
         out["embd_in_.weight"] = torch.cat([state_dict[f"embd_in_.{i}.weight"] for i in range(max_seq_len - 1)])
@@ -251,7 +251,7 @@ def migrate_loss_weight_keys(model_conf: dict) -> dict:
     lv = (model_conf.get("loss_weights") or {}).get("lv")
     n_cells = 3 + int(model_conf.get("edep_cell", False)) + int(model_conf.get("edep_ae") is not None)  # + lat
     if lv is not None and lv.numel() > n_cells:
-        model_conf["loss_weights"]["lv"] = torch.log(torch.exp(lv.view(-1, n_cells)).mean(0))
+        model_conf["loss_weights"]["lv"] = torch.log(torch.exp(lv.reshape(-1, n_cells)).mean(0))
     return model_conf
 
 

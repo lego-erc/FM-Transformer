@@ -132,7 +132,7 @@ class PackedData:
         idx = torch.as_tensor(idx, dtype=torch.long)
         lens = self.offsets[idx + 1] - self.offsets[idx]
         offsets = F.pad(lens.cumsum(0), (1, 0))
-        src = torch.repeat_interleave(self.offsets[idx] - offsets[:-1], lens) + torch.arange(int(offsets[-1]))
+        src = (self.offsets[idx] - offsets[:-1]).repeat_interleave(lens) + torch.arange(int(offsets[-1]))
         return PackedData(prefix=self.prefix[idx], tokens=self.tokens[src], offsets=offsets, pad_e0=self.pad_e0[idx],
                           pad_token=self.pad_token, prefix_token=self.prefix_token, n_prefix=self.n_prefix, L=self.L,
                           edep_layers=None if self.edep_layers is None else self.edep_layers[idx])
@@ -161,10 +161,10 @@ class PackedData:
         f[..., :P, :] = self.prefix_token                  # the prefix
         f[..., :P, 0] = self.prefix[idx]
         f[..., P:, :] = self.pad_token                     # the rest padded ...
-        f[..., P:, 0] = self.pad_e0[idx][..., None]
-        am = torch.arange(L) < (lens + P)[..., None]
+        f[..., P:, 0] = self.pad_e0[idx].unsqueeze(-1)
+        am = torch.arange(L) < (lens + P).unsqueeze(-1)
         valid = am[..., P:]                                # ... but for the event's tokens
-        f[..., P:, :][valid] = self.tokens[(start[..., None] + torch.arange(L - P))[valid]]
+        f[..., P:, :][valid] = self.tokens[(start.unsqueeze(-1) + torch.arange(L - P))[valid]]
         out = (f, loss_mask(am, P), am)
         return out if self.edep_layers is None else out + (self.edep_layers[idx],)
 
@@ -202,7 +202,7 @@ class PackedData:
 
     def _outgoing(self) -> tuple[Tensor, Tensor]:
         """Returns each outgoing token's event index and pdgid, in token order."""
-        ev = torch.repeat_interleave(torch.arange(len(self)), self.offsets.diff())
+        ev = torch.arange(len(self)).repeat_interleave(self.offsets.diff())
         out = torch.ones(self.tokens.shape[0], dtype=torch.bool)
         out[self.offsets[:-1]] = False   # an event's first token is its incoming particle
         return ev[out], self.tokens[out, -1]
@@ -233,7 +233,7 @@ class Interacting:
 
 def interacting_only(ds) -> Interacting:
     """Returns the view of ``ds`` without its pass-through events (no deposit, one particle out)."""
-    keep_idx = ((ds.edep.reshape(-1) > 0) | (ds.n_out != 1)).nonzero(as_tuple=True)[0]
+    keep_idx = ((ds.edep.flatten() > 0) | (ds.n_out != 1)).nonzero(as_tuple=True)[0]
     return Interacting(ds, keep_idx)
 
 

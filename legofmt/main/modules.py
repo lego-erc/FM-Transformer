@@ -37,7 +37,9 @@ from legofmt.cfm.solvers import Solvers
 from legofmt.main.train_step import TrainStep
 
 from legofmt.data.load.packed import interacting_only, load_dataset
-from legofmt.data.load.loader import LengthBucketBatchSampler, event_lengths, loader_seed, make_loader
+from legofmt.data.load.loader import (
+    LengthBucketBatchSampler, event_lengths, loader_seed, make_loader, smallest_bucket,
+)
 from legofmt.data.struct import DataStruct, _F, vocab_index, with_dirs
 from legofmt.data.write.norm import DataPrep
 
@@ -65,7 +67,7 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
         self.rc = rc = resolve_legoltng_config(full_config)
 
         # token types: one per prefix token, the incoming one, then one shared by every outgoing slot
-        types_embd = torch.arange(rc.max_seq_l, dtype=torch.int64).clamp_max(rc.n_prefix + 1).view(1, -1)
+        types_embd = torch.arange(rc.max_seq_l, dtype=torch.int64).clamp(max=rc.n_prefix + 1).unsqueeze(0)
         self.register_buffer("pdgids_template", rc.pdgids_template)
         self.register_buffer("types_embd", types_embd)
         cuboid = torch.tensor(rc.config["model_conf"].get("cuboid_dim") or [1.0, 1.0, 1.0])
@@ -115,7 +117,7 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
         """
         pos, known = vocab_index(self.pdgids_template.to(pdgids.device), pdgids.contiguous())
         unknown = (pdgids == 0) | (pdgids >= 1e8) | ~known   # NaN is never known
-        return (pos + 1).masked_fill_(unknown, 0)
+        return torch.where(unknown, 0, pos + 1)
 
     def _enter_frame(self, ds_t: DataStruct, zoom: bool = False, aug: bool = False, rng=None,
                      stream: int = SYM_FLOW) -> tuple[DataStruct, tuple]:
@@ -177,7 +179,7 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
         rot = self.sym.uncanonicalize if inverse else self.sym.canonicalize
         mom, pos = rot(torch.stack((_F(x).mom, _F(x).pos), dim=-2), face, g).unbind(-2)
         particles = torch.arange(x.shape[-2], device=x.device) >= self.rc.n_prefix
-        return with_dirs(x, particles & fwd[:, None], mom, pos)
+        return with_dirs(x, particles & fwd.unsqueeze(1), mom, pos)
 
     def _zoom_dirs(self, x: Tensor, am: Tensor, fwd: Tensor, inverse: bool = False,
                    pdgids: Tensor | None = None) -> Tensor:
@@ -200,7 +202,7 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
         outgoing = am & (torch.arange(x.shape[-2], device=x.device) > self.rc.n_prefix)
         if self.rc.dir_zoom_nucleons_max is not None:
             fwd = fwd & (self._n_nucleons(pdgids, outgoing) <= self.rc.dir_zoom_nucleons_max)
-        return with_dirs(x, outgoing & fwd[:, None], mom=zoomed)
+        return with_dirs(x, outgoing & fwd.unsqueeze(1), mom=zoomed)
 
     # ---- Lightning: data --------------------------------------------------------------------------------------------
 
@@ -227,8 +229,7 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
         """Cuts the batch to its length bucket before the upload; its lengths stay on the host for ``_len_pieces``."""
         if self.rc.len_buckets is not None:
             self._cpu_lengths = batch.am.full.sum(1)
-            n = int(self._cpu_lengths.max())
-            batch = batch.trim(next(b for b in self.rc.len_buckets if b >= n))
+            batch = batch.trim(int(smallest_bucket(self._cpu_lengths.max(), self.rc.len_buckets)))
             if self.device.type == "cuda":
                 batch = batch.pin_memory()
         return batch

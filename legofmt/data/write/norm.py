@@ -36,7 +36,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from legofmt.compat import dataset_already_normalised, edep_margin_keys
-from legofmt.data.struct import _F, cond_scalars, set_layout
+from legofmt.data.struct import _F, cond_scalars, set_layout, species_values
 from legofmt.geometry.energy_proj import EnergyProjections
 from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.legacy.norm import HAND_SET_MARGIN_MEV, denorm_edep_linear, norm_edep_linear
@@ -53,9 +53,9 @@ def token_energy(e: Tensor, cutoff: float) -> Tensor:
     outgoing   1 - log(e_out / cutoff) / log(e_in / cutoff)   held in [0, 1]
     ```
     """
-    log_e = torch.log(e.clamp_min(1e-8) / cutoff)   # every particle's, in one call
+    log_e = torch.log(e.clamp(min=1e-8) / cutoff)   # every particle's, in one call
     log_e_in, log_e_out = log_e[:, :1], log_e[:, 1:]
-    e_out = 1 - (log_e_out / log_e_in.clamp_min(1e-6)).clamp(0, 1)
+    e_out = 1 - (log_e_out / log_e_in.clamp(min=1e-6)).clamp(0, 1)
     return torch.cat((e[:, :1], e_out), dim=1)
 
 
@@ -72,7 +72,7 @@ class LayerScale(NamedTuple):
 
     def norm(self, edep):
         e_min, width = self
-        return (torch.log((edep / e_min).clamp_min(1.0)) / width).clamp_max(1.0)
+        return (torch.log((edep / e_min).clamp(min=1.0)) / width).clamp(max=1.0)
 
     def denorm(self, u):
         e_min, width = self
@@ -294,9 +294,9 @@ class DataPrep:
         ``model_conf.edep_excess_mev``.
         """
         s = _F(f)
-        e_in = s.in_energy.reshape(-1).double()
-        excess = s.edep.reshape(-1).double() - e_in
-        species, idx = s.in_pid.reshape(-1).unique(return_inverse=True)
+        e_in = s.in_energy.flatten().double()
+        excess = s.edep.flatten().double() - e_in
+        species, idx = s.in_pid.flatten().unique(return_inverse=True)
         margin = e_in.new_zeros(len(species)).scatter_reduce(0, idx, excess, "amax")   # per species; the zeros: >= 0
         return dict(zip(species.long().tolist(), margin.tolist()))
 
@@ -326,9 +326,8 @@ class DataPrep:
         ```
         """
         margins = self.edep_excess_mev or HAND_SET_MARGIN_MEV   # legacy: a checkpoint from before edep_excess_mev
-        own = pid[..., None] == pid.new_tensor(list(margins))   # (..., n_species), one-hot or all false
-        mev = e_in.new_tensor(list(margins.values()))
-        cap = e_in + torch.where(own.any(-1), (own * mev).sum(-1), mev.max())
+        mev, known = species_values(margins, pid, e_in)
+        cap = e_in + torch.where(known, mev, max(margins.values()))
         return MarginScale(cap, torch.log((self.edep_log_min or 1e-6) / cap), torch.log(cap / _MISSING_MEV))
 
 
@@ -354,7 +353,7 @@ def _unpadded(cc: Tensor, e_kin: Tensor | None) -> tuple[Tensor, Tensor, Tensor]
 
     ``e`` is ``e_kin``, or ``|p|`` without it (``energy_kin: false``, legacy: it saturates for hadrons).
     """
-    p, x = cc.nan_to_num(1).split(3, -1)
+    p, x = cc.nan_to_num(1).split(3, dim=-1)
     e = e_kin.nan_to_num(1) if e_kin is not None else p.norm(dim=-1, keepdim=True)   # legacy
     return e, p, x
 
@@ -362,7 +361,7 @@ def _unpadded(cc: Tensor, e_kin: Tensor | None) -> tuple[Tensor, Tensor, Tensor]
 def _prefix_tokens(values: list, like: Tensor) -> Tensor:
     """Returns the (B, len(values), 8) prefix tokens ``[value, 1, 1, 1, 1, 1, 1, 0]``, in ``like``'s dtype, device."""
     prefix = like.new_tensor([0, 1, 1, 1, 1, 1, 1, 0]).repeat(len(like), len(values), 1)
-    prefix[..., 0] = torch.stack([v.reshape(len(like)) for v in values], dim=1)
+    prefix[..., 0] = torch.stack([v.flatten() for v in values], dim=1)
     return prefix
 
 

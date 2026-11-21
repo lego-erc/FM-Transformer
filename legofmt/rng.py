@@ -91,7 +91,7 @@ class EventRNG:
         u   = self.uniform(stream, elem).to(cdf.device)
         one = u.dim() == probs.dim() - 1   # one index per row: u as a column
         if one:
-            u = u[..., None]
+            u = u.unsqueeze(-1)
         idx = torch.searchsorted(cdf, u * cdf[..., -1:], right=True)   # the first k with u * total < cdf_k
         idx = idx.clamp_(max=probs.shape[-1] - 1)                       # u * total can round up to the total
         return idx.squeeze(-1) if one else idx
@@ -142,7 +142,7 @@ def randint_like(high: int, x: torch.Tensor, rng: EventRNG | None, stream: int) 
     """Samples an integer in ``[0, high)`` per event, shaped like ``x`` (B,) and on its device."""
     if rng is None:
         return torch.randint(high, x.shape, device=x.device)
-    return rng.randint(high, stream).view(x.shape).to(x.device)
+    return rng.randint(high, stream).reshape(x.shape).to(x.device)
 
 
 def categorical(probs: torch.Tensor, rng: EventRNG | None, stream: int, elem=0) -> torch.Tensor:
@@ -200,4 +200,4 @@ def _per_event(h: torch.Tensor, e: torch.Tensor) -> torch.Tensor:
 
     A scalar or ids shared by every event (n,) give ``(B, *e.shape)``; per-event ids (B, ...) keep their shape.
     """
-    return h.view(-1, *([1] * e.dim())) if e.dim() < 2 else h.view(-1, *([1] * (e.dim() - 1)))
+    return h.reshape(-1, *([1] * e.dim())) if e.dim() < 2 else h.reshape(-1, *([1] * (e.dim() - 1)))

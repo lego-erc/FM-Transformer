@@ -54,7 +54,7 @@ def _one_step_euler_loss_fp32(lego, base: Tensor, ds_t, pdgid_idx: Tensor, model
         t0    = (torch.rand_like(d) * (1.0 / d).round()).floor() * d               # on the grid of d
         s0    = _on_path(lego, base, ds_t, z, t0)                                  # s_{t0}
         half  = d / 2
-        d_t   = torch.where(half >= 2.0 ** -(sections - 1), half, torch.zeros_like(half))   # the smallest: d = 0
+        d_t   = torch.where(half >= 2.0 ** -(sections - 1), half, 0.0)   # the smallest: d = 0
         s_mid = _moved(gen, s0,    man.expmap(s0,    _per_event(half) * field(s0, t0, d=d_t)))
         s_end = _moved(gen, s_mid, man.expmap(s_mid, _per_event(half) * field(s_mid, t0 + half, d=d_t)))
         tgt   = man.logmap(s0, s_end) / _per_event(d)

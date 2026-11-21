@@ -17,6 +17,7 @@ why ``edep_by_primary`` exists.
 """
 
 import torch
+import torch.nn.functional as F
 
 from legofmt.data.struct import CHANNELS, _F
 from legofmt.geometry.geom_trafos import GeomTrafos
@@ -52,23 +53,20 @@ def particle_kinematics(mom, e, pos, active):
 
 def event_summary(mom, e, pos, pdgid, active, e_dep):
     """Returns each event's summary: the mean and std of the kinematics per species of ``_TYPES``, then E_dep."""
-    kin = _spherical(mom, e, pos)
-    feats = []
-    for pid in _TYPES:
-        m    = ((pdgid == pid) & active).unsqueeze(-1).to(kin.dtype)   # the event's particles of this species
-        mean = masked_mean(kin, m, dim=1)
-        var  = masked_mean((kin - mean.unsqueeze(1)) ** 2, m, dim=1)
-        feats += [mean, torch.sqrt(var)]
-    return torch.cat([*feats, e_dep.unsqueeze(-1)], dim=-1)
-
+    kin  = _spherical(mom, e, pos).unsqueeze(2)                                        # (B, L, 1, F)
+    own  = (pdgid.unsqueeze(-1) == pdgid.new_tensor(_TYPES)) & active.unsqueeze(-1)    # (B, L, S): by species
+    own  = own.unsqueeze(-1)
+    mean = masked_mean(kin, own, dim=1)                                                # (B, S, F)
+    std  = torch.sqrt(masked_mean((kin - mean.unsqueeze(1)) ** 2, own, dim=1))
+    return torch.cat((torch.stack((mean, std), dim=2).flatten(1), e_dep.unsqueeze(-1)), dim=-1)
 
 def standardize(a, b):
     """Standardizes both sets by their pooled mean/std (z-score).
 
     An over-dispersed model inflates sigma and reports a smaller W1, and each run gets its own normaliser.
     """
-    anchor = torch.cat([a, b], dim=0)
-    mu = anchor.mean(dim=0)
+    anchor = torch.cat((a, b), dim=0)
+    mu = anchor.mean(0)
     sigma = anchor.std(dim=0).clamp(min=1e-8)
     return (a - mu) / sigma, (b - mu) / sigma
 
@@ -183,14 +181,9 @@ def _mom_e_pos(tokens):
 
 def _spherical(mom, e, pos):
     """Returns ``(mom theta, mom phi, energy, pos theta, pos phi)`` per particle."""
-    mom_sph = _GEOM.to_sph(_unit(mom))
-    pos_sph = _GEOM.to_sph(_unit(pos))
-    return torch.cat([mom_sph, e, pos_sph], dim=-1)
-
-
-def _unit(v):
-    """Returns the directions of ``v`` (..., 3), its norm held at 1e-8 or above."""
-    return v / v.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+    mom_sph = _GEOM.to_sph(F.normalize(mom, dim=-1, eps=1e-8))
+    pos_sph = _GEOM.to_sph(F.normalize(pos, dim=-1, eps=1e-8))
+    return torch.cat((mom_sph, e, pos_sph), dim=-1)
 
 
 def _subsample(a, max_samples):
@@ -200,7 +193,7 @@ def _subsample(a, max_samples):
 
 def _median_heuristic(X, Y, max_samples=2000):
     """Returns the kernel bandwidth: the median squared distance within the pooled (subsampled) sets."""
-    c = _subsample(torch.cat([X, Y], dim=0), max_samples)
+    c = _subsample(torch.cat((X, Y), dim=0), max_samples)
     D = torch.cdist(c, c) ** 2
     off = ~torch.eye(D.shape[0], dtype=torch.bool, device=c.device)
     return D[off].median().clamp(min=1e-8)

@@ -339,7 +339,7 @@ def mult_energy_scale(mult_conf: dict, rc: ResolvedLEGOConfig) -> float:
     if not mm_max or mm_max == rc.max_energy:
         return 1.0
     cut = rc.cutoff_mev
-    return float(torch.log(torch.tensor(rc.max_energy / cut)) / torch.log(torch.tensor(mm_max / cut)))
+    return (torch.log(torch.tensor(rc.max_energy / cut)) / torch.log(torch.tensor(mm_max / cut))).item()
 
 
 # ---- plumbing --------------------------------------------------------------------------------------------------------

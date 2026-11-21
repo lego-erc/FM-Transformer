@@ -144,7 +144,7 @@ class _M:
     """Named views into a mask (..., L): the loss mask ``m`` or the attention mask ``am``."""
 
     def __init__(self, m: Tensor) -> None:
-        self.full = m.squeeze(-1) if m.ndim > 2 else m  # accepts (B, L) or (B, L, 1); callers mix the two
+        self.full = m.squeeze(-1) if m.dim() > 2 else m  # accepts (B, L) or (B, L, 1); callers mix the two
 
     @property
     def edep(self) -> Tensor: return self.full[..., 1]
@@ -175,6 +175,15 @@ def vocab_index(vocab: Tensor, ids: Tensor) -> tuple[Tensor, Tensor]:
     """
     idx = torch.searchsorted(vocab, ids).clamp(max=len(vocab) - 1)
     return idx, vocab[idx] == ids
+
+
+def species_values(table: dict, pid: Tensor, like: Tensor) -> tuple[Tensor, Tensor]:
+    """Returns each pid's value from ``table`` (``{pdgid: value}``, 0 for a pid that is not in it) and whether it is.
+
+    The values take ``like``'s dtype.
+    """
+    own = pid.unsqueeze(-1) == pid.new_tensor(list(table))   # (..., n_species), one-hot or all false
+    return (own * like.new_tensor(list(table.values()))).sum(-1), own.any(-1)
 
 
 class DataStruct:

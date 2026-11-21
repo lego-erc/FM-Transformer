@@ -52,7 +52,7 @@ class GetLEGOData:
             events = _fixed_subset(events, n_events)
         cut, per_event = cut[events], {k: v[events] for k, v in per_event.items()}
 
-        am = ~cut.isnan().any(dim=-1)   # a real particle
+        am = ~cut.isnan().any(-1)   # a real particle
         m  = am.long()
         m[:, 0] = 0                     # ... the flow generates: all but the incoming one
         return cut.to(self.dev), m.to(self.dev), am.to(self.dev), {k: v.to(self.dev) for k, v in per_event.items()}
@@ -62,8 +62,8 @@ class GetLEGOData:
 
 def _to_front(particles: Tensor, keep: Tensor) -> tuple[Tensor, Tensor]:
     """Returns each event's kept particles moved to its front, NaN after them, and how many there are."""
-    n     = keep.sum(dim=-1)
-    front = torch.arange(int(n.max()), device=n.device) < n[:, None]   # the first n slots of each event
+    n     = keep.sum(-1)
+    front = torch.arange(int(n.max()), device=n.device) < n.unsqueeze(1)   # the first n slots of each event
     cut   = torch.full_like(particles[:, :int(n.max())], torch.nan)
     cut[front] = particles[keep]
     return cut, n

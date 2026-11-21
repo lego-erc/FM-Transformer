@@ -26,15 +26,12 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from legofmt.data.load.loader import smallest_bucket
 from legofmt.data.struct import DataStruct, _F
-from legofmt.numerics import held
+from legofmt.numerics import held, masked_mean
 
 from legofmt.distill.distill import one_step_euler_loss
 from legofmt.log_metrics.val_metrics import UNSYNCED_PREFIXES
-
-# each loss cell's channels of a token
-_CELLS = {"energy": slice(0, 1), "out_dir": slice(1, 4), "out_pos": slice(4, 7)}
-
 
 def sd3_time(u, s):
     """Returns SD3's mode-sampled time for ``u ~ U(0, 1)`` and scale ``s``; ``s = 0`` is uniform."""
@@ -46,34 +43,36 @@ def latent_path(z0: Tensor, z1: Tensor, t: Tensor) -> tuple[Tensor, Tensor]:
     return z0 + t * (z1 - z0), z1 - z0
 
 
-def loss_cells(sq: Tensor, gen: Tensor, edep_cell: bool, sq_lat: Tensor | None = None) -> dict[str, Tensor]:
-    """Returns each loss cell's mean squared error, in the order of the loss weights.
+def loss_cells(sq: Tensor, gen: Tensor, edep: Tensor | None = None, sq_lat: Tensor | None = None) -> Tensor:
+    """Returns each loss cell's mean squared error (C,), in the order of the loss weights.
+
+    ```
+    energy    the energy channel of the generated particles       (without ``edep``: of every generated token)
+    out_dir   the direction channels of the generated tokens
+    out_pos   the position channels of the generated tokens
+    edep      the energy channel of the generated E_dep tokens    (with ``edep``)
+    lat       the edep_ae latent's velocity                       (with ``sq_lat``)
+    ```
 
     Args:
-        sq:        (B, L, 7), the squared error per token and channel.
-        gen:       (B, L, 1), the generated tokens.
-        edep_cell: the E_dep token's energy channel is a cell of its own.
-        sq_lat:    the squared error of the edep_ae latent's velocity, or None.
-
-    Returns:
-        ``{energy, out_dir, out_pos[, edep][, lat]}``.
+        sq:     (B, L, 7), the squared error per token and channel.
+        gen:    (B, L, 1), the generated tokens.
+        edep:   (B, L, 1), the generated E_dep tokens where E_dep is a cell of its own, else None.
+        sq_lat: the squared error of the edep_ae latent's velocity, or None.
     """
-    n  = gen.sum().clamp(min=1)
-    sq = sq * gen
-    cells = {c: sq[..., ch].sum() / (n * (ch.stop - ch.start)) for c, ch in _CELLS.items()}
-    if edep_cell:
-        n_ed, sum_ed = gen[:, 1].sum().clamp(min=1), _F(sq).edep.sum()
-        cells["energy"] = (sq[..., 0:1].sum() - sum_ed) / (n - n_ed).clamp(min=1)
-        cells["edep"] = sum_ed / n_ed
+    energy, out_dir, out_pos = sq.split((1, 3, 3), dim=-1)
+    particles = gen if edep is None else gen & ~edep
+    cells = [masked_mean(energy, particles), masked_mean(out_dir, gen), masked_mean(out_pos, gen)]
+    if edep is not None:
+        cells.append(masked_mean(energy, edep))
     if sq_lat is not None:
-        cells["lat"] = sq_lat.mean()
-    return cells
+        cells.append(sq_lat.mean())
+    return torch.stack(cells)
 
 
-def kendall_total(cells: dict[str, Tensor], lv: Tensor) -> Tensor:
+def kendall_total(cells: Tensor, lv: Tensor) -> Tensor:
     """Returns ``sum_c exp(-lv_c) L_c + lv_c``: each cell weighted by its learned inverse variance, plus the barrier."""
-    w = torch.exp(-lv)
-    return sum(w[i] * L for i, L in enumerate(cells.values())) + lv.sum()
+    return (torch.exp(-lv) * cells).sum() + lv.sum()
 
 
 def flow_map_term(l_fm: Tensor, fac: float, every: int, lv_f: Tensor | None = None) -> Tensor:
@@ -139,11 +138,12 @@ class TrainStep:
         Returns:
             ``(total, logs)``: the loss, and in training the unweighted cells (and the weights' variances) to log.
         """
-        cells = loss_cells(sq, _generated(ds_t), self.rc.edep_cell, sq_lat)
+        gen   = _generated(ds_t)
+        cells = loss_cells(sq, gen, _edep_token(gen) if self.rc.edep_cell else None, sq_lat)
         if self.rc.learned_loss_weights:
             total = kendall_total(cells, held(self.lv, self.lv_floor))
         else:
-            total = sum(cells.values())
+            total = cells.sum()
         return total, (self._loss_logs(cells) if self.training else {})
 
     def _flow_map_loss(self, loss: Tensor, base: Tensor, ds_t: DataStruct, pdgid_idx: Tensor, model=None,
@@ -239,7 +239,7 @@ class TrainStep:
         """
         if not hasattr(self, "lv_flow"):
             return None
-        return held(self.lv_flow, self.rc.max_loss_weight_flow).squeeze()
+        return held(self.lv_flow, self.rc.max_loss_weight_flow).squeeze(0)
 
     def _field_extras(self, path, z_t: Tensor | None) -> dict:
         """Returns the field's optional inputs: the step ``d = 0`` (``step_cond``), the latent's ``z_t`` (edep_ae).
@@ -250,13 +250,15 @@ class TrainStep:
         lat  = {} if z_t is None else {"z": z_t}
         return {**step, **lat}
 
-    def _loss_logs(self, cells: dict[str, Tensor]) -> dict[str, Tensor]:
+    def _loss_logs(self, cells: Tensor) -> dict[str, Tensor]:
         """Returns the cells unweighted (comparable across weightings), their raw sum, and the learned variances."""
-        logs = {f"loss/{c}": L.detach() for c, L in cells.items()}
-        logs["loss/raw"] = (cells["energy"] + cells["out_dir"] + cells["out_pos"]).detach()
+        names = _cell_names(self.rc.edep_cell, len(cells))
+        cells = cells.detach()
+        logs  = {f"loss/{c}": L for c, L in zip(names, cells)}
+        logs["loss/raw"] = cells[:3].sum()
         if self.rc.learned_loss_weights:
             var = torch.exp(self.lv.detach())
-            logs.update({f"loss_weight/var_{c.removeprefix('out_')}": var[i] for i, c in enumerate(cells)})
+            logs.update({f"loss_weight/var_{c.removeprefix('out_')}": v for c, v in zip(names, var)})
         return logs
 
     def _log_step(self, logs: dict) -> None:
@@ -301,8 +303,8 @@ class TrainStep:
             ds_t = ds_t[lengths.sort(stable=True).indices]
             longest = cpu.sort().values[size - 1::size]
         else:
-            longest = cpu.max().view(1)
-        Ls = [next(b for b in self.rc.len_buckets if b >= x) for x in longest.tolist()]
+            longest = cpu.max().unsqueeze(0)
+        Ls = smallest_bucket(longest, self.rc.len_buckets).tolist()
         return ds_t.trim(Ls[-1]), [(slice(j * size, (j + 1) * size), L) for j, L in enumerate(Ls)]
 
     def _piecewise(self, pieces: list[tuple[slice, int]]):
@@ -319,3 +321,16 @@ class TrainStep:
 def _generated(ds_t: DataStruct) -> Tensor:
     """Returns the generated tokens, (B, L, 1): the loss mask on the real tokens."""
     return ((ds_t.m.full == 1) & (ds_t.am.full == 1)).unsqueeze(-1)
+
+
+def _edep_token(gen: Tensor) -> Tensor:
+    """Returns the generated E_dep tokens, (B, L, 1): ``gen`` on token 1, false on every other."""
+    edep = torch.zeros_like(gen)
+    _F(edep).edep.copy_(_F(gen).edep)
+    return edep
+
+
+def _cell_names(edep_cell: bool, n: int) -> tuple[str, ...]:
+    """Returns the names of ``loss_cells``' ``n`` entries."""
+    names = ("energy", "out_dir", "out_pos", "edep", "lat") if edep_cell else ("energy", "out_dir", "out_pos", "lat")
+    return names[:n]

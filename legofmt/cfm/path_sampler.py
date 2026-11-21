@@ -35,7 +35,7 @@ def _sphere_geodesic(x0, x1, t):
     c, s = torch.cos(phi), torch.sin(phi)
     x_t  = F.normalize(
         c * x0
-        + s * v / th.clamp_min(torch.finfo(th.dtype).tiny),
+        + s * v / th.clamp(min=torch.finfo(th.dtype).tiny),
         dim=-1,
     )
     dx_t = c * v - th * s * x0
@@ -69,7 +69,7 @@ class ProductPathSampler:
         """
         t_b       = _per_event(t, bases)                    # (B, 1, 1): over the tokens and channels
         x_t, dx_t = _per_factor(self.geodesics, self.manifold.ambient_dims, bases, data, t_b)
-        return PathSample(x_1=data, x_0=bases, t=t_b.view(-1, 1), x_t=x_t, dx_t=dx_t)
+        return PathSample(x_1=data, x_0=bases, t=t_b.flatten(1), x_t=x_t, dx_t=dx_t)
 
 
 # ---- plumbing ------------------------------------------------------------------------------------------------------
@@ -87,11 +87,11 @@ def _geodesic_of(man):
 
 def _per_event(t, like):
     """Shapes one time per event (B,) to broadcast over the other dims of ``like``."""
-    return t.view(-1, *[1] * (like.dim() - 1))
+    return t.reshape(-1, *[1] * (like.dim() - 1))
 
 
 def _per_factor(geodesics, dims, x0, x1, t):
     """Applies each factor's geodesic to its own ``dims`` channels; returns ``x_t`` and ``dx_t``, joined back."""
-    parts     = [geodesic(a, b, t) for geodesic, a, b in zip(geodesics, x0.split(dims, -1), x1.split(dims, -1))]
-    x_t, dx_t = (torch.cat(p, -1) for p in zip(*parts))
+    parts     = [geodesic(a, b, t) for geodesic, a, b in zip(geodesics, x0.split(dims, dim=-1), x1.split(dims, dim=-1))]
+    x_t, dx_t = (torch.cat(p, dim=-1) for p in zip(*parts))
     return x_t, dx_t

@@ -7,6 +7,7 @@ scored as a censored mass.
 """
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from legofmt.base.base_dists import Angles, BaseParams, Edep, Energy
@@ -79,7 +80,7 @@ def edep_logp(dist: Edep, edep: Tensor, e_dep_max: float) -> Tensor:
 
 def angle_w(dirs: Tensor, axis: Tensor) -> Tensor:
     """Computes ``w = theta / pi`` (B, n) of unit directions ``dirs`` (B, n, 3) about each event's ``axis`` (B, 3)."""
-    axis = torch.nn.functional.normalize(axis, dim=-1).unsqueeze(1)
+    axis = F.normalize(axis, dim=-1).unsqueeze(1)
     return safe_acos((dirs * axis).sum(-1)) / torch.pi
 
 

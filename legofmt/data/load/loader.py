@@ -34,7 +34,7 @@ class LengthBucketBatchSampler(DistributedSampler):
     def __init__(self, lengths: Tensor, buckets, bs: int, seed: int = 0,
                  rank: int = 0, world_size: int = 1, max_tokens: int | None = None) -> None:
         buckets = torch.as_tensor(buckets)
-        self.bucket_of = torch.bucketize(torch.as_tensor(lengths), buckets, out_int32=True)
+        self.bucket_of = torch.searchsorted(buckets, torch.as_tensor(lengths), out_int32=True)
         self.counts = torch.bincount(self.bucket_of, minlength=len(buckets))
         self.bs_of = torch.full_like(buckets, bs) if max_tokens is None else (max_tokens // buckets).clamp(min=1)
         self.seed, self.rank, self.world_size, self.epoch = seed, rank, world_size, 0
@@ -53,8 +53,14 @@ class LengthBucketBatchSampler(DistributedSampler):
         batches = []   # this rank's batch of each world_size consecutive ones
         for events, bs in zip(perm.split(self.counts.tolist()), self.bs_of.tolist()):
             n = len(events) - len(events) % (bs * self.world_size)
-            batches += events[:n].view(-1, self.world_size, bs)[:, self.rank].tolist()
+            batches += events[:n].unflatten(0, (-1, self.world_size, bs))[:, self.rank].tolist()
         return iter([batches[i] for i in torch.randperm(len(batches), generator=gen).tolist()])
+
+
+def smallest_bucket(n: Tensor, buckets) -> Tensor:
+    """Returns the smallest of the sorted ``buckets`` that holds each length of ``n``."""
+    buckets = torch.as_tensor(buckets, device=n.device)
+    return buckets[torch.searchsorted(buckets, n.contiguous())]
 
 
 def event_lengths(ds) -> Tensor:

@@ -233,7 +233,7 @@ class Solvers:
         """
         self._refuse_unsupported_likelihood()
         ds_t, pdgids_idx = self._prep_solve(ds_t)
-        x1 = ds_t.f.model_in.where(ds_t.am.full.unsqueeze(-1), ds_t.f.in_cc)   # the data; padding: the incoming one
+        x1 = torch.where(ds_t.am.full.unsqueeze(-1), ds_t.f.model_in, ds_t.f.in_cc)   # data; padding: the incoming one
         with _field_sees_graph(self.model, after=False):
             _, log_ll = _ode_solver(self.model, method).compute_likelihood(
                 x_1=x1, log_p0=log_p0,
@@ -259,7 +259,7 @@ class Solvers:
             ds_t = DataStruct(*ds_t)
         self._to_eval()
         pdgids     = ds_t.f.pdgids
-        pdgids_idx = pdgids.int() if self.rc.pdgid_is_idx else self.convert_pdgids(pdgids)
+        pdgids_idx = pdgids.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pdgids)
         return ds_t, pdgids_idx
 
     def _ready_to_generate(self) -> dict:
@@ -293,7 +293,7 @@ class Solvers:
         pdgids = ds_t.f.pdgids
         am     = ds_t.am.full.unsqueeze(-1)
         if cfg.get("return_base", False):
-            return self._edep_whiten(base, ds_t, inverse=True).masked_fill(~am, torch.nan), pdgids
+            return torch.where(am, self._edep_whiten(base, ds_t, inverse=True), torch.nan), pdgids
         amp = _amp_dtype(cfg["amp"]) if "amp" in cfg else self.rc.amp_dtype
         with contextlib.nullcontext() if amp is None else torch.autocast(base.device.type, dtype=amp):
             sols = self._solve_by_length(
@@ -309,10 +309,10 @@ class Solvers:
         sols = sols.float().masked_fill_(~am, torch.nan)
         filter_pdgid = cfg.get("filter_pdgid")
         if filter_pdgid is not None:
-            pdgids_idx = pdgids.int() if self.rc.pdgid_is_idx else self.convert_pdgids(pdgids)
+            pdgids_idx = pdgids.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pdgids)
             keep = torch.isin(pdgids_idx, self.convert_pdgids(filter_pdgid)) | (pdgids_idx == 0)
             sols.masked_fill_(~keep, torch.nan)
-            pdgids = pdgids.masked_fill(~keep, 0)
+            pdgids = torch.where(keep, pdgids, 0)
         return sols, pdgids
 
     def _solve_by_length(self, ds_t: DataStruct, base: Tensor, rng=None, **kw) -> Tensor:
@@ -347,7 +347,7 @@ class Solvers:
         if x_init is None:
             x_init = self.gen_base_wrapper(ds_t, rng=rng)
         if x_init.shape == ds_t.f.model_in.shape:
-            x_init = x_init.where(ds_t.am.full.unsqueeze(-1), _F(x_init).in_p)
+            x_init = torch.where(ds_t.am.full.unsqueeze(-1), x_init, _F(x_init).in_p)
         return x_init
 
     def _z_start(self, x0: Tensor, rng) -> tuple:

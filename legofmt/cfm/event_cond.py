@@ -41,12 +41,12 @@ def per_event_gammas(attn_layers: nn.Module) -> bool:
 def _per_event_forward(mod, orig, x, *, condition, **kwargs):
     if condition.shape[1] != 3 or x.shape[1] == 3:
         return orig(x, condition=condition, **kwargs)
-    sel = condition[:, 2, :x.shape[1], None] > 0.5
+    sel = condition[:, 2, :x.shape[1]].unsqueeze(-1) > 0.5
     g = mod.to_gamma(condition[:, :2])
     pick = lambda g: torch.where(sel, g[:, 1:2], g[:, :1])
     if isinstance(mod, AdaptiveRMSNorm):  # x_transformers.AdaptiveRMSNorm.forward
         return F.normalize(x, dim=-1) * mod.scale * (pick(g) + 1.)
-    g, out = pick(g.sigmoid()), mod.fn(x, **kwargs)  # x_transformers.AdaptiveLayerScale.forward
+    g, out = pick(torch.sigmoid(g)), mod.fn(x, **kwargs)  # x_transformers.AdaptiveLayerScale.forward
     return out * g if isinstance(out, Tensor) else (out[0] * g, *out[1:])
 
 

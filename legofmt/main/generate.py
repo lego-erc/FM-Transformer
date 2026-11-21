@@ -28,7 +28,7 @@ import torch.nn.functional as F
 from legofmt.cfm.project_model import is_compiled
 from legofmt.compat import dynamic_shape_attention
 from legofmt.data.write.norm import DataPrep
-from legofmt.data.struct import _F, cond_slot, set_layout, vocab_index
+from legofmt.data.struct import _F, cond_slot, set_layout, species_values, vocab_index
 from legofmt.geometry.energy_proj import EnergyProjections
 from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.legacy.generate import balance_passthrough, close_balance, generate_in
@@ -271,9 +271,9 @@ class GenerateOut(torch.nn.Module):
         attn_mask = F.pad(occupied, (self.n_prefix + 1, 0), value=True)   # the prefix, the incoming, occupied slots
         mask      = self._generated(attn_mask)                             # E_dep and the occupied slots
 
-        tok.edep.masked_fill_(pt_mask, 0.0)                  # a pass-through event deposits nothing,
-        tok.out_energy.masked_fill_(pt_mask[:, None], 0.0)   # every slot holds the full-energy atom,
-        mask.masked_fill_(pt_mask[:, None], 0)               # and nothing is generated
+        tok.edep.masked_fill_(pt_mask, 0.0)                      # a pass-through event deposits nothing,
+        tok.out_energy.masked_fill_(pt_mask.unsqueeze(1), 0.0)   # every slot holds the full-energy atom,
+        mask.masked_fill_(pt_mask.unsqueeze(1), 0)               # and nothing is generated
         return tok.full, mask, attn_mask
 
     # ---- Geant4-shaped arguments ------------------------------------------------------------------------------------
@@ -361,10 +361,8 @@ class GenerateOut(torch.nn.Module):
 
     def _edep_excess(self, pid_in: torch.Tensor, e_in: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns each event's E_dep excess [MeV] by its incoming species, and whether that species is capped."""
-        margins = self.dp.edep_excess_mev or _EDEP_EXCESS_MEV
-        own     = pid_in[..., None] == pid_in.new_tensor(list(margins))   # (..., n_species), one-hot or all false
-        excess  = (own * e_in.new_tensor(list(margins.values()))).sum(-1)
-        return excess, own.any(-1) & ~self.dp.edep_margin_mask(pid_in)
+        excess, known = species_values(self.dp.edep_excess_mev or _EDEP_EXCESS_MEV, pid_in, e_in)
+        return excess, known & ~self.dp.edep_margin_mask(pid_in)
 
     def _tokens(self, cond: torch.Tensor, n_slots: int) -> torch.Tensor:
         """Returns the tokens before the slots get their species, (B, n_prefix + 1 + n_slots, 8).
@@ -374,7 +372,7 @@ class GenerateOut(torch.nn.Module):
         """
         scalars, incoming = cond[:, :self.n_cond], cond[:, self.n_cond:].clone()
         incoming[:, -1] = self.model.convert_pdgids(incoming[:, -1])
-        tok = F.pad(incoming[:, None, :].expand(-1, 1 + n_slots, -1), (0, 0, self.n_prefix, 0))
+        tok = F.pad(incoming.unsqueeze(1).expand(-1, 1 + n_slots, -1), (0, 0, self.n_prefix, 0))
         tok[:, [cond_slot(n) for n in self.cond_names], 0] = scalars
         _F(tok).non_p[..., 1:-1] = 1
         return tok
@@ -401,9 +399,9 @@ class GenerateOut(torch.nn.Module):
         scalars = {"Density": density, "Z": Z, "A": A, "Size": size}
         B = self._g4_batch_size(pos, mom, energy, pdgids, size, scalars)
 
-        col = lambda x: x.reshape(-1, 1).expand(B, 1).repeat_interleave(n, 0)
-        mom = F.normalize(mom, dim=-1).view(-1, 3).expand(B, 3) * energy.view(-1, 1).expand(B, 1)
-        cc  = torch.cat((mom, pos.view(-1, 3).expand(B, 3)), dim=-1).repeat_interleave(n, dim=0)
+        col = lambda x: x.reshape(-1, 1).expand(B, 1).repeat_interleave(n, dim=0)
+        mom = F.normalize(mom, dim=-1).reshape(-1, 3).expand(B, 3) * energy.reshape(-1, 1).expand(B, 1)
+        cc  = torch.cat((mom, pos.reshape(-1, 3).expand(B, 3)), dim=-1).repeat_interleave(n, dim=0)
         return torch.cat((torch.cat([col(scalars[k]) for k in self.cond_names], dim=-1), cc, col(pdgids).to(cc.dtype)),
                          dim=-1)
 
@@ -419,8 +417,8 @@ class GenerateOut(torch.nn.Module):
             raise ValueError(f"gen_model_w_g4_args missing conditioning arrays for {missing}")
         if "Size" not in self.cond_names and size.shape[0] != 1:
             raise ValueError("Multiple sizes not yet supported (size is not a conditioning variable).")
-        shapes = {"pos": pos.view(-1, 3).shape[0], "mom": mom.view(-1, 3).shape[0], "energy": energy.shape[0],
-                  "pdgids": pdgids.shape[0], **{k: scalars[k].reshape(-1).shape[0] for k in self.cond_names}}
+        shapes = {"pos": pos.reshape(-1, 3).shape[0], "mom": mom.reshape(-1, 3).shape[0], "energy": energy.shape[0],
+                  "pdgids": pdgids.shape[0], **{k: scalars[k].flatten().shape[0] for k in self.cond_names}}
         B = max(shapes.values())
         wrong = {k: v for k, v in shapes.items() if v not in (1, B)}
         if wrong:

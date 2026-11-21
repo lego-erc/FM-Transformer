@@ -83,8 +83,8 @@ class GenerateBase(LegacySampler):
         event  = R.Noise(f.edep.shape, f.edep.device, rng)
         energy = Energy(self.sm_scale, self.sm_pow)
         angles = Angles(self.kappa, self.ang_pow)
-        in_mom = F.normalize(f.in_mom, dim=-1)[:, None]   # (B, 1, 3): an event's axis, for all its slots
-        in_pos = f.in_pos[:, None]
+        in_mom = F.normalize(f.in_mom, dim=-1).unsqueeze(1)   # (B, 1, 3): an event's axis, for all its slots
+        in_pos = f.in_pos.unsqueeze(1)
 
         x0 = _F(f.model_in.clone())
         x0.out_energy[:] = energy.sample(slot.normal(R.BASE_E))

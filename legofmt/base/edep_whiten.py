@@ -30,7 +30,7 @@ _FRAC_EPS     = 1e-6
 def whiten(E: Tensor, mu: Tensor, sig: Tensor, e_dep_max: float) -> Tensor:
     """Whitens a deposit ``E``: ``y = (logit(E / e_dep_max) - mu) / sig``, -6 without deposit."""
     y = (torch.logit(E / e_dep_max, eps=_FRAC_EPS) - mu) / sig
-    return torch.where(E > 0, y.clamp_min(_Y_MIN), _Y_NO_DEPOSIT)
+    return torch.where(E > 0, y.clamp(min=_Y_MIN), _Y_NO_DEPOSIT)
 
 
 def unwhiten(y: Tensor, mu: Tensor, sig: Tensor, e_dep_max: float) -> Tensor:

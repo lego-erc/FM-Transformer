@@ -52,12 +52,12 @@ def layer_features(layers: Tensor) -> Tensor:
     c_x0   = t_x0.cumsum(0) - t_x0 / 2     # the depth of the layer's centre
     c_lam  = t_lam.cumsum(0) - t_lam / 2
     period = _periods(layers.dtype)
-    ph_x0  = 2 * torch.pi * c_x0[:, None] / period            # (Lg, N_FREQ)
-    ph_lam = 2 * torch.pi * c_lam[:, None] / (period / 10)
+    ph_x0  = 2 * torch.pi * c_x0.unsqueeze(1) / period            # (Lg, N_FREQ)
+    ph_lam = 2 * torch.pi * c_lam.unsqueeze(1) / (period / 10)
     material = [torch.log(t), torch.log(rho), Z / 100, torch.log(A),
                 torch.log(t_x0), torch.log(t_lam), torch.log(rho * t)]
     depth    = [torch.sin(ph_x0), torch.cos(ph_x0), torch.sin(ph_lam), torch.cos(ph_lam), c_x0 / 30, c_lam / 3]
-    return _columns(*material, *depth)
+    return torch.column_stack((*material, *depth))
 
 
 class GeomEncoder(nn.Module):
@@ -66,7 +66,7 @@ class GeomEncoder(nn.Module):
     def __init__(self, layers, h_dim: int, *, tokens: int = 4, dim: int = 128, depth: int = 3, heads: int = 4) -> None:
         super().__init__()
         feats = layer_features(torch.as_tensor(layers, dtype=torch.float64)).float()
-        self.register_buffer("feats", feats[None], persistent=False)
+        self.register_buffer("feats", feats.unsqueeze(0), persistent=False)
         self.K = tokens
         self.inp = nn.Linear(feats.shape[-1], dim)
         self.summary = nn.Parameter(torch.randn(tokens, dim) * 0.02)
@@ -77,7 +77,7 @@ class GeomEncoder(nn.Module):
 
     def forward(self) -> Tensor:
         """Encodes the geometry into its summary tokens (1, K, h_dim)."""
-        h = torch.cat([self.summary[None], self.inp(self.feats)], dim=1)
+        h = torch.cat((self.summary.unsqueeze(0), self.inp(self.feats)), dim=1)
         return self.out(self.enc(h)[:, :self.K])
 
 
@@ -85,9 +85,4 @@ class GeomEncoder(nn.Module):
 
 def _periods(dtype) -> Tensor:
     """Returns the ``N_FREQ`` periods of the depth features, log-spaced from 0.2 to 60."""
-    return torch.logspace(*torch.tensor([0.2, 60.0], dtype=torch.float64).log10().tolist(), N_FREQ, dtype=dtype)
-
-
-def _columns(*features: Tensor) -> Tensor:
-    """Joins per-layer features, each (Lg,) or (Lg, k), into the columns of one (Lg, n) tensor."""
-    return torch.cat([f[:, None] if f.dim() == 1 else f for f in features], -1)
+    return torch.logspace(*torch.log10(torch.tensor([0.2, 60.0], dtype=torch.float64)).tolist(), N_FREQ, dtype=dtype)

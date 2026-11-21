@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from legofmt.base.base_dists import BaseParams
@@ -56,22 +57,22 @@ class BaseHead(nn.Module):
             ``BaseParams``: the energy and angle parameters (B, n_cls), one column per outgoing class, and E_dep's
             (B,).
         """
-        B = len(cont)
+        B, n_cls = species.shape
         with ieee_fp32(), torch.autocast(cont.device.type, enabled=False):
             c, s, o = _seen_then_blind((cont - self.mean) / self.std, species, out_set)   # rows [B:]: o zeroed
-            h = nn.functional.mish(
-                self.l0(torch.cat((c, s, o), -1))
-                + self.k0(_outer(s, torch.cat((c, o), -1)))
+            h = F.mish(
+                self.l0(torch.cat((c, s, o), dim=-1))
+                + self.k0(_outer(s, torch.cat((c, o), dim=-1)))
             )
             energy, e_dep, angles = self.re(self.ge(h)), self.rd(self.gd(h)), self.ra(self.ga(h))
 
-        log_sm, log_q     = energy[B:].chunk(2, -1)   # the energy group: from the blind rows
+        log_sm, log_q     = energy[B:].split(n_cls, dim=-1)   # the energy group: from the blind rows
         mu, log_sig       = e_dep[:B].unbind(-1)
-        log_kappa, log_pw = angles[:B].chunk(2, -1)
+        log_kappa, log_pw = angles[:B].split(n_cls, dim=-1)
         return BaseParams(   # each parameter inside its distribution's range
             sm_scale = torch.exp(log_sm.clamp(-8, 8)),         # s      in [e^-8, e^8]
             sm_pow   = torch.exp(log_q).clamp(0.25, 4.0),      # q      in [1/4, 4]
-            kappa    = torch.exp(log_kappa).clamp_min(1e-3),   # kappa  >= 1e-3: a divisor in the sampler
+            kappa    = torch.exp(log_kappa).clamp(min=1e-3),   # kappa  >= 1e-3: a divisor in the sampler
             ang_pow  = torch.exp(log_pw).clamp(0.1, 10.0),     # pw     in [0.1, 10]
             edep_mu  = mu,
             edep_sig = torch.exp(log_sig),

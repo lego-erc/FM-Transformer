@@ -59,7 +59,7 @@ def ot_couple(base: Tensor, ds_t: DataStruct, manifold) -> Tensor:
     """
     if batch_linear_assignment is None:
         raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
-    base   = base.where(ds_t.am.full.unsqueeze(-1), ds_t.f.model_in)
+    base   = torch.where(ds_t.am.full.unsqueeze(-1), base, ds_t.f.model_in)
     out    = _F(base).out_p                                            # a view: writing it permutes base
     cost   = (
         _pair_cost(ds_t.f.out_cc, out, manifold)
@@ -73,14 +73,14 @@ def ot_couple(base: Tensor, ds_t: DataStruct, manifold) -> Tensor:
 
 def _pair_cost(data: Tensor, base: Tensor, manifold) -> Tensor:
     """Computes ``cost[b, i, j] = sum_k d_k(data_i, base_j)^2`` (B, n, n) over the manifold's factors."""
-    data_i = data[:, :, None].split(manifold.ambient_dims, dim=-1)   # per factor (B, n, 1, .)
-    base_j = base[:, None].split(manifold.ambient_dims, dim=-1)      # per factor (B, 1, n, .)
+    data_i = data.unsqueeze(2).split(manifold.ambient_dims, dim=-1)   # per factor (B, n, 1, .)
+    base_j = base.unsqueeze(1).split(manifold.ambient_dims, dim=-1)   # per factor (B, 1, n, .)
     return sum(distance(mf, a, b) ** 2 for mf, a, b in zip(manifold.manifolds, data_i, base_j))
 
 
 def _blocked(valid: Tensor, pid: Tensor) -> Tensor:
     """Returns the pairs (B, n, n) whose slots differ in pdgid, or of which one is padding."""
-    return (valid[:, :, None] != valid[:, None, :]) | (pid[:, :, None] != pid[:, None, :])
+    return (valid.unsqueeze(2) != valid.unsqueeze(1)) | (pid.unsqueeze(2) != pid.unsqueeze(1))
 
 
 def _assign(cost: Tensor) -> Tensor:

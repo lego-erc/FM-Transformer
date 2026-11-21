@@ -17,7 +17,7 @@ log P          sum_s log softmax(out_s W_s + b_s)[n_s] + log Bernoulli(pass-thro
 sampling       the pass-through flag first; then slot by slot, each count fed back as the next token (KV cache)
 ```
 
-The formulas are module functions (``slot_ce``, ``count_log_prob``, ``bernoulli_log_prob``). ``MultLoader`` is its
+The formulas are module functions (``count_log_prob``, ``bernoulli_log_prob``). ``MultLoader`` is its
 dataset: per event the incoming token, the counts per species, the pass-through flag. Superseded
 (:mod:`legofmt.legacy.mult_model`): the inverse-species model ``InvModel``, the residual and ``in_embd`` pass-through
 heads; a config without ``opt_conf`` and the schedule-free switch are :mod:`legofmt.legacy.optimizers`.
@@ -54,14 +54,9 @@ from legofmt.rng import COUNT, PASSTHROUGH, SYM_COUNT, SYM_PT, categorical, rand
 _NEUTRAL_PDGIDS = (22, 2112, 130, 310, 12, -12, 14, -14, 3122)
 
 
-def slot_ce(logits: Tensor, counts: Tensor) -> Tensor:
-    """Returns each event's cross-entropy of its counts, averaged over the slots: (B, S, P), (B, S) -> (B,)."""
-    return F.cross_entropy(logits.flatten(0, 1), counts.flatten(), reduction="none").view(counts.shape).mean(-1)
-
-
 def count_log_prob(logits: Tensor, counts: Tensor) -> Tensor:
-    """Returns each event's ``sum_s log softmax(logits_s)[n_s]``: (B, S, P), (B, S) -> (B,)."""
-    return torch.log_softmax(logits, dim=-1).gather(-1, counts.unsqueeze(-1)).squeeze(-1).sum(-1)
+    """Returns each slot's ``log softmax(logits_s)[n_s]``: (B, S, P), (B, S) -> (B, S)."""
+    return torch.log_softmax(logits, dim=-1).gather(-1, counts.unsqueeze(-1)).squeeze(-1)
 
 
 def bernoulli_log_prob(logit: Tensor, x: Tensor) -> Tensor:
@@ -91,11 +86,11 @@ class MultLoader(torch.utils.data.Dataset):
         conds, incoming = torch.stack([lds.cond(n) for n in cond_scalars()], dim=-1), lds.incoming
 
         self.in_tok       = torch.cat((conds, incoming[:, :7]), dim=-1)
-        self.counts       = lds.species_counts(ptypes).clamp_max(mm_conf.get("max_out_particles") - 1)
+        self.counts       = lds.species_counts(ptypes).clamp(max=mm_conf.get("max_out_particles") - 1)
         self.pdgid_in_idx = vocab_index(ptypes_in, incoming[:, -1].contiguous())[0]
         self.pt_target    = None
         if mm_conf.get("passthrough_head", False):
-            self.pt_target = ((lds.edep.reshape(-1) <= 0) & (lds.n_out == 1)).float()
+            self.pt_target = ((lds.edep.flatten() <= 0) & (lds.n_out == 1)).float()
         self.train_inverse = mm_conf.get("train_inverse", False)
         if self.train_inverse:   # legacy: InvModel's inputs
             self.out_tok, self.out_pid_idx, self.out_mask, self.edep = inverse_tensors(lds, conds, ptypes)
@@ -210,7 +205,7 @@ class MultModel(ScheduleFreeSwitch, LightningModule):
         """Returns the loss of a ``MultLoader`` batch (module docstring)."""
         in_tok, counts, pdgid_in_idx = batch[:3]
         logits, out, h_in = self._teacher_logits(in_tok, counts, pdgid_in_idx)
-        ce = slot_ce(logits, counts)
+        ce = -count_log_prob(logits, counts).mean(-1)   # each event's cross-entropy, averaged over the slots
         loss_pt = loss_inv = None
         if self.pt_head is None:
             loss_count = total = ce.mean()
@@ -241,7 +236,7 @@ class MultModel(ScheduleFreeSwitch, LightningModule):
         self._check_scorable()
         self._eval_mode()
         logits, out, h_in = self._teacher_logits(in_tok, counts, pdgid_in_idx)
-        lp = count_log_prob(logits, counts)
+        lp = count_log_prob(logits, counts).sum(-1)
         if self.pt_head is None:
             return lp
         pt   = torch.zeros_like(lp, dtype=torch.bool) if pt_mask is None else pt_mask
@@ -464,8 +459,7 @@ def _pt_head(rc, mm: dict) -> nn.Module | None:
 
 def _pt_covered(mm: dict, ptypes_in: Tensor) -> Tensor:
     """Returns which incoming species the pass-through head covers (``mm_conf.passthrough_pdgids``: the neutrals)."""
-    covered = {int(p) for p in mm.get("passthrough_pdgids", _NEUTRAL_PDGIDS)}
-    return torch.tensor([int(p) in covered for p in ptypes_in], dtype=torch.bool)
+    return torch.isin(ptypes_in, ptypes_in.new_tensor(list(mm.get("passthrough_pdgids", _NEUTRAL_PDGIDS))))
 
 
 def _summed_over_ranks(acc: Tensor) -> Tensor:

@@ -25,10 +25,10 @@ def exit_time(p, x, d):
     ```
     """
     sign = torch.where(p > 0, 1.0, -1.0).to(p.dtype)
-    h    = (torch.abs(x) / d).max(dim=-1, keepdim=True).values * d
+    h    = (torch.abs(x) / d).amax(-1, keepdim=True) * d
     p    = sign * torch.abs(p).clamp(min=1e-8)   # |p| held at 1e-8 or above, its sign kept
     t    = (h * sign - x) / p
-    return t.min(-1, keepdim=True).values
+    return t.amin(-1, keepdim=True)
 
 
 class CubeTrace:

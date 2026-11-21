@@ -24,8 +24,8 @@ def safe_div(num: Tensor, den: Tensor, ok: Tensor, otherwise: float) -> Tensor:
     Never divides by a ``den`` that is not ok.
     """
 
-    den = torch.where(ok, den, torch.ones_like(den))
-    return torch.where(ok, num / den, torch.full_like(den, otherwise))
+    den = torch.where(ok, den, 1.0)
+    return torch.where(ok, num / den, otherwise)
 
 
 def safe_acos(x: Tensor) -> Tensor:
@@ -61,9 +61,10 @@ def safe_atan2(y: Tensor, x: Tensor) -> Tensor:
 def masked_mean(x: Tensor, w: Tensor, dim=None) -> Tensor:
     """Computes the ``w``-weighted mean ``sum(w x) / sum(w)`` of ``x`` over ``dim`` (every element by default).
 
-    The weight sum is held at 1 or above, so an empty mask gives 0, not NaN.
+    ``w`` broadcasts against ``x`` and counts once per element. The weight sum is held at 1 or above, so an empty mask
+    gives 0, not NaN.
     """
-
+    x, w = torch.broadcast_tensors(x, w)
     return (x * w).sum(dim) / w.sum(dim).clamp(min=1)
 
 

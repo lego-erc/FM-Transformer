@@ -101,7 +101,7 @@ def _check_packable(f: Tensor, m: Tensor, am: Tensor, n_prefix: int) -> None:
     L, P = f.shape[1], n_prefix
     tot, pad = am.sum(1), ~am
     prefix_token, pad_token, pad_e0 = _templates(f, tot)
-    if not torch.equal(am, torch.arange(L) < tot[:, None]) or (tot <= P).any():
+    if not torch.equal(am, torch.arange(L) < tot.unsqueeze(1)) or (tot <= P).any():
         raise ValueError("am must be one block of at least n_prefix + 1 tokens from token 0")
     if not torch.equal(m, loss_mask(am, P)):
         raise ValueError("m is not the pattern derived from am")

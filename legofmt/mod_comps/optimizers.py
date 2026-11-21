@@ -155,8 +155,8 @@ def muon_factory(params, **kw):
     """
     ps = list(params)
     return BatchedMuon([
-        {"params": [p for p in ps if p.ndim >= 2], "use_muon": True},
-        {"params": [p for p in ps if p.ndim <  2], "use_muon": False},
+        {"params": [p for p in ps if p.dim() >= 2], "use_muon": True},
+        {"params": [p for p in ps if p.dim() <  2], "use_muon": False},
     ], **kw)
 
 
@@ -197,7 +197,7 @@ def _get(reg, k):
 
 def _newton_schulz(upd, idx, ps, steps):
     """Returns NS(upd[i]) of the equal-shape parameters in ``idx`` from one batched call, in their shape and dtype."""
-    stacked = torch.stack([upd[i].view(len(upd[i]), -1) for i in idx])
+    stacked = torch.stack([upd[i].flatten(1) for i in idx])
     o = zero_power_via_newton_schulz_5(stacked, num_steps=steps)
     o = o.contiguous().to(ps[idx[0]].dtype)  # one cast for the whole group; unbind/view below are free
-    return [oi.view(ps[i].shape) for i, oi in zip(idx, o.unbind(0))]
+    return [oi.reshape(ps[i].shape) for i, oi in zip(idx, o.unbind(0))]
