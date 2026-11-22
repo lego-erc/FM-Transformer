@@ -10,18 +10,18 @@ Legacy*      legofmt/legacy/       superseded paths, each reached by one dispatc
 ```
 
 This file builds the parts, holds the token maps the mixins share (``convert_pdgids``: raw pdgid -> vocabulary
-index; ``_enter_frame`` / ``_leave_frame``: into and out of the frame the flow works in, built from ``_canon_dirs``,
-the canonical cube frame, and ``_zoom_dirs``, the zoomed polar angle) and the Lightning hooks. The config is checked
-where it is resolved (``mod_comps/config.py``).
+index, ``species_idx``: the same for tokens that may already hold indices; ``_enter_frame`` / ``_leave_frame``: into
+and out of the frame the flow works in, built from ``_canon_dirs``, the canonical cube frame, and ``_zoom_dirs``, the
+zoomed polar angle) and the Lightning hooks. The config is checked where it is resolved (``mod_comps/config.py``).
 """
 
 import torch
 from torch import Tensor, nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 
 import lightning as ltng
 
-from legofmt.base import ot_coupling
+from legofmt.base.ot_coupling import require_lap
 from legofmt.base.interface import BaseDist, build_base_head
 from legofmt.base.gen_base import GenerateBase
 from legofmt.legacy.base_nn import LegacyBaseDist
@@ -38,13 +38,14 @@ from legofmt.main.train_step import TrainStep
 
 from legofmt.data.load.packed import interacting_only, load_dataset
 from legofmt.data.load.loader import (
-    LengthBucketBatchSampler, event_lengths, loader_seed, make_loader, smallest_bucket,
+    LengthBucketBatchSampler, event_lengths, loader_seed, make_loader, smallest_bucket, split_val,
 )
 from legofmt.data.struct import DataStruct, _F, vocab_index, with_dirs
 from legofmt.data.write.norm import DataPrep
 
 from legofmt.cfm.path_sampler import ProductPathSampler
 from legofmt.geometry.geom_trafos import zoom_polar
+from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.geometry.symmetry_projections import CubeSymmetry
 
 from legofmt.mod_comps.config import resolve_legoltng_config
@@ -70,8 +71,8 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
         types_embd = torch.arange(rc.max_seq_l, dtype=torch.int64).clamp(max=rc.n_prefix + 1).unsqueeze(0)
         self.register_buffer("pdgids_template", rc.pdgids_template)
         self.register_buffer("types_embd", types_embd)
-        cuboid = torch.tensor(rc.config["model_conf"].get("cuboid_dim") or [1.0, 1.0, 1.0])
-        self.register_buffer("cuboid_unit", cuboid / cuboid.max(), persistent=False)
+        self.register_buffer("cuboid_unit", CubeTrace(rc.config["model_conf"].get("cuboid_dim")).cuboid_dim,
+                             persistent=False)
 
         # the parts, in parameter-initialisation order
         self.model       = self._build_model(rc)
@@ -118,6 +119,14 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
         pos, known = vocab_index(self.pdgids_template.to(pdgids.device), pdgids.contiguous())
         unknown = (pdgids == 0) | (pdgids >= 1e8) | ~known   # NaN is never known
         return torch.where(unknown, 0, pos + 1)
+
+    def species_idx(self, pdgids: Tensor) -> Tensor:
+        """Returns the tokens' vocabulary indices.
+
+        ``convert_pdgids`` of raw pdgids; the tokens' own values when they already are indices (``pdgid_is_idx``:
+        ``GenerateOut``'s batches).
+        """
+        return pdgids.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pdgids)
 
     def _enter_frame(self, ds_t: DataStruct, zoom: bool = False, aug: bool = False, rng=None,
                      stream: int = SYM_FLOW) -> tuple[DataStruct, tuple]:
@@ -213,7 +222,7 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
         full = load_dataset(**self.rc.dl_conf["lds_args"], prep=DataPrep(self.rc.config))
         if self.rc.config.get("model_conf", {}).get("exclude_passthrough", False):
             full = interacting_only(full)
-        self._train_ds, self._val_ds = self._split_val(full)
+        self._train_ds, self._val_ds = split_val(full, self.rc.val_conf)
         self._pretrain_base_if_needed()
 
     def train_dataloader(self) -> DataLoader:
@@ -247,8 +256,7 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
 
     @torch.no_grad()
     def on_fit_start(self) -> None:
-        if self.rc.ot_coupling and ot_coupling.batch_linear_assignment is None:
-            raise RuntimeError(ot_coupling._OT_COUPLING_REQUIRES_LAP)
+        if self.rc.ot_coupling: require_lap()
         if self.reflow_teacher is not None: self.reflow_teacher.to(self.device)   # legacy: reflow
         self.model.train()
         self._opt_train()   # legacy: schedule-free
@@ -279,12 +287,6 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
         if self.rc.pdgid_is_idx:
             nucleons = self.convert_pdgids(nucleons).to(pdgids.dtype)
         return (tokens & torch.isin(pdgids[..., 0], nucleons)).sum(-1)
-
-    def _split_val(self, full):
-        """Returns ``(train, val)``: ``val_conf.val_frac`` of the events, at least one, split off by its seed."""
-        n_val = max(1, int(len(full) * self.rc.val_conf.get("val_frac", 0.01)))
-        gen   = torch.Generator().manual_seed(self.rc.val_conf.get("seed", 0))
-        return random_split(full, [len(full) - n_val, n_val], generator=gen)
 
     def _bucket_sampler(self) -> LengthBucketBatchSampler:
         """Returns the sampler that batches the training events of one length bucket together, per DDP rank."""

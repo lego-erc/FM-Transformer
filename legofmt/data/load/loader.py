@@ -2,6 +2,7 @@
 
     LengthBucketBatchSampler   batches of events of similar length
     event_lengths              each event's token count, through the dataset views the sampler gets
+    split_val                  the validation events, split off by ``val_conf``
     make_loader                the worker plumbing both LightningModules share
 """
 
@@ -9,7 +10,9 @@ import os
 
 import torch
 from torch import Tensor
-from torch.utils.data import BatchSampler, DataLoader, DistributedSampler, RandomSampler, SequentialSampler, Subset
+from torch.utils.data import (
+    BatchSampler, DataLoader, DistributedSampler, RandomSampler, SequentialSampler, Subset, random_split,
+)
 
 from legofmt.data.load.packed import Interacting
 
@@ -70,6 +73,13 @@ def event_lengths(ds) -> Tensor:
     if isinstance(ds, Interacting):
         return event_lengths(ds.ds)[ds.keep_idx]
     return ds.lengths
+
+
+def split_val(dataset, val_conf: dict):
+    """Returns ``(train, val)``: ``val_conf.val_frac`` of the events, at least one, split off by ``val_conf.seed``."""
+    n_val = max(1, int(len(dataset) * val_conf.get("val_frac", 0.01)))
+    gen   = torch.Generator().manual_seed(val_conf.get("seed", 0))
+    return random_split(dataset, [len(dataset) - n_val, n_val], generator=gen)
 
 
 def loader_seed(dl_conf: dict) -> int:

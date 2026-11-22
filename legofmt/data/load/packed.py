@@ -29,7 +29,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from legofmt.data.struct import DataStruct, cond_slot
+from legofmt.data.struct import DataStruct, cond_slot, loss_mask
 from legofmt.legacy.dataset import PaddedData
 
 PACKED_FORMAT = "lego-packed"
@@ -39,14 +39,6 @@ PACKED_VERSION = 1
 def is_packed(obj) -> bool:
     """Returns whether ``obj`` is a packed dataset as ``torch.load`` gives it (``PackedData.to_dict``)."""
     return isinstance(obj, dict) and obj.get("format") == PACKED_FORMAT
-
-
-def loss_mask(am: Tensor, n_prefix: int) -> Tensor:
-    """Builds the loss mask ``m``: ``am`` minus the prefix and incoming tokens, plus the E_dep token (slot 1)."""
-    m = am.long()
-    m[..., :n_prefix + 1] = 0
-    m[..., 1] = 1
-    return m
 
 
 @dataclass

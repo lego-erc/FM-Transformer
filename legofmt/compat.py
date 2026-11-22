@@ -104,18 +104,6 @@ def legacy_param_rename(state_dict, prefix, *_) -> None:
         state_dict[new] = state_dict.pop(old)
 
 
-def load_legacy_base_head(head: nn.Sequential, hs: dict) -> None:
-    """Loads a ``base_head`` saved with fewer outputs than the current one.
-
-    Copies the rows that exist and leaves the rest at their init values. Call under torch.no_grad(): it copies into
-    parameter slices in place.
-    """
-    n_old = hs["2.weight"].shape[0]
-    head[0].load_state_dict({"weight": hs["0.weight"], "bias": hs["0.bias"]})
-    head[-1].weight[:n_old].copy_(hs["2.weight"])
-    head[-1].bias[:n_old].copy_(hs["2.bias"])
-
-
 # ---------------------------------------------------------------------------
 # 2. runtime switches -- these keep acting for as long as the model is loaded
 # ---------------------------------------------------------------------------

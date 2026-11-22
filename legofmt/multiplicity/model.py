@@ -11,7 +11,7 @@ pass-through   P(no interaction | incoming) = sigmoid(pt_head(out_0))         fo
 
 loss           ce_b    = mean_s CE(out_s W_s + b_s, n_s)
                L_count = sum_b w_b ce_b / sum_b w_b     w_b = 0 for a covered pass-through event, else 1
-               L_pt    = the BCE of the head, over the covered species
+               L_pt    = -mean log Bernoulli(pass-through | sigmoid(pt_head(out_0))), over the covered species
                L       = L_count + L_pt                 (L = mean_b ce_b without the head)
 log P          sum_s log softmax(out_s W_s + b_s)[n_s] + log Bernoulli(pass-through | sigmoid(pt_head(out_0)))
 sampling       the pass-through flag first; then slot by slot, each count fed back as the next token (KV cache)
@@ -29,7 +29,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from torch.utils.data import random_split
 
 from lightning import LightningModule
 
@@ -38,7 +37,7 @@ from x_transformers import ContinuousTransformerWrapper, Decoder
 from legofmt.compat import fp32_attention, needs_fp32_attention
 
 from legofmt.data.load.packed import load_dataset
-from legofmt.data.load.loader import loader_seed, make_loader
+from legofmt.data.load.loader import loader_seed, make_loader, split_val
 from legofmt.data.write.norm import DataPrep
 from legofmt.data.struct import cond_scalars, vocab_index
 from legofmt.geometry.geom_trafos import GeomTrafos
@@ -212,9 +211,7 @@ class MultModel(ScheduleFreeSwitch, LightningModule):
         else:
             passed, covered = batch[-1].float(), self._pt_pdgid_allowed[pdgid_in_idx]
             loss_count = masked_mean(ce, 1.0 - passed * covered)   # a covered pass-through event has no counts
-            bce        = F.binary_cross_entropy_with_logits(self._pt_logit(out[:, 0], h_in), passed,
-                                                            reduction="none")
-            loss_pt    = masked_mean(bce, covered)
+            loss_pt    = masked_mean(-bernoulli_log_prob(self._pt_logit(out[:, 0], h_in), passed.bool()), covered)
             total      = loss_count + loss_pt
         if self.inv is not None:   # legacy
             loss_inv = F.cross_entropy(self.inv(*batch[3:7]), pdgid_in_idx)
@@ -346,7 +343,7 @@ class MultModel(ScheduleFreeSwitch, LightningModule):
         """Loads the dataset once and splits off the validation events."""
         if getattr(self, "_val_ds", None) is not None:
             return
-        self._train_ds, self._val_ds = self._split_val(MultLoader(self.rc.config))
+        self._train_ds, self._val_ds = split_val(MultLoader(self.rc.config), self.rc.val_conf)
 
     def train_dataloader(self):
         return self._make_loader(self._train_ds, shuffle=True)
@@ -423,12 +420,6 @@ class MultModel(ScheduleFreeSwitch, LightningModule):
         """Logs the loss and its parts (None: absent), unsynced: a per-step all-reduce for logging stalled DDP ranks."""
         logs = {f"loss/{k}": v.detach() for k, v in parts.items() if v is not None}
         self.log_dict({"train_loss": total, **logs}, prog_bar=True, sync_dist=False)
-
-    def _split_val(self, full):
-        """Returns ``(train, val)``: ``val_conf.val_frac`` of the events, at least one, split off by its seed."""
-        n_val = max(1, int(len(full) * self.rc.val_conf.get("val_frac", 0.01)))
-        gen   = torch.Generator().manual_seed(self.rc.val_conf.get("seed", 0))
-        return random_split(full, [len(full) - n_val, n_val], generator=gen)
 
     def _make_loader(self, dataset, *, shuffle: bool):
         """Returns ``make_loader`` with the config's batch size, workers and seed."""

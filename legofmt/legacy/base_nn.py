@@ -12,7 +12,6 @@ from itertools import chain, repeat
 import torch
 from torch import Tensor, nn
 
-from legofmt.compat import load_legacy_base_head
 from legofmt.data.struct import DataStruct
 
 # Conditioning scalars base_head_params reads; no base_head without them.
@@ -245,3 +244,15 @@ class LegacyBaseDist:
                 {k: v.cpu() for k, v in self.base_head.state_dict().items()}, src=0)
             self.base_head.load_state_dict(sd)
             self.base_head.requires_grad_(False)
+
+
+def load_legacy_base_head(head: nn.Sequential, hs: dict) -> None:
+    """Loads a ``base_head`` saved with fewer outputs than the current one.
+
+    Copies the rows that exist and leaves the rest at their init values. Call under torch.no_grad(): it copies into
+    parameter slices in place.
+    """
+    n_old = hs["2.weight"].shape[0]
+    head[0].load_state_dict({"weight": hs["0.weight"], "bias": hs["0.bias"]})
+    head[-1].weight[:n_old].copy_(hs["2.weight"])
+    head[-1].bias[:n_old].copy_(hs["2.bias"])

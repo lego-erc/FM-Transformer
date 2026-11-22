@@ -138,8 +138,7 @@ def cuboid_chord(u: torch.Tensor, pos: torch.Tensor, d: torch.Tensor) -> torch.T
     Counting both sides gives the same chord whether the entry or the exit point is stored.
     """
     d      = d.to(u)
-    norm   = torch.abs(pos).amax(-1, keepdim=True).clamp(min=1e-8)   # |pos|_inf, held at 1e-8 or above
-    p      = pos / norm * d                                           # the surface point
+    p      = on_cuboid(pos, d)                                        # the surface point
     # an axis the line is parallel to gets 4.0, beyond any face, so it never ends the chord
     moving = torch.abs(u) > 1e-6
     ahead  = safe_div(torch.sign(u) * d - p, u, moving, otherwise=4.0)

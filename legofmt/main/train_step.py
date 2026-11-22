@@ -30,7 +30,7 @@ from legofmt.data.load.loader import smallest_bucket
 from legofmt.data.struct import DataStruct, _F
 from legofmt.numerics import held, masked_mean
 
-from legofmt.distill.distill import one_step_euler_loss
+from legofmt.cfm.flow_map import one_step_euler_loss
 from legofmt.log_metrics.val_metrics import UNSYNCED_PREFIXES
 
 def sd3_time(u, s):

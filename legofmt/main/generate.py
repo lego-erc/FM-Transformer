@@ -20,6 +20,7 @@ The momentum in ``cond`` must be energy-scaled, not unit-norm, or the event cond
 (``odeint_conf``) and ``GenerateIn``, the reverse direction, are :mod:`legofmt.legacy.generate`.
 """
 
+import warnings
 from dataclasses import replace
 
 import torch
@@ -28,17 +29,12 @@ import torch.nn.functional as F
 from legofmt.cfm.project_model import is_compiled
 from legofmt.compat import dynamic_shape_attention
 from legofmt.data.write.norm import DataPrep
-from legofmt.data.struct import _F, cond_slot, set_layout, species_values, vocab_index
-from legofmt.geometry.energy_proj import EnergyProjections
-from legofmt.geometry.raytracing_proj import CubeTrace
+from legofmt.data.struct import _F, cond_slot, loss_mask, set_layout, species_values, vocab_index
 from legofmt.legacy.generate import balance_passthrough, close_balance, generate_in
+from legofmt.legacy.norm import HAND_SET_EXCESS_MEV
 from legofmt.main.modules import LEGOLtng
-from legofmt.mod_comps.config import mult_energy_scale
 from legofmt.multiplicity.model import MultModel
 from legofmt.rng import REFILL, categorical, rng_on
-
-# the E_dep cap's margin for checkpoints from before model_conf.edep_excess_mev [MeV]
-_EDEP_EXCESS_MEV = {11: 0.0, -11: 1.022, 22: 0.0, 2212: 0.0, 2112: 10.0, 211: 150.0, -211: 150.0}
 
 
 def fit_counts(counts: torch.Tensor, max_particles: int, refill) -> torch.Tensor:
@@ -79,6 +75,32 @@ def slot_species(counts: torch.Tensor, max_particles: int) -> tuple[torch.Tensor
     occupied = slots < counts.sum(-1, keepdim=True)
     bounds   = counts.cumsum(-1)[..., :-1].contiguous()
     return occupied, torch.searchsorted(bounds, slots.expand(len(counts), -1).contiguous(), right=True)
+
+
+def mult_energy_scale(mult_conf: dict, rc) -> float:
+    """Checks a multiplicity config against the flow's, and returns the factor between their energy scalars.
+
+    ```
+    scale = log(max_energy / cutoff) / log(mm_max_energy / cutoff)       1 when the two max_energy agree
+    ```
+
+    Raises:
+        ValueError: the multiplicity model's ``cond_scalars`` are not a prefix of the flow's.
+    """
+    mm = mult_conf["config"]["mm_conf"]
+    mm_cond = mm.get("cond_scalars")
+    if mm_cond and tuple(mm_cond) != tuple(rc.cond_scalars)[:len(mm_cond)]:
+        raise ValueError(f"mult cond_scalars {tuple(mm_cond)} is not a prefix of the flow's "
+                         f"{tuple(rc.cond_scalars)}; cond carries only the flow's scalars.")
+    mm_cut = mult_conf["config"]["dl_conf"]["lds_args"].get("cutoff_mev")
+    if mm_cut is not None and mm_cut != rc.cutoff_mev:
+        warnings.warn(f"mult cutoff_mev {mm_cut} != flow {rc.cutoff_mev}: "
+                      "the two energy scales disagree and mult_e_scale assumes they do not", stacklevel=3)
+    mm_max = mm.get("max_energy")
+    if not mm_max or mm_max == rc.max_energy:
+        return 1.0
+    cut = rc.cutoff_mev
+    return (torch.log(torch.tensor(rc.max_energy / cut)) / torch.log(torch.tensor(mm_max / cut))).item()
 
 
 class GenerateOut(torch.nn.Module):
@@ -122,11 +144,12 @@ class GenerateOut(torch.nn.Module):
         if couple_in_out_pdgids:
             rc.odeint_conf["filter_pdgid"] = self.pdgid_in
 
-        # the scales: the incoming position's ray trace, the energies, the E_dep token's (for the E_in cap)
-        self.proj_ray   = CubeTrace(mc.get("cuboid_dim"))
-        self.cuboid_dim = self.proj_ray.cuboid_dim   # kept apart: no_raytrace models stub proj_ray
-        self.pen        = EnergyProjections(cutoff_mev=rc.cutoff_mev, max_energy=rc.max_energy)
+        # the scales, the flow's own DataPrep's: the E_dep token's (for the E_in cap), the energies, the incoming
+        # position's ray trace
         self.dp         = DataPrep(flow_conf)
+        self.pen        = self.dp.pen
+        self.proj_ray   = self.dp.ppa
+        self.cuboid_dim = self.proj_ray.cuboid_dim   # kept apart: no_raytrace models stub proj_ray
 
     def __call__(self, cond: torch.Tensor, prepped: bool = False, passthrough: bool = True, rng=None):
         """Generates the outgoing particles and E_dep of a batch of incoming particles.
@@ -176,8 +199,8 @@ class GenerateOut(torch.nn.Module):
 
         Only the layer-scale token is capped (a margin token is capped by construction). The excess is the training
         data's largest (``model_conf.edep_excess_mev``), or for checkpoints from before it the hand-set
-        ``_EDEP_EXCESS_MEV``; a species without one stays uncapped. Out of place, so the density design can
-        differentiate through it.
+        ``legacy.norm.HAND_SET_EXCESS_MEV``; a species without one stays uncapped. Out of place, so the density design
+        can differentiate through it.
         """
         excess, capped = self._edep_excess(pid_in, e_in)
         cap = self.dp.norm_edep_layer(e_in + excess).to(edep)
@@ -269,7 +292,7 @@ class GenerateOut(torch.nn.Module):
         tok = _F(self._tokens(cond, n_slots))   # [cond scalars, E_dep, incoming, a copy of the incoming per slot]
         tok.out_pid.copy_(occupied * (species + 1))                        # 0: an empty slot
         attn_mask = F.pad(occupied, (self.n_prefix + 1, 0), value=True)   # the prefix, the incoming, occupied slots
-        mask      = self._generated(attn_mask)                             # E_dep and the occupied slots
+        mask      = loss_mask(attn_mask, self.n_prefix)                    # E_dep and the occupied slots
 
         tok.edep.masked_fill_(pt_mask, 0.0)                      # a pass-through event deposits nothing,
         tok.out_energy.masked_fill_(pt_mask.unsqueeze(1), 0.0)   # every slot holds the full-energy atom,
@@ -361,7 +384,7 @@ class GenerateOut(torch.nn.Module):
 
     def _edep_excess(self, pid_in: torch.Tensor, e_in: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns each event's E_dep excess [MeV] by its incoming species, and whether that species is capped."""
-        excess, known = species_values(self.dp.edep_excess_mev or _EDEP_EXCESS_MEV, pid_in, e_in)
+        excess, known = species_values(self.dp.edep_excess_mev or HAND_SET_EXCESS_MEV, pid_in, e_in)   # legacy
         return excess, known & ~self.dp.edep_margin_mask(pid_in)
 
     def _tokens(self, cond: torch.Tensor, n_slots: int) -> torch.Tensor:
@@ -376,12 +399,6 @@ class GenerateOut(torch.nn.Module):
         tok[:, [cond_slot(n) for n in self.cond_names], 0] = scalars
         _F(tok).non_p[..., 1:-1] = 1
         return tok
-
-    def _generated(self, attn_mask: torch.Tensor) -> torch.Tensor:
-        """Returns the loss mask: ``attn_mask`` without the given tokens, the cond scalars and the incoming particle."""
-        mask = attn_mask.long()
-        mask[:, [cond_slot(n) for n in self.cond_names] + [self.n_prefix]] = 0
-        return mask
 
     def _edep_on_layer_scale(self, s: _F) -> torch.Tensor:
         """Returns the E_dep token on the ``norm_edep_layer`` scale: a ``model_conf.edep_margin`` token re-encoded."""

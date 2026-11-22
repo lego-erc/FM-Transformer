@@ -156,7 +156,7 @@ def test_g4_api_hands_out_the_log_scale_token(gen, monkeypatch) -> None:
 @pytest.mark.parametrize("pid, clamped", [(22, False), (2212, True)])
 def test_the_mev_clamp_applies_to_the_log_token_species_only(gen, monkeypatch, pid, clamped) -> None:
     """With edep_margin_species [11, -11, 22] a photon's margin token is capped by construction and left alone, while a
-    proton's log token is still clamped at E_in (+ its _EDEP_EXCESS_MEV, 0 for protons)."""
+    proton's log token is still clamped at E_in (+ its HAND_SET_EXCESS_MEV, 0 for protons)."""
     gen.dp.edep_margin, gen.dp.edep_margin_species = True, [11, -11, 22]
     monkeypatch.setattr(gen.model, "forward", _fill_edep(1.0))
     sols, _, _ = gen(_gun_cond(pid, batch=64))
@@ -172,7 +172,7 @@ def test_the_mev_clamp_applies_to_the_log_token_species_only(gen, monkeypatch, p
 # --- data-driven margin: model_conf.edep_excess_mev ---------------------------------------------------------------
 # Per incoming species, the largest E_dep - E_in [MeV] in the training data (meta.json edep_excess_max_mev, written by
 # gen_data.py; for an older dataset computed from data_prepped.pt at fresh training). It replaces the hand-set
-# HAND_SET_MARGIN_MEV / _EDEP_EXCESS_MEV; checkpoints without it keep the constants.
+# HAND_SET_MARGIN_MEV / HAND_SET_EXCESS_MEV; checkpoints without it keep the constants.
 
 def _raw_file(e_in, pid, edep) -> torch.Tensor:
     """A stored (pre-norm_e) tensor: incoming kinetic energy and E_dep in MeV."""

@@ -1,4 +1,4 @@
-"""Reflow's teacher, and the one-step ``Direct`` models: both superseded by the flow-map term (``distill/distill.py``).
+"""Reflow's teacher, and the one-step ``Direct`` models: both superseded by the flow-map term (``cfm/flow_map.py``).
 
 Reflow re-couples the base to a frozen teacher's transport of it. A ``reflow_path`` teacher is used from step 0;
 ``reflow_start_epoch > 0`` makes the student's end-of-epoch snapshot the teacher from that epoch on (self-reflow

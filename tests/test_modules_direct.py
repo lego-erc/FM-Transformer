@@ -207,7 +207,7 @@ def test_flow_map_ladder_is_anchored_at_zero() -> None:
     {2**0 .. 2**-(sections-1)} but the teacher queries d=step/2, which falls one
     octave below for the smallest step. That bottom rung was supervised by
     nothing, so the whole bootstrap stood on an arbitrary function."""
-    from legofmt.distill.distill import one_step_euler_loss
+    from legofmt.cfm.flow_map import one_step_euler_loss
 
     sections = 4
     model = _fit(LEGOLtngVelocity(_step_cond_config(one_step_euler_sections=sections)))

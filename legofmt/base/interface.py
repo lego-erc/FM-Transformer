@@ -32,9 +32,9 @@ from legofmt.base.edep_whiten import whiten_edep
 from legofmt.base.nn import BaseHead
 from legofmt.base.nn_fit import fit_head, head_nll
 from legofmt.base.ot_coupling import ot_couple
-from legofmt.cfm.geom_encoder import x0_gcm2
 from legofmt.data.struct import DataStruct
 from legofmt.geometry.geom_trafos import cuboid_chord
+from legofmt.geometry.material import x0_gcm2
 from legofmt.legacy.base_nn import build_legacy_base_head
 from legofmt.legacy.gen_base import x0_inverse_mask
 
@@ -165,7 +165,7 @@ class BaseDist:
 
     def _species_idx(self, pid: Tensor, n_cls: int) -> Tensor:
         """Maps raw pdgids (with ``pdgid_is_idx``: indices) to class indices in ``[0, n_cls)``."""
-        return (pid.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pid)).long().clamp(0, n_cls - 1)
+        return self.species_idx(pid).clamp(0, n_cls - 1)
 
     # ---- fitting the head: once, before the flow trains --------------------
 

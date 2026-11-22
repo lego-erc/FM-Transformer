@@ -27,11 +27,6 @@ try:  # skips TLA's NaN / infeasibility .item() checks: our costs are finite and
 except ImportError:
     _lap_cuda_unchecked = None
 
-_OT_COUPLING_REQUIRES_LAP = (
-    "ot_coupling=True requires `torch-linear-assignment` (a pixi dependency). "
-    "Install it or set model_conf.ot_coupling=False."
-)
-
 
 _BLOCKED = 1e6   # the cost of a blocked pair
 
@@ -57,8 +52,7 @@ def ot_couple(base: Tensor, ds_t: DataStruct, manifold) -> Tensor:
     Raises:
         RuntimeError: ``torch-linear-assignment`` is not installed.
     """
-    if batch_linear_assignment is None:
-        raise RuntimeError(_OT_COUPLING_REQUIRES_LAP)
+    require_lap()
     base   = torch.where(ds_t.am.full.unsqueeze(-1), base, ds_t.f.model_in)
     out    = _F(base).out_p                                            # a view: writing it permutes base
     cost   = (
@@ -67,6 +61,17 @@ def ot_couple(base: Tensor, ds_t: DataStruct, manifold) -> Tensor:
     )
     out[:] = torch.take_along_dim(out, _assign(cost).unsqueeze(-1), dim=1)
     return base
+
+
+def require_lap() -> None:
+    """Raises unless ``torch-linear-assignment`` is installed.
+
+    Raises:
+        RuntimeError: it is not.
+    """
+    if batch_linear_assignment is None:
+        raise RuntimeError("ot_coupling=True requires `torch-linear-assignment` (a pixi dependency). "
+                           "Install it or set model_conf.ot_coupling=False.")
 
 
 # ---- plumbing --------------------------------------------------------------------------------------------------------

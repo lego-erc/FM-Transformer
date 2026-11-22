@@ -26,22 +26,9 @@ import torch
 from torch import Tensor, nn
 from x_transformers import Encoder
 
+from legofmt.geometry.material import lambda_mm, x0_mm
+
 N_FREQ = 8
-
-
-def x0_gcm2(Z: Tensor, A: Tensor) -> Tensor:
-    """Computes the radiation length (Dahl's fit), in g/cm2; the base head uses it too (base/interface.py)."""
-    return 716.4 * A / (Z * (Z + 1) * torch.log(287.0 / torch.sqrt(Z)))
-
-
-def x0_mm(rho: Tensor, Z: Tensor, A: Tensor) -> Tensor:
-    """Computes the radiation length, in mm."""
-    return x0_gcm2(Z, A) / rho * 10.0
-
-
-def lambda_mm(rho: Tensor, A: Tensor) -> Tensor:
-    """Computes the nuclear interaction length, lambda_I ~ 35 A^(1/3) g cm^-2 (PDG approximation), in mm."""
-    return 35.0 * A ** (1.0 / 3.0) / rho * 10.0
 
 
 def layer_features(layers: Tensor) -> Tensor:

@@ -150,9 +150,9 @@ def test_edep_cap_covers_every_gun_species_above_geant4() -> None:
     """GenerateOut caps E_dep at E_in + excess for every gun species, never below the largest excess Geant4 shows
     on the 0.1 MeV plates (n 2.3 MeV: capture; pi+ 70.5, pi- 142.5: the pion mass), so an unbounded neutron or
     pion deposit cannot create energy in a chain."""
-    from legofmt.main.generate import _EDEP_EXCESS_MEV
+    from legofmt.legacy.norm import HAND_SET_EXCESS_MEV
     g4_max = {11: 0.0, -11: 1.022, 22: 0.0, 2212: 0.001, 2112: 2.263, 211: 70.513, -211: 142.498}
-    assert all(_EDEP_EXCESS_MEV.get(pid, -1.0) >= m - 1e-3 for pid, m in g4_max.items())
+    assert all(HAND_SET_EXCESS_MEV.get(pid, -1.0) >= m - 1e-3 for pid, m in g4_max.items())
 
 
 def test_padding_stays_padding(codec) -> None:

@@ -26,19 +26,18 @@ from legofmt.numerics import masked_mean
 _GEOM = GeomTrafos()
 
 KIN_NAMES = ["mom_theta", "mom_phi", "energy", "pos_theta", "pos_phi"]
-_TYPES = (11, -11, 22)
-_TYPE_TAGS = ("em", "ep", "g")
-SUMMARY_FEATURE_NAMES = [
-    f"{tag}_{k}_{stat}"
-    for tag in _TYPE_TAGS
-    for stat in ("mean", "std")
-    for k in KIN_NAMES
-] + ["E_dep"]
-
 # Incoming guns, for the per-primary E_dep split. Superset of any one dataset;
 # species absent from a batch are simply not logged.
 PRIMARY_TAGS = {11: "em", -11: "ep", 22: "g", 2212: "p", 2112: "n",
                 211: "pip", -211: "pim"}
+
+_TYPES = (11, -11, 22)   # the outgoing species the event summary covers
+SUMMARY_FEATURE_NAMES = [
+    f"{PRIMARY_TAGS[pid]}_{k}_{stat}"
+    for pid in _TYPES
+    for stat in ("mean", "std")
+    for k in KIN_NAMES
+] + ["E_dep"]
 
 # Which keys edep_by_primary can emit. Their presence depends on the species and the
 # multiplicities a rank's own shard happens to hold, so they must never be logged with
@@ -113,7 +112,7 @@ def edep_by_primary(edep_real, edep_fake, pdgid_in, n_out) -> dict:
         sel = pdgid_in == pid
         if not bool(sel.any()):
             continue
-        out[f"val/w1_edep/{tag}"] = torch.abs(edep_real[sel].sort().values - edep_fake[sel].sort().values).mean()
+        out[f"val/w1_edep/{tag}"] = w1_per_feature(edep_real[sel], edep_fake[sel])
         multi = sel & (n_out >= 2)
         if int(multi.sum()) >= 32:   # enough events for a mean
             out[f"val/edep_ratio_multi/{tag}"] = edep_fake[multi].mean() / edep_real[multi].mean().clamp(min=1e-8)

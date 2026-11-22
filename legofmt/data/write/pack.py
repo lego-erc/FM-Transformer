@@ -11,7 +11,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from legofmt.data.load.packed import PackedData, loss_mask
+from legofmt.data.load.packed import PackedData
+from legofmt.data.struct import loss_mask
 
 _NAN_TOKEN = torch.full((8,), float("nan"))
 

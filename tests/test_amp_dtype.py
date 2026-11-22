@@ -17,7 +17,7 @@ from __future__ import annotations
 import torch
 
 from legofmt.main.modules import LEGOLtng
-from legofmt.mod_comps.config import _amp_dtype, resolve_legoltng_config
+from legofmt.mod_comps.config import amp_dtype, resolve_legoltng_config
 from test_helpers import _fake_batch, _tiny_config
 
 BF16_STAMP = {"precision": "bf16-mixed, medium"}
@@ -28,7 +28,7 @@ def test_precision_specs_map_to_autocast_dtypes() -> None:
                         (torch.float16, ("16-mixed", "16", "16-true", "16-mixed, high", torch.float16)),
                         (None, ("32", "32, medium", "64", "transformer-engine", "", None, 32, torch.float32))):
         for s in specs:
-            assert _amp_dtype(s) is want, repr(s)
+            assert amp_dtype(s) is want, repr(s)
 
 
 def test_resolved_config_carries_amp_dtype() -> None:

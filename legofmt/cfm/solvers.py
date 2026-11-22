@@ -24,7 +24,7 @@ acting on ``x``. Every step is ``step(field, man, s, t_a, t_b) -> s_b``: ``field
 ``Solvers`` is a mixin rather than a solver object: ``lego_eval`` version-probes it with
 ``hasattr(ltng, "_midpoint_steps")`` / ``hasattr(lego, "log_likelihood")``, so the methods must stay bound on the
 LightningModule. It reads from ``LEGOLtng``: ``model``, ``types_embd``, ``rc``, ``gen_base_wrapper``,
-``_edep_whiten``, ``convert_pdgids``, ``_enter_frame`` / ``_leave_frame``, ``_opt_eval``.
+``_edep_whiten``, ``convert_pdgids``, ``species_idx``, ``_enter_frame`` / ``_leave_frame``, ``_opt_eval``.
 
 Any other ``method`` (flow_matching's ``ODESolver``, e.g. ``dopri5``) is :mod:`legofmt.legacy.solvers`.
 """
@@ -42,11 +42,11 @@ from legofmt.rng import LATENT, normal_like, rng_sub
 from legofmt.data.struct import DataStruct, _F
 
 from legofmt.cfm.project_model import is_compiled, uncompiled
-from legofmt.cfm.state import LatentManifold, State
+from legofmt.cfm.state import LatentManifold, State, moved, no_latent, state_field
 from legofmt.compat import dynamic_shape_attention
 from legofmt.legacy.solvers import odesolver_sample
 
-from legofmt.mod_comps.config import _amp_dtype, resolve_len_buckets
+from legofmt.mod_comps.config import amp_dtype, resolve_len_buckets
 
 
 # ---- one step ----------------------------------------------------------------------------------------------------
@@ -191,13 +191,13 @@ class Solvers:
         """
         step  = _STEPPED[method]
         man   = LatentManifold(self.model.manifold)
-        field = self._state_field(extras, clone=method == "rk4")
+        field = state_field(self.model, extras, clone=method == "rk4")
         gen   = (extras["mask"] == 1).unsqueeze(-1)
-        s     = State(x, _no_latent(x) if z is None else z)
+        s     = State(x, no_latent(x) if z is None else z)
         path  = [s]
         for t_a, t_b in zip(time_grid[:-1], time_grid[1:]):
             s_b = step(field, man, s, t_a, t_b)
-            s   = State(torch.where(gen, s_b.x, s.x), s_b.z)    # only the generated tokens move
+            s   = moved(gen, s, s_b)   # only the generated tokens move
             if return_intermediates:
                 path.append(s)
         return _as_returned(s, path, return_intermediates, latent=z is not None)
@@ -258,9 +258,7 @@ class Solvers:
         if not isinstance(ds_t, DataStruct):
             ds_t = DataStruct(*ds_t)
         self._to_eval()
-        pdgids     = ds_t.f.pdgids
-        pdgids_idx = pdgids.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pdgids)
-        return ds_t, pdgids_idx
+        return ds_t, self.species_idx(ds_t.f.pdgids)
 
     def _ready_to_generate(self) -> dict:
         """Puts the model in eval mode and compiles it once; returns ``odeint_conf``."""
@@ -294,7 +292,7 @@ class Solvers:
         am     = ds_t.am.full.unsqueeze(-1)
         if cfg.get("return_base", False):
             return torch.where(am, self._edep_whiten(base, ds_t, inverse=True), torch.nan), pdgids
-        amp = _amp_dtype(cfg["amp"]) if "amp" in cfg else self.rc.amp_dtype
+        amp = amp_dtype(cfg["amp"]) if "amp" in cfg else self.rc.amp_dtype
         with contextlib.nullcontext() if amp is None else torch.autocast(base.device.type, dtype=amp):
             sols = self._solve_by_length(
                 ds_t, base, rng=rng,
@@ -309,7 +307,7 @@ class Solvers:
         sols = sols.float().masked_fill_(~am, torch.nan)
         filter_pdgid = cfg.get("filter_pdgid")
         if filter_pdgid is not None:
-            pdgids_idx = pdgids.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pdgids)
+            pdgids_idx = self.species_idx(pdgids)
             keep = torch.isin(pdgids_idx, self.convert_pdgids(filter_pdgid)) | (pdgids_idx == 0)
             sols.masked_fill_(~keep, torch.nan)
             pdgids = torch.where(keep, pdgids, 0)
@@ -386,20 +384,6 @@ class Solvers:
             self._edep_latents = z if z.dim() == 2 else z[-1]  # the final state's, with return_intermediates
         return sols
 
-    def _state_field(self, extras: dict, clone: bool = False):
-        """Returns the field on a ``State``, with the batch's keyword inputs ``extras``.
-
-        An empty latent passes through as its own velocity. ``clone`` keeps the velocities alive across CUDA-graph
-        replays (rk4 holds its stages).
-        """
-        def field(s, t, **d):
-            if s.z.shape[-1] == 0:
-                v = (self.model(s.x, t, **d, **extras), s.z)
-            else:
-                v = self.model(s.x, t, z=s.z, **d, **extras)
-            return State(*(a.clone() for a in v)) if clone else State(*v)
-        return field
-
     def _refuse_unsupported_likelihood(self) -> None:
         """Raises for a model whose likelihood ``log_likelihood`` would get wrong."""
         if self.rc.n_lat:
@@ -455,11 +439,6 @@ def _time_grid(time_grid, step_size: float, method: str, reverse: bool, like: Te
     n    = max(round(1.0 / step_size), 1) if method in _STEPPED else 1   # an ODESolver method: the bare [0, 1]
     grid = torch.linspace(0.0, 1.0, n + 1, device=like.device, dtype=like.dtype)
     return grid.flip(0) if reverse else grid
-
-
-def _no_latent(x: Tensor) -> Tensor:
-    """Returns the empty latent (B, 0) of a model without one, which the steps carry along."""
-    return x.new_zeros(len(x), 0)
 
 
 def _as_returned(s: State, path: list, stacked: bool, latent: bool):

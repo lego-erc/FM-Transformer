@@ -193,9 +193,9 @@ class DataPrep:
         first, *rest = cond_scalars()
         values = [per_event[name] for name in (first, "E_dep", *rest)]
         f  = torch.cat((_prefix_tokens(values, like=tokens), tokens), dim=1).nan_to_num()
-        m  = _prepend(m, len(values))
+        m  = F.pad(m, (len(values), 0))
         m[:, 1] = 1   # E_dep
-        am = _prepend(am, len(values), value=True)
+        am = F.pad(am, (len(values), 0), value=True)
         return (f, m, am, per_event["E_dep_layers"]) if "E_dep_layers" in per_event else (f, m, am)
 
     # ---- stored tokens -> the model scale -----------------------------------------------------------------------
@@ -363,11 +363,6 @@ def _prefix_tokens(values: list, like: Tensor) -> Tensor:
     prefix = like.new_tensor([0, 1, 1, 1, 1, 1, 1, 0]).repeat(len(like), len(values), 1)
     prefix[..., 0] = torch.stack([v.flatten() for v in values], dim=1)
     return prefix
-
-
-def _prepend(mask: Tensor, n: int, value=None) -> Tensor:
-    """Returns the (B, L) ``mask`` with ``n`` tokens prepended: ``value``, or 0."""
-    return F.pad(mask, (n, 0), value=value)
 
 
 def _check_margins(margin, species, excess_mev) -> None:

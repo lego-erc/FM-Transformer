@@ -13,8 +13,8 @@ am        (B, L)   True on a real token, False on padding
 
 Where a token sits depends on ``cond_scalars``, so never index the sequence directly: use ``_F`` (the features),
 ``_M`` (a mask) and ``DataStruct`` (a batch). The layout is process-global module state set by ``set_layout``, so
-constructing a model or a loader mutates it. ``with_dirs`` replaces the directions of some tokens, ``vocab_index``
-looks species ids up in a sorted vocabulary.
+constructing a model or a loader mutates it. ``loss_mask`` builds ``m`` from ``am``, ``with_dirs`` replaces the
+directions of some tokens, ``vocab_index`` looks species ids up in a sorted vocabulary.
 """
 
 import torch
@@ -152,6 +152,14 @@ class _M:
     def out_p(self) -> Tensor: return self.full[..., n_prefix() + 1:]
     @property
     def fwd(self) -> Tensor: return self.full[..., n_prefix()] == 0   # of m: the incoming particle is given
+
+
+def loss_mask(am: Tensor, n_prefix: int) -> Tensor:
+    """Builds the loss mask ``m``: ``am`` minus the prefix and incoming tokens, plus the E_dep token (slot 1)."""
+    m = am.long()
+    m[..., :n_prefix + 1] = 0
+    m[..., 1] = 1
+    return m
 
 
 def with_dirs(x: Tensor, tokens: Tensor, mom: Tensor | None = None, pos: Tensor | None = None) -> Tensor:
