@@ -221,13 +221,20 @@ class BaseDist:
 
     # ---- the flow's E_dep token in units of the prior -------------------------
 
-    def _edep_whiten(self, f: Tensor, ds_t: DataStruct, inverse: bool = False) -> Tensor:
+    def _edep_whiten(self, f: Tensor, ds_t: DataStruct, inverse: bool = False, drawn: bool = False) -> Tensor:
         """Whitens the generated E_dep token of ``f`` into units of each event's prior (``inverse``: back to a deposit).
 
         The prior comes from the frozen head on ``ds_t``, so any sub-batch is consistent; the map is
         ``edep_whiten.py``. Returns a copy of ``f``.
+
+        Args:
+            drawn: the base of exactly this batch was just drawn (``gen_base_wrapper``): its prior is on the sampler,
+                the head is not evaluated again.
         """
-        _, mu, sig, _, _, _ = self.base_head_params(ds_t)   # by position: a legacy head returns a plain tuple
+        if drawn:
+            mu, sig = self.gen_base.edep_mu, self.gen_base.edep_sig
+        else:
+            _, mu, sig, _, _, _ = self.base_head_params(ds_t)   # by position: a legacy head returns a plain tuple
         return whiten_edep(f, ds_t.m.edep == 1, mu, sig, self.gen_base.e_dep_max, inverse)
 
 

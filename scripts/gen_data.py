@@ -2,15 +2,14 @@
 
 The events are simulated in chunks, each its own process (Geant4 is seeded from
 std::random_device, so chunks are independent and may run in parallel), and merged once into
-``data_packed.pt`` (the prepped tensors without their padding, see ``legofmt.data.load.packed``;
-``--padded`` writes the padded ``data_prepped.pt`` instead) and ``meta.json`` (the metadata the
-fresh-training config path reads). OUT is the first CLI argument, or ``$LEGO_DATA_DIR`` if none
-is given:
+``data_packed.pt`` (the prepped tensors without their padding, see ``legofmt.data.load.packed``)
+and ``meta.json`` (the metadata the fresh-training config path reads). OUT is the first CLI
+argument, or ``$LEGO_DATA_DIR`` if none is given:
 
-    python gen_data.py [OUT] [--padded]          # all chunks, one after the other, then merge none
+    python gen_data.py [OUT]                     # all chunks, one after the other, then merge none
     python gen_data.py OUT chunk I               # I = 0 .. n_chunks-1 -> OUT/chunks/chunk_I.pt (cut and compacted)
     python gen_data.py OUT merge stats           # outgoing multiplicity, and what each cap would drop
-    python gen_data.py OUT merge MAX_OUT [--padded]   # drop events with > MAX_OUT outgoing (none: keep all), prep, write
+    python gen_data.py OUT merge MAX_OUT         # drop events with > MAX_OUT outgoing (none: keep all), prep, write
 """
 
 import json
@@ -48,8 +47,7 @@ density_space = np.linspace(0.5, 10.0, n_items)
 density = np.tile(density_space, len(materials))
 atomic_number, mass_number, size = np.repeat(np.array(materials).T, n_items, axis=1)
 
-padded = "--padded" in sys.argv[1:]   # the padded data_prepped.pt, for legofmt versions without packed files
-args = [a for a in sys.argv[1:] if a != "--padded"]
+args = sys.argv[1:]
 out_dir = args[0] if args else os.environ.get("LEGO_DATA_DIR", ".")
 os.makedirs(out_dir, exist_ok=True)
 mode, arg = (args[1:3] + [None, None])[:2]
@@ -109,7 +107,7 @@ config = {
 prep = DataPrep(config)
 
 # One chunk in memory at a time (a 20M-event set went past 400 GB at once). DataPrep is per event, so prepping
-# chunk by chunk (packed, or into preallocated padded outputs) gives what one call over all events would.
+# chunk by chunk gives what one call over all events would.
 # mmap for the n_out pass only: it reads just the attention masks. The merge pass reads everything, and on
 # GPFS faulting a whole chunk in through mmap takes ~5x as long as a plain load.
 paths = [f"{out_dir}/chunks/chunk_{i}.pt" for i in range(n_chunks)]
@@ -124,7 +122,7 @@ if arg == "stats":
 cap = int(n_out.max()) if arg == "none" else int(arg)
 keep = n_out <= cap
 L = 1 + int(n_out[keep].max())
-out, i, chunks, excess = None, 0, [], {}
+chunks, excess = [], {}
 for path, kp in zip(paths, keep.split(sizes)):
     pf, pm, pam, padd = torch.load(path, weights_only=False)
     w = L - min(L, pf.shape[1])
@@ -136,25 +134,14 @@ for path, kp in zip(paths, keep.split(sizes)):
     for p, e in DataPrep.edep_excess_max(parts[0]).items():   # per incoming pdgid: the E_dep cap's margin
         excess[p] = max(excess.get(p, 0.0), e)
     n_edep_layers = parts[3].shape[1] if len(parts) > 3 else None
-    if padded:   # (f, m, am[, E_dep_layers])
-        if out is None:
-            out = [t.new_empty((int(keep.sum()),) + t.shape[1:]) for t in parts]
-        for o, t in zip(out, parts):
-            o[i:i + len(t)] = t
-        i += len(parts[0])
-    else:
-        chunks.append(pack(*parts[:3], n_prefix=len(cond_scalars) + 1,
-                           edep_layers=parts[3] if len(parts) > 3 else None))
+    chunks.append(pack(*parts[:3], n_prefix=len(cond_scalars) + 1,
+                       edep_layers=parts[3] if len(parts) > 3 else None))
     del parts
 
-if padded:
-    torch.save(tuple(out), f"{out_dir}/data_prepped.pt")
-    ntokens, pids = out[0].shape[1], out[0][..., -1]
-else:
-    packed = concat(chunks)
-    del chunks
-    torch.save(packed.to_dict(), f"{out_dir}/data_packed.pt")
-    ntokens, pids = packed.L, packed.tokens[:, -1]
+packed = concat(chunks)
+del chunks
+torch.save(packed.to_dict(), f"{out_dir}/data_packed.pt")
+ntokens, pids = packed.L, packed.tokens[:, -1]
 
 pdgids = pids.flatten().nan_to_num().unique()
 pdgids = pdgids[(0 < pdgids.abs()) & (pdgids.abs() < 100000000)].tolist() # filter pdgids
@@ -170,9 +157,9 @@ meta_dict = {
     "cuboid_dim": cuboid_dim,
     "n_edep_layers": n_edep_layers,
     "edep_excess_max_mev": dict(sorted(excess.items())),
+    "format": "packed",
+    "n_events": len(packed),
 }
-if not padded:
-    meta_dict.update(format="packed", n_events=len(packed))
 
 with open(f"{out_dir}/meta.json", "w") as f:
     json.dump(meta_dict, f, ensure_ascii=True, indent=4)

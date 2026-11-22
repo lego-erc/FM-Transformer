@@ -8,7 +8,7 @@ from x_transformers.attend import Attend
 
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
 from legofmt import compat
-from legofmt.mod_comps.config import resolve_legoltng_config, resolve_mult_config
+from legofmt.config import resolve_legoltng_config, resolve_mult_config
 
 from test_helpers import _tiny_config
 

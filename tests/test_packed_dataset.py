@@ -10,7 +10,7 @@ import warnings
 
 import pytest
 import torch
-from torch.utils.data import random_split
+from legofmt.data.load.loader import split_val
 
 from test_helpers import packed_prep, write_two_dirs
 from legofmt.data.load.packed import load_dataset
@@ -73,8 +73,7 @@ def test_stale_packed_file_is_refused(two_dirs) -> None:
 
 def test_subset_chain(two_dirs) -> None:
     pad, pk, _ = two_dirs
-    subs = [random_split(load_dataset(str(d), prep=packed_prep()), [4, 2],
-                         generator=torch.Generator().manual_seed(0)) for d in (pad, pk)]
+    subs = [split_val(load_dataset(str(d), prep=packed_prep()), {"val_frac": 0.34}) for d in (pad, pk)]
     for (ta, va), (tb, vb) in [subs]:
         _same(ta[[0, 3, 1]], tb[[0, 3, 1]])
         _same(va[[1, 0]], vb[[1, 0]])

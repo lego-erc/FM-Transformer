@@ -135,9 +135,9 @@ outgoing set), which needs a `train_inverse` multiplicity checkpoint.
 
 Each prepared dataset is a folder containing:
 
-- `data_prepped.pt` — the tuple `(f, m, am)` of `DataStruct`, plus a fourth tensor `edep_layers` (per-layer E_dep)
-  when the raw data has one. The two `max_energy`-dependent channels (incoming energy scalar, `E_dep`) are stored in
-  MeV and normalised at load time by `DataPrep.norm_e`.
+- `data_packed.pt` — the tensors `(f, m, am)` of `DataStruct` without their padding (`legofmt/data/load/packed.py`),
+  plus `edep_layers` (per-layer E_dep) when the raw data has one. The two `max_energy`-dependent channels (incoming
+  energy scalar, `E_dep`) are stored in MeV and normalised at load time by `DataPrep.norm_e`.
 - `meta.json` — `ntokens`, `particles` (sorted outgoing PDG-ids), `particles_in` (incoming PDG-ids the multiplicity
   model knows), `max_energy`, `cutoff_mev`, `cond_scalars`, `energy_kin`, `cuboid_dim`, `n_edep_layers` and
   `edep_excess_max_mev` (per incoming PDG-id, the largest `E_dep - E_in`: the `edep_margin` margin).
@@ -206,7 +206,7 @@ Any key not listed defaults to the value shown in the source.
 
 | Key | Default | Effect |
 |---|---|---|
-| `lds_args.data` | — | Folder with `data_prepped.pt` + `meta.json` (fresh training requires the folder; `load_dataset` also loads a bare `.pt` path). |
+| `lds_args.data` | — | Folder with `data_packed.pt` + `meta.json` (fresh training requires the folder; `load_dataset` also loads a bare `.pt` path). |
 | `lds_args.cutoff_mev` | from `meta.json` | Lower bound of the energy normalisation (`log(E/cutoff)/log(max_energy/cutoff)`); the file's value wins. The cut itself is applied at prep time (kinetic energy when `energy_kin`, else `\|p\|`, incoming token included). |
 | `lds_args.min_particles` | `0` | Prep time (raw-dict path): drop events with fewer valid outgoing particles. |
 | `lds_args.frac` | `1.0` | Keep a seeded random fraction of the events. |
@@ -214,16 +214,16 @@ Any key not listed defaults to the value shown in the source.
 | `bs` | `2**12` | Batch size. |
 | `num_workers` | `4` | `DataLoader` workers (uses `fork` start method if >0). |
 | `seed` | `run.data_seed`, else Lightning's global seed, else `0` | Shuffle seed, identical on every DDP rank (`loader_seed`). |
-| `len_buckets`, `len_mode`, `len_split`, `len_max_tokens` | `None`, `"split"`, `8`, `None` | Length buckets (`"auto"` = powers of two): run each batch (`"group"`: one bucket per batch, `len_max_tokens` events x length per batch) or each sorted piece of it (`"split"`, `len_split` pieces) at its bucket's padded length. |
+| `len_buckets`, `len_mode`, `len_split`, `len_max_tokens` | `None`, `"split"`, `8`, `None` | Length buckets (`"auto"` = four lengths per octave from 8 on: 8, 10, 12, 14, 16, 20, ...; a list is taken as given): run each batch (`"group"`: one bucket per batch, `len_max_tokens` events x length per batch) or each sorted piece of it (`"split"`, `len_split` pieces) at its bucket's padded length. With `"auto"` in `"group"` mode, a bucket the dataset fills fewer than 16 batches an epoch with is merged into a longer one (`loader.merge_sparse`): left alone, the longest events would never fill a batch. |
 
 ### `val_conf` — validation split
 
-`LEGOLtng.setup` / `MultModel.setup` carve a held-out split off the loaded training set via `random_split`.
+`LEGOLtng.setup` / `MultModel.setup` carve a held-out split off the loaded training set (`loader.split_val`: two index views, the events `random_split` would pick).
 
 | Key | Default | Effect |
 |---|---|---|
 | `val_frac` | `0.01` | Fraction of the dataset held out for validation (at least 1 event). |
-| `seed` | `0` | Seed for the `random_split` generator — reproducible train/val partition. |
+| `seed` | `0` | Seed of the split's permutation — reproducible train/val partition. |
 | `count_floor` | `0.005` | `MultModel` only: species with a lower mean count are left out of `val/count_mae`. |
 
 ### `base_conf` — flow base distribution
@@ -296,6 +296,7 @@ Top-level FM options:
 | `step_cond` | `False` | Also embed the step size `d` (zero-init gain), required by `one_step_euler_fac > 0`; needs `time_cond`. |
 | `grad_ckpt` | `False` | Activation checkpointing per attention block. |
 | `geom_encoder` | `None` | Layered-stack conditioning: `{layers: [[thickness mm, density, Z, A], ...] (beam side first), repeat: 1, tokens: 4, dim: 128, depth: 3, heads: 4, hide_scalars: true}`. A small bidirectional transformer over one token per layer (plus X0 / lambda_I thicknesses and Fourier features of the cumulative depth) prepends `tokens` summary tokens in `h_dim` to the sequence (conditioning tokens, dropped before the output projection; zero-init read-out). `hide_scalars` masks the composite Density / Z / A / Size rows out of the flow's attention (they stay in the data for the base head and the count model). One stack per model for now (`legofmt/cfm/geom_encoder.py`). |
+| `cond_pool` | `False` | The cond scalars reach the field as one token instead of one each (`legofmt/cfm/cond_pool.py`): `rho(sum_k phi([z_k, onehot_k]))` over their standardised values, the mean and std taken from the training data at `setup` and saved with the field. Their own tokens leave the sequence the encoder runs (3 fewer per event with four scalars); the token layout of the data does not change, so `len_max_tokens` still counts data tokens. Needs retraining; not with `geom_encoder`, `time_cond: false` or reflow. |
 
 All remaining `model_args` keys flow into `x-transformers` `Encoder`, e.g.
 `use_adaptive_rmsnorm`, `use_adaptive_layerscale`, `residual_attn`, `ff_swish`,
@@ -371,13 +372,14 @@ Used by `LEGOLtng.forward` / `LEGOLtng.solve`:
 | `step_size` | `0.04` | ODE step: `round(1/step_size)` equal steps. |
 | `time_grid` | `None` | Explicit grid (list or tensor), used as given. |
 | `amp` | `additional.precision` | Autocast dtype of the solve (`"bf16"`, `"32"`, ...). |
-| `len_buckets`, `compile_buckets` | `None` | Solve events grouped by length at their bucket's padded length (a list, or `"auto"`: powers of two; `max_seq_l` is always one); pad chunk row counts to `compile_buckets` sizes so a compiled field sees few shapes. |
+| `len_buckets` | `"auto"` | Solve events grouped by length at their bucket's padded length. `"auto"`: the buckets of `dl_conf.len_buckets: auto`, neighbours run as one group wherever a solve of their own would cost more than their padding (`solvers.cheapest_groups`); a list: taken as given (`max_seq_l` is always one); `null`: one solve at full length. |
+| `compile_buckets` | `None` | Pad chunk row counts to these sizes, so a field compiled per shape (`compile_dynamic: false`) sees few of them. |
 | `sym_rand` | `False` | With `canon_sym`: random in-face symmetry at generation even without `sym_aug`. |
 | `split_size` | `None` | Chunk the batch dim when solving to bound memory. |
 | `return_timesteps` | `False` | Return the state at every time-grid point (initial state included). |
 | `return_base` | `False` | Skip the solve and return the sampled base directly. |
-| `fwd_compile` | `False` | `torch.compile(model, mode="reduce-overhead")` once on first forward (no CUDA graphs under `compile_dynamic` without `compile_buckets`). |
-| `compile_dynamic` | `False` | With `fwd_compile`: one symbolic-shape graph instead of one per (length bucket, row count). Patches x-transformers' shape-specialising `einx.where` (`compat.dynamic_shape_attention`), hands the field contiguous inputs and tiles 1-row chunks (dynamo would recompile on either). Slab chain: 2 graphs for the W/Si pair instead of 28, ~1 min of compile instead of ~5. |
+| `fwd_compile` | `False` | `torch.compile(model)` once on first forward. |
+| `compile_dynamic` | `True` | With `fwd_compile`: one symbolic-shape graph. `false`: one graph per (length bucket, row count) with `mode="reduce-overhead"`, which recompiles for every new row count (~10 s each; bound them with `compile_buckets`, which also gives the dynamic graph CUDA graphs). The dynamic graph patches x-transformers' shape-specialising `einx.where` (`compat.dynamic_shape_attention`), hands the field contiguous inputs and tiles 1-row chunks (dynamo would recompile on either). Slab chain: 2 graphs for the W/Si pair instead of 28, ~1 min of compile instead of ~5. |
 | `filter_pdgid` | `None` | Tensor of PDG-ids to retain: other outgoing slots are NaN-ed and their pdgid set to 0 (pads are kept). Set by `GenerateOut(couple_in_out_pdgids=True)`. |
 | `energy_balance` | `False` | `GenerateOut` only. Keep the generated E_dep and close the kinetic balance `E_in = E_dep + sum E_out + 1.022 (n_e+ out - n_e+ in)` per event: e+-/gamma in rescale every outgoing energy (an absorbed one deposits the budget), a hadron survivor (the leading particle is the incoming species with > 90% of E_in, or only gammas / e+- come out beside it) takes the remainder, nuclear interactions are left alone. Only for data whose own balance closes (0.1 MeV-cutoff plates; a 10 MeV cutoff loses ~7% below it). Set per model via lego_eval's `odeint` override. |
 | `exit_consistency` | `False` | `GenerateOut` only. Mirror the momentum component of an outgoing particle that points into the face its exit position is on. Position and direction are separate channels, so the flow can emit one leaving +z while moving -z (Geant4 never does); a slab chain hands it to the next slab moving away from it, which the count model answers with spurious species. |
@@ -401,18 +403,19 @@ default `odeint_conf.amp`) and `x_transformers_version` (the qk-norm scale above
 | `legofmt/cfm/cfm_trafo_x.py`, `legofmt/cfm/event_cond.py` | `CFMTrafo_x`: vector field. Per-(mask, type, pdgid) conditional linear embedding, `x-transformers` Encoder conditioned on sinusoidal `t` (and `d`) embeddings, mirrored output projection; the per-event form of that condition for the adaptive norms. Superseded options (`time_cond: false`, per-token times, `dim_in_out`, `grad_ckpt`) are in `legofmt/legacy/cfm_trafo_x.py`. |
 | `legofmt/cfm/project_model.py`, `legofmt/cfm/solvers.py`, `legofmt/cfm/path_sampler.py` | `ProjectModel` keeps state/velocity on the manifold; `Solvers` mixin (`solve`, hand-unrolled euler / midpoint / rk4 steps, `log_likelihood`, `forward`); `ProductPathSampler` (the CondOT geodesic per factor, closed form). Any other solver `method` runs through flow_matching's `ODESolver` (`legofmt/legacy/solvers.py`). `legofmt/cfm/state.py`: `State(x, z)`, the tokens and the optional `edep_ae` latent as one value the solver steps and the flow-map loss compute with, and `LatentManifold`. |
 | `legofmt/cfm/edep_ae.py`, `legofmt/cfm/geom_encoder.py` | `EdepLayerAE`, the per-layer E_dep autoencoder (`model_conf.edep_ae`); `GeomEncoder`, the layered-stack summary tokens (`model_args.geom_encoder`). |
+| `legofmt/cfm/cond_pool.py` | `CondPool`, the set encoder that pools the cond scalars into one token (`model_args.cond_pool`). |
 | `legofmt/main/modules.py` | `LEGOLtng`: construction, the token maps the mixins share (`convert_pdgids`, `_canon_dirs`, `_zoom_dirs`), Lightning hooks. Behaviour lives in the mixins `TrainStep` / `BaseDist` / `Solvers`. |
 | `legofmt/main/train_step.py` | The loss as functions (`sd3_time`, `loss_cells`, `kendall_total`) and `TrainStep`, the step that computes it (flow frame, path, flow-map term). Superseded: inverse-mask events (`mask_conf.p_forward < 1`), `t_dist: sm_norm`, `t_dist_shift`, reflow (`legofmt/legacy/train_step.py`). |
 | `legofmt/main/generate.py` | `GenerateOut`: chain `MultModel` + `LEGOLtng` for end-to-end sampling; counts -> slots (`fit_counts`, `slot_species`) -> the flow's tokens. Superseded: `energy_balance`, `exit_consistency`, `GenerateIn` (`legofmt/legacy/generate.py`). |
 | `legofmt/base/` | The flow's base distribution: its three distributions (`base_dists.py`), the sampler `GenerateBase` (`gen_base.py`), the per-event base head and its likelihood fit (`nn.py`, `nn_fit.py`), the `BaseDist` mixin (`interface.py`), the E_dep token's unit (`edep_whiten.py`) and OT coupling (`ot_coupling.py`). Superseded options (`iso` / `iso_pos`, other `scale_dist`, the moment head) are in `legofmt/legacy/`. |
 | `legofmt/cfm/flow_map.py` | Flow-map self-distillation loss. Superseded: the reflow teacher and the one-step `LEGOLtngDirect` / `GenerateOutDirect` models (`legofmt/legacy/reflow.py`). |
-| `legofmt/mod_comps/config.py`, `legofmt/mod_comps/optimizers.py` | Config resolution (`Resolved*Config`, manifold building, version stamps) and the optimizer registry (`BatchedMuon`, `"schedulefree"`, `"warmup_cosine"`). Superseded: schedule-free AdamW and its train/eval switch (`legofmt/legacy/optimizers.py`). |
+| `legofmt/config.py`, `legofmt/optimizers.py` | Config resolution (`Resolved*Config`, manifold building, version stamps) and the optimizer registry (`BatchedMuon`, `"schedulefree"`, `"warmup_cosine"`). Superseded: schedule-free AdamW and its train/eval switch (`legofmt/legacy/optimizers.py`). |
 | `legofmt/multiplicity/model.py` | `MultModel`: autoregressive Decoder over PDG-id slots producing per-type particle counts, with the pass-through head on the trunk; `MultLoader`, its dataset. Superseded: `InvModel`, the residual and `in_embd` pass-through heads (`legofmt/legacy/mult_model.py`). |
 | `legofmt/data/write/` | Raw particles → a dataset file (`scripts/gen_data.py`). `cut.py`: `GetLEGOData`, energy cutoff, compaction and NaN padding. `norm.py`: `DataPrep`, energy normalisation, `CubeTrace` ray projection, `manifold.projx`, the per-event scalar tokens, `norm_e`, and the E_dep token's scales (log scale, margin token). `pack.py`: `pack` / `concat`, padded tensors → `PackedData`. Superseded: the linear E_dep scale and hand-set margins (`legofmt/legacy/norm.py`), `energy_kin: false`, `proj_ray: false`. |
 | `legofmt/data/load/` | A dataset file → batches (training). `packed.py`: `PackedData`, the dataset without padding, read a batch of indices at a time as a `DataStruct`; `load_dataset`, which reads it from its file; `interacting_only`, the view without pass-through events. `loader.py`: the length-bucket batch sampler, `event_lengths` and `make_loader`. Superseded: padded tensors and raw dicts as dataset inputs (`legofmt/legacy/dataset.py`, `PaddedData`), `make_loader`'s per-item path. |
 | `legofmt/data/struct.py` | The token layout: `DataStruct(f, m, am)`, the `_F` / `_M` views, and the process-global `set_layout`. |
 | `legofmt/geometry/*` | `ProductManifold`, `GeomTrafos` (direction sampling, cartesian↔spherical, `to_cuboid`), `CubeTrace`, `EnergyProjections`, `CubeSymmetry`. |
-| `legofmt/log_metrics/val_metrics.py` | `ShowerValMetrics`: MMD and per-feature W1 on particle kinematics and event summaries (vendored from `lego-eval`). |
+| `legofmt/main/val_metrics.py` | `ShowerValMetrics`: MMD and per-feature W1 on particle kinematics and event summaries (vendored from `lego-eval`). |
 | `legofmt/compat.py` | Loading older checkpoints: parameter renames, qk-norm scale, fp32 attention, legacy manifold strings; the dynamic-shape attention patch. |
 | `legofmt/viz/*` | Corner plots and cube plots (not used at train time). |
 | `scripts/` | `train.py`, `preflight.py`, `submit_slrm.sh`, `gen_data.py` (Geant4 via `pyg4lego`), `train_edep_ae.py`. |

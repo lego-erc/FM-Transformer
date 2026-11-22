@@ -12,7 +12,7 @@ Legacy*      legofmt/legacy/       superseded paths, each reached by one dispatc
 This file builds the parts, holds the token maps the mixins share (``convert_pdgids``: raw pdgid -> vocabulary
 index, ``species_idx``: the same for tokens that may already hold indices; ``_enter_frame`` / ``_leave_frame``: into
 and out of the frame the flow works in, built from ``_canon_dirs``, the canonical cube frame, and ``_zoom_dirs``, the
-zoomed polar angle) and the Lightning hooks. The config is checked where it is resolved (``mod_comps/config.py``).
+zoomed polar angle) and the Lightning hooks. The config is checked where it is resolved (``legofmt/config.py``).
 """
 
 import torch
@@ -38,7 +38,7 @@ from legofmt.main.train_step import TrainStep
 
 from legofmt.data.load.packed import interacting_only, load_dataset
 from legofmt.data.load.loader import (
-    LengthBucketBatchSampler, event_lengths, loader_seed, make_loader, smallest_bucket, split_val,
+    AUTO_MIN_BATCHES, LengthBucketBatchSampler, event_lengths, loader_seed, make_loader, smallest_bucket, split_val,
 )
 from legofmt.data.struct import DataStruct, _F, vocab_index, with_dirs
 from legofmt.data.write.norm import DataPrep
@@ -48,10 +48,10 @@ from legofmt.geometry.geom_trafos import zoom_polar
 from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.geometry.symmetry_projections import CubeSymmetry
 
-from legofmt.mod_comps.config import resolve_legoltng_config
-from legofmt.mod_comps.optimizers import build_optimizer
+from legofmt.config import resolve_legoltng_config
+from legofmt.optimizers import build_optimizer
 
-from legofmt.log_metrics.val_metrics import ShowerValMetrics
+from legofmt.main.val_metrics import ShowerValMetrics
 from legofmt.rng import SYM_FLOW, randint_like
 
 
@@ -220,6 +220,9 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
         if getattr(self, "_val_ds", None) is not None:
             return
         full = load_dataset(**self.rc.dl_conf["lds_args"], prep=DataPrep(self.rc.config))
+        pool = self.model.vf.cond_pool
+        if pool is not None and self.rc.state_dict is None:   # a fresh field: its scalars on this dataset's scale
+            pool.standardise_by(torch.stack([full.cond(name) for name in self.rc.cond_scalars], dim=-1))
         if self.rc.config.get("model_conf", {}).get("exclude_passthrough", False):
             full = interacting_only(full)
         self._train_ds, self._val_ds = split_val(full, self.rc.val_conf)
@@ -296,6 +299,7 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
             seed=loader_seed(self.rc.dl_conf),
             rank=t.global_rank if t is not None else 0, world_size=t.world_size if t is not None else 1,
             max_tokens=self.rc.len_max_tokens,
+            min_batches=AUTO_MIN_BATCHES if self.rc.dl_conf.get("len_buckets") == "auto" else 0,
         )
 
     def _make_loader(self, dataset, *, shuffle: bool, bs: int | None = None, batch_sampler=None) -> DataLoader:

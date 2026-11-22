@@ -31,7 +31,7 @@ from legofmt.data.struct import DataStruct, _F
 from legofmt.numerics import held, masked_mean
 
 from legofmt.cfm.flow_map import one_step_euler_loss
-from legofmt.log_metrics.val_metrics import UNSYNCED_PREFIXES
+from legofmt.main.val_metrics import UNSYNCED_PREFIXES
 
 def sd3_time(u, s):
     """Returns SD3's mode-sampled time for ``u ~ U(0, 1)`` and scale ``s``; ``s = 0`` is uniform."""
@@ -105,7 +105,8 @@ class TrainStep:
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
             t = self._sample_t(ds_t)
             if self.reflow_teacher is not None: ds_t = self._reflow_coupling(ds_t, base)   # legacy: reflow
-            ds_t = DataStruct(self._edep_whiten(ds_t.f.full, ds_t), ds_t.m.full, ds_t.am.full)   # base's E_dep unit
+            f    = self._edep_whiten(ds_t.f.full, ds_t, drawn=True)   # base's E_dep unit, by the prior drawn above
+            ds_t = DataStruct(f, ds_t.m.full, ds_t.am.full)
             path = self.ps.sample(base, ds_t.f.model_in, t)
             z_t, dz = (None, None) if z is None else latent_path(*z, path.t)
 

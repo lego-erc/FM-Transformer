@@ -43,6 +43,14 @@ def test_fired_events_emit_the_primary_unchanged_and_deposit_nothing(generator: 
     assert first[:, -1].eq(22).all()                        # same species
 
 
+def test_count_model_is_in_eval_mode_from_construction(tmp_path) -> None:
+    """Left in training mode, the first call decided the pass-through with dropout on."""
+    cfg = _pt_mult_config(passthrough_head=True)
+    cfg["mm_conf"]["dropout"] = 0.5
+    gen = GenerateOut(str(_save_flow_ckpt(tmp_path)), str(_save_mult_ckpt(tmp_path, cfg)), device="cpu")
+    assert not gen.gen_mult.training
+
+
 def test_a_charged_primary_never_fires(generator: GenerateOut) -> None:
     _force(generator, 50.0)
     _, mask, _ = generator(_gun_cond(2212, batch=6))

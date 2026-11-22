@@ -13,10 +13,10 @@ import pytest
 import torch
 from torch.utils.data import DistributedSampler
 
-from legofmt.data.load.loader import LengthBucketBatchSampler
+from legofmt.data.load.loader import LengthBucketBatchSampler, merge_sparse
 from legofmt.data.struct import DataStruct
 from legofmt.main.modules import LEGOLtng
-from legofmt.mod_comps.config import resolve_legoltng_config, resolve_len_buckets
+from legofmt.config import resolve_legoltng_config, resolve_len_buckets
 from legofmt.multiplicity.model import MultModel
 
 from test_helpers import _fake_batch, _mult_config, _tiny_config
@@ -37,12 +37,12 @@ def _muon_cosine() -> dict:
     return {"opt": "muon", "lr": 1e-3, "scheduler": {"cls": "warmup_cosine", "total_steps": 1000, "warmup_frac": 0.1}}
 
 
-def _ragged_batch(n_out=N_OUT, edep_generated: bool = False) -> DataStruct:
+def _ragged_batch(n_out=N_OUT, edep_generated: bool = False, L: int = L_MAX) -> DataStruct:
     """``_fake_batch`` at ``L_MAX`` with event i keeping only ``n_out[i]`` outgoing
     particles: compacted to the front, the rest padding (``m = 0``, ``am = False``).
     Padding tokens hold finite on-manifold filler and pdgid 0, like ``DataPrep``'s
     ``nan_to_num(1)`` tokens; zeros would project to NaN, and NaN * 0 survives a mask."""
-    ds = _fake_batch(B=len(n_out), L=L_MAX, edep_generated=edep_generated)
+    ds = _fake_batch(B=len(n_out), L=L, edep_generated=edep_generated)
     f, m, am = ds.f.full.clone(), ds.m.full.clone(), ds.am.full.clone()
     for i, n in enumerate(n_out):
         f[i, 3 + n:] = f[i, 3]
@@ -82,9 +82,9 @@ def test_velocity_is_unchanged_by_trimming_the_padding() -> None:
 
 # ---------------------------------------------------------------- configuration
 
-def test_auto_buckets_are_powers_of_two_up_to_max_seq_l() -> None:
-    assert resolve_len_buckets("auto", 134) == (8, 16, 32, 64, 128, 134)
-    assert resolve_len_buckets("auto", 28) == (8, 16, 28)
+def test_auto_buckets_are_four_per_octave_up_to_max_seq_l() -> None:
+    assert resolve_len_buckets("auto", 134) == (8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128, 134)
+    assert resolve_len_buckets("auto", 28) == (8, 10, 12, 14, 16, 20, 24, 28)
     assert resolve_len_buckets("auto", 8) == (8,)
 
 
@@ -96,14 +96,13 @@ def test_explicit_buckets_are_sorted_capped_and_end_at_max_seq_l() -> None:
 
 def test_config_without_len_keys_resolves_to_off() -> None:
     rc = resolve_legoltng_config(_config())
-    assert rc.len_buckets is None and rc.gen_len_buckets is None
+    assert rc.len_buckets is None
 
 
 def test_config_resolves_len_keys() -> None:
     rc = resolve_legoltng_config(_config(dl={"len_buckets": "auto", "len_split": 2},
                                          odeint={"len_buckets": [4, 6]}))
     assert rc.len_buckets == (8,) and rc.len_mode == "split" and rc.len_split == 2
-    assert rc.gen_len_buckets == (4, 6, 8)
 
 
 @pytest.mark.parametrize("dl, match", [({"len_mode": "pack"}, "len_mode"), ({"len_split": 4}, "len_split")],
@@ -242,6 +241,43 @@ def test_bucketed_generation_matches_unbucketed(timesteps: bool) -> None:
         torch.testing.assert_close(a, b, rtol=1e-5, atol=1e-6, equal_nan=True)
 
 
+def test_cheapest_groups_minimise_tokens_plus_a_cost_per_solve() -> None:
+    from itertools import combinations
+    from legofmt.cfm.solvers import cheapest_groups
+    buckets = torch.tensor([8, 10, 12, 14, 16, 20])
+    assert cheapest_groups(torch.tensor([100, 100]), buckets[:2], 0).tolist() == [0, 1]
+    assert cheapest_groups(torch.tensor([100, 100]), buckets[:2], 10 ** 6).tolist() == [1]
+    assert cheapest_groups(torch.tensor([1000, 1, 1000]), buckets[:3], 1000).tolist() == [0, 2]
+    gen = torch.Generator().manual_seed(0)
+    for _ in range(20):                                 # against every grouping of 6 buckets
+        counts = torch.randint(1, 400, (6,), generator=gen)
+        cum = [0] + counts.cumsum(0).tolist()
+        def cost(tops):
+            return sum(500 + int(buckets[j]) * (cum[j + 1] - cum[i]) for i, j in zip([0] + [t + 1 for t in tops], tops))
+        every = [list(c) + [5] for r in range(6) for c in combinations(range(5), r)]
+        assert cost(cheapest_groups(counts, buckets, 500).tolist()) == min(map(cost, every))
+
+
+@pytest.mark.parametrize("odeint, n_out, lengths", [
+    ({}, N_OUT, {8}),                                   # all events fit the bucket of 8
+    ({"len_buckets": None}, N_OUT, {16}),
+    ({}, N_OUT + (13,), {8, 16}),                       # 6 events at 8 instead of 16 tokens: worth a solve
+    ({}, (1, 2, 13), {16}),                             # 2 events: not worth one, they run with the long event
+    ({"len_buckets": [8]}, (1, 2, 13), {8, 16}),        # a list is taken as given
+], ids=["default", "off", "worth_a_solve", "not_worth_a_solve", "list"])
+def test_generation_buckets_by_length_unless_switched_off(monkeypatch, odeint, n_out, lengths) -> None:
+    """``odeint_conf.len_buckets`` absent means ``auto``: unbucketed, 85 % of what the field runs is padding."""
+    import legofmt.cfm.solvers as solvers
+    monkeypatch.setattr(solvers, "SOLVE_COST", 32, raising=False)
+    cfg = _tiny_config({"max_seq_l": 16, "ntypes": 16, "step_cond": False})
+    cfg["config"]["odeint_conf"] = {"method": "euler", "step_size": 0.25, **odeint}
+    model = _model(cfg)
+    seen = set()
+    model.model.register_forward_pre_hook(lambda mod, args: seen.add(args[0].shape[1]))
+    out = model(_ragged_batch(n_out, L=16))
+    assert seen == lengths and out[0].shape[:2] == (len(n_out), 16)
+
+
 def test_generation_buckets_set_after_construction_take_effect() -> None:
     """lego_eval's per-model `odeint` override writes into rc.odeint_conf after the model is built; a `len_buckets`
     there must bucket generation too (a slab chain pads every call to max_seq_l = 134 for ~7 real tokens)."""
@@ -254,18 +290,64 @@ def test_generation_buckets_set_after_construction_take_effect() -> None:
 
 
 def test_compile_limit_counts_buckets_set_after_construction(monkeypatch) -> None:
-    """Every (length bucket, row bucket) pair is its own graph; past dynamo's recompile_limit the solve silently runs
-    eager. The limit must be raised for buckets that came from lego_eval's odeint override as well."""
+    """In a static compile every (length bucket, row bucket) pair is its own graph; past dynamo's recompile_limit the
+    solve silently runs eager. The limit must be raised for buckets that came from lego_eval's odeint override as well."""
+    static = dict(fwd_compile=True, compile_dynamic=False, compile_buckets=[2, 4, 8])
     model = _model(_config(odeint={"method": "euler", "step_size": 0.25}))
-    model.rc.odeint_conf.update(len_buckets=[4, 6], fwd_compile=True, compile_buckets=[2, 4, 8])
+    model.rc.odeint_conf.update(len_buckets=[4, 6], **static)
     monkeypatch.setattr(torch, "compile", lambda m, **k: m)
     monkeypatch.setattr(torch._dynamo.config, "recompile_limit", 8)
     model(_ragged_batch())
     assert torch._dynamo.config.recompile_limit >= 3 * 3 + 8
     other = _model(_config(odeint={"method": "euler", "step_size": 0.25}))     # a second plate model shares the frame
-    other.rc.odeint_conf.update(len_buckets=[4], fwd_compile=True, compile_buckets=[2, 4, 8])
+    other.rc.odeint_conf.update(len_buckets=[4], **static)
     other(_ragged_batch())
     assert torch._dynamo.config.recompile_limit >= 3 * 3 + 2 * 3 + 8
+
+
+@pytest.mark.parametrize("counts, need, to", [
+    ([10, 10, 3, 1], 4, [0, 1, 3, 3]),      # the longest bucket takes the one below it
+    ([1, 10, 10], 4, [1, 1, 2]),            # the shortest has none below: it joins the one above
+    ([2, 0, 5, 1, 0], 4, [3, 1, 3, 3, 4]),  # a group is named after its longest bucket in use
+    ([1, 1, 1], 4, [2, 2, 2]),              # too few events for any bucket: one batch pool
+    ([3, 0, 1], 0, [0, 1, 2]),              # nothing needed: buckets as given
+], ids=["long_end", "short_end", "empty", "all_sparse", "off"])
+def test_merge_sparse_fills_every_bucket_in_use(counts, need, to) -> None:
+    counts = torch.tensor(counts)
+    out = merge_sparse(counts, torch.full_like(counts, need))
+    assert out.tolist() == to
+    held = torch.zeros_like(counts).index_add_(0, out, counts)
+    assert need == 0 or counts.sum() < need or bool((held[held > 0] >= need).all())
+
+
+def test_group_sampler_merges_buckets_too_sparse_for_min_batches() -> None:
+    """Finer buckets leave the longest events short of a batch: skipped, they would never be trained on."""
+    lengths = torch.tensor([4] * 16 + [6] * 9 + [8] * 3)
+    sampler = LengthBucketBatchSampler(lengths, (4, 6, 8), bs=4, seed=0, min_batches=2)
+    batches = list(sampler)
+    assert len(batches) == len(sampler) == 4 + 3                     # bucket 4 alone; 6 and 8 as one
+    assert sorted(i for b in batches for i in b) == list(range(28))  # every event shown
+    assert all(len({int(lengths[i]) <= 4 for i in b}) == 1 for b in batches)
+
+
+@pytest.mark.parametrize("spec, counts", [("auto", [200, 0, 0, 0, 203]), ([8, 10, 12, 14], [200, 200, 0, 0, 3])],
+                         ids=["auto", "list"])
+def test_auto_buckets_are_fitted_to_the_dataset(spec, counts) -> None:
+    """``auto`` merges the buckets the dataset leaves sparse; a list is taken as given."""
+    cfg = _tiny_config({"max_seq_l": 16, "ntypes": 16, "step_cond": False})
+    cfg["config"]["dl_conf"].update(bs=6, len_buckets=spec, len_mode="group")
+    model = LEGOLtng(cfg)
+    model._train_ds = SimpleNamespace(lengths=torch.tensor([8] * 200 + [10] * 200 + [16] * 3))
+    assert model._bucket_sampler().counts.tolist() == counts
+
+
+def test_group_sampler_lists_one_batch_at_a_time() -> None:
+    """An epoch listed up front is 16M Python ints for the Ar cube, every epoch."""
+    import inspect
+    sampler = LengthBucketBatchSampler(torch.tensor([4] * 8 + [8] * 8), (4, 8), bs=4, seed=0)
+    assert inspect.isgenerator(iter(sampler))
+    batches = list(sampler)
+    assert all(isinstance(b, list) for b in batches) and sorted(i for b in batches for i in b) == list(range(16))
 
 
 def test_group_sampler_skips_a_bucket_smaller_than_a_batch() -> None:

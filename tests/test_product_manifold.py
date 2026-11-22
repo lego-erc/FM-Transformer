@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from flow_matching.utils.manifolds import Sphere
 
 from legofmt.geometry.product_manifold import sphere_expmap
-from legofmt.mod_comps.config import build_manifold
+from legofmt.config import build_manifold
 
 
 def _sphere_points(B: int = 16) -> tuple[torch.Tensor, torch.Tensor]:

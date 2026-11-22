@@ -6,7 +6,7 @@ import pytest
 import torch
 from pytorch_optimizer import Muon
 
-from legofmt.mod_comps.optimizers import BatchedMuon, muon_factory
+from legofmt.optimizers import BatchedMuon, muon_factory
 
 KW = dict(lr=1e-3, momentum=0.95, nesterov=True, ns_steps=5, weight_decay=7e-3, weight_decouple=True,
           adamw_lr=3e-3, adamw_betas=(0.9, 0.999), adamw_wd=1e-2, adamw_eps=1e-8)

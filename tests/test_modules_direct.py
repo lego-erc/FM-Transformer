@@ -428,7 +428,7 @@ def test_uncert_zero_init_matches_unweighted() -> None:
 def test_uncert_param_is_1d_so_muon_skips_it() -> None:
     """muon_factory routes ndim>=2 to Muon, whose Newton-Schulz step discards
     magnitude -- fatal for a log-variance. Keep lv 1-D."""
-    from legofmt.mod_comps.optimizers import muon_factory
+    from legofmt.optimizers import muon_factory
 
     model = LEGOLtngVelocity(_tiny_config(learned_loss_weights=True))
     assert model.lv.ndim == 1 and model.lv.numel() == 3
@@ -504,7 +504,7 @@ def test_legacy_loss_weight_keys_migrate() -> None:
     """A pre-2026-09 checkpoint carries uncert_* keys and a bins*3 lv table. The keys
     are rewritten and the table collapses onto the three per-channel cells through the
     mean of its variances, because a converged cell sits at lv = log(L)."""
-    from legofmt.mod_comps.config import migrate_loss_weight_keys
+    from legofmt.config import migrate_loss_weight_keys
 
     mc = {"uncert_weighting": True, "uncert_min": -4.0, "uncert_min_flow": -9.0,
           "uncert_bins": 2,

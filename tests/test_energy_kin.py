@@ -121,7 +121,7 @@ def test_energy_kin_cutoff_uses_kinetic() -> None:
 
 def test_energy_kin_is_carried_from_meta_into_model_conf(tmp_path) -> None:
     import json
-    from legofmt.mod_comps.config import resolve_legoltng_config
+    from legofmt.config import resolve_legoltng_config
 
     (tmp_path / "meta.json").write_text(json.dumps({
         "ntokens": 8, "particles": [11.0, 22.0, 2212.0],

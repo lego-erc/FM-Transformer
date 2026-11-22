@@ -11,10 +11,10 @@ import os
 import torch
 from torch import Tensor
 from torch.utils.data import (
-    BatchSampler, DataLoader, DistributedSampler, RandomSampler, SequentialSampler, Subset, random_split,
+    BatchSampler, DataLoader, DistributedSampler, RandomSampler, SequentialSampler,
 )
 
-from legofmt.data.load.packed import Interacting
+from legofmt.data.load.packed import EventView
 
 
 class LengthBucketBatchSampler(DistributedSampler):
@@ -32,14 +32,18 @@ class LengthBucketBatchSampler(DistributedSampler):
         rank:       this DDP process.
         world_size: the number of DDP processes.
         max_tokens: a bucket of length ``b`` takes ``max_tokens // b`` events per batch instead of ``bs``.
+        min_batches: a bucket with fewer batches an epoch is merged into a longer one (``merge_sparse``); 0: the
+            buckets as given, and one too sparse for a batch is skipped.
     """
 
-    def __init__(self, lengths: Tensor, buckets, bs: int, seed: int = 0,
-                 rank: int = 0, world_size: int = 1, max_tokens: int | None = None) -> None:
+    def __init__(self, lengths: Tensor, buckets, bs: int, seed: int = 0, rank: int = 0, world_size: int = 1,
+                 max_tokens: int | None = None, min_batches: int = 0) -> None:
         buckets = torch.as_tensor(buckets)
-        self.bucket_of = torch.searchsorted(buckets, torch.as_tensor(lengths), out_int32=True)
-        self.counts = torch.bincount(self.bucket_of, minlength=len(buckets))
         self.bs_of = torch.full_like(buckets, bs) if max_tokens is None else (max_tokens // buckets).clamp(min=1)
+        bucket_of = torch.searchsorted(buckets, torch.as_tensor(lengths), out_int32=True)
+        merged = merge_sparse(torch.bincount(bucket_of, minlength=len(buckets)), min_batches * self.bs_of * world_size)
+        self.bucket_of = merged.int()[bucket_of]
+        self.counts = torch.bincount(self.bucket_of, minlength=len(buckets))
         self.seed, self.rank, self.world_size, self.epoch = seed, rank, world_size, 0
         self.n_batches = int((self.counts // (self.bs_of * world_size)).sum())
 
@@ -56,8 +60,31 @@ class LengthBucketBatchSampler(DistributedSampler):
         batches = []   # this rank's batch of each world_size consecutive ones
         for events, bs in zip(perm.split(self.counts.tolist()), self.bs_of.tolist()):
             n = len(events) - len(events) % (bs * self.world_size)
-            batches += events[:n].unflatten(0, (-1, self.world_size, bs))[:, self.rank].tolist()
-        return iter([batches[i] for i in torch.randperm(len(batches), generator=gen).tolist()])
+            batches += events[:n].unflatten(0, (-1, self.world_size, bs))[:, self.rank].unbind(0)
+        return (batches[i].tolist() for i in torch.randperm(len(batches), generator=gen).tolist())
+
+
+AUTO_MIN_BATCHES = 16   # ``len_buckets: auto``: what a bucket must fill each epoch to stay one (``merge_sparse``)
+
+
+def merge_sparse(counts: Tensor, need: Tensor) -> Tensor:
+    """Returns for each bucket the bucket its events are batched in, such that a bucket in use holds its ``need``.
+
+    From the longest bucket down, a bucket takes the shorter ones' events until it holds its ``need`` of them; the
+    shortest group, left short, joins the one above it. Finer buckets leave the longest events short of a batch:
+    skipped, they would never be trained on.
+
+    Args:
+        counts: (K,), the events per bucket, the buckets ascending.
+        need:   (K,), the events a bucket must hold to be used.
+    """
+    to, top, held, above = torch.arange(len(counts)), None, 0, None
+    for k in reversed(range(len(counts))):
+        top = k if held == 0 else top   # a group is named after its longest bucket
+        to[k], held = top, held + int(counts[k])
+        if held >= need[top]:
+            above, held = top, 0
+    return to if held == 0 or above is None else torch.where(to == top, above, to)
 
 
 def smallest_bucket(n: Tensor, buckets) -> Tensor:
@@ -67,19 +94,19 @@ def smallest_bucket(n: Tensor, buckets) -> Tensor:
 
 
 def event_lengths(ds) -> Tensor:
-    """Returns each event's token count, through ``Subset`` and ``Interacting`` views (for the bucket sampler)."""
-    if isinstance(ds, Subset):
-        return event_lengths(ds.dataset)[torch.as_tensor(ds.indices)]
-    if isinstance(ds, Interacting):
-        return event_lengths(ds.ds)[ds.keep_idx]
-    return ds.lengths
+    """Returns each event's token count, through the views on the dataset (for the bucket sampler)."""
+    return event_lengths(ds.ds)[ds.idx] if isinstance(ds, EventView) else ds.lengths
 
 
 def split_val(dataset, val_conf: dict):
-    """Returns ``(train, val)``: ``val_conf.val_frac`` of the events, at least one, split off by ``val_conf.seed``."""
+    """Returns ``(train, val)``: ``val_conf.val_frac`` of the events, at least one, split off by ``val_conf.seed``.
+
+    Two views on ``dataset``, holding the events ``torch.utils.data.random_split`` picks as index tensors.
+    """
     n_val = max(1, int(len(dataset) * val_conf.get("val_frac", 0.01)))
     gen   = torch.Generator().manual_seed(val_conf.get("seed", 0))
-    return random_split(dataset, [len(dataset) - n_val, n_val], generator=gen)
+    perm  = torch.randperm(len(dataset), generator=gen)
+    return EventView(dataset, perm[:-n_val]), EventView(dataset, perm[-n_val:])
 
 
 def loader_seed(dl_conf: dict) -> int:

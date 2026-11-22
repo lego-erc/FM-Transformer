@@ -130,7 +130,7 @@ class GenerateOut(torch.nn.Module):
 
         # the multiplicity model; its conditioning is a prefix of the flow's scalars, its energy scalar rescaled
         mult_conf     = torch.load(mult_conf_path, map_location=device, weights_only=False)
-        self.gen_mult = MultModel(mult_conf).to(device)
+        self.gen_mult = MultModel(mult_conf).to(device).eval()   # in training mode its dropout enters the samples
         mm = mult_conf["config"]["mm_conf"]
         self._compile_mult(mm)
         self.pdgid_in     = mm["ptypes_in"].to(device)

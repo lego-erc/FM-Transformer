@@ -46,7 +46,11 @@ from legofmt.cfm.state import LatentManifold, State, moved, no_latent, state_fie
 from legofmt.compat import dynamic_shape_attention
 from legofmt.legacy.solvers import odesolver_sample
 
-from legofmt.mod_comps.config import amp_dtype, resolve_len_buckets
+from legofmt.config import amp_dtype, resolve_len_buckets
+
+# ``len_buckets: auto``: what one more solve costs, in tokens it could have run instead. Measured on the 256 x 6 field:
+# generation time is flat from 2000 to 8000, eager and compiled.
+SOLVE_COST = 4_000
 
 
 # ---- one step ----------------------------------------------------------------------------------------------------
@@ -268,17 +272,21 @@ class Solvers:
         return cfg
 
     def _compile_once(self, cfg: dict) -> None:
-        """Compiles the field for generation on the first call (``odeint_conf.fwd_compile``)."""
+        """Compiles the field for generation on the first call (``odeint_conf.fwd_compile``).
+
+        One graph for every batch shape, unless ``compile_dynamic: false`` asks for a graph per shape: that one
+        recompiles for every new row count.
+        """
         if not cfg.get("fwd_compile", False) or is_compiled(self.model) or is_compiled(self.model.vf):
             return
-        dynamic = cfg.get("compile_dynamic", False)
+        dynamic = cfg.get("compile_dynamic", True)
         if dynamic:
             dynamic_shape_attention()
         # CUDA graphs are recorded per distinct shape and kept: a dynamic graph takes them only when compile_buckets
         # bounds the row counts
         self.model = torch.compile(self.model, dynamic=dynamic, mode="reduce-overhead"
                                    if not dynamic or cfg.get("compile_buckets") else None)
-        len_b = self.rc.gen_len_buckets or resolve_len_buckets(cfg.get("len_buckets"), self.rc.max_seq_l)
+        len_b = resolve_len_buckets(cfg.get("len_buckets", "auto"), self.rc.max_seq_l)
         if len_b is not None and not dynamic:
             torch._dynamo.config.recompile_limit += len(len_b) * max(1, len(cfg.get("compile_buckets") or ()))
 
@@ -302,7 +310,8 @@ class Solvers:
                 time_grid=cfg.get("time_grid"),
                 return_intermediates=cfg.get("return_timesteps", False),
                 # a dynamic graph still specialises on a 1-row batch: tile those to 2
-                buckets=cfg.get("compile_buckets") or ((2,) if cfg.get("compile_dynamic") else None),
+                buckets=cfg.get("compile_buckets")
+                or ((2,) if cfg.get("fwd_compile") and cfg.get("compile_dynamic", True) else None),
             )
         sols = sols.float().masked_fill_(~am, torch.nan)
         filter_pdgid = cfg.get("filter_pdgid")
@@ -314,27 +323,28 @@ class Solvers:
         return sols, pdgids
 
     def _solve_by_length(self, ds_t: DataStruct, base: Tensor, rng=None, **kw) -> Tensor:
-        """Solves the events in groups of similar length (``len_buckets``), each trimmed to its bucket.
+        """Solves the events in groups of similar length, each trimmed to its bucket (``odeint_conf.len_buckets``).
 
-        Without buckets it is one ``_solve``. ``base`` is ``x_init``; ``kw`` goes to ``_solve``. Returns the
-        solutions in the batch's order, padded back to its length.
+        ``"auto"``, which an absent key means too: neighbouring buckets run as one group wherever a solve of their
+        own would cost more than their padding (``cheapest_groups``). A list is taken as given. ``None``: one
+        ``_solve`` at full length. ``base`` is ``x_init``; ``kw`` goes to ``_solve``. Returns the solutions in the
+        batch's order, padded back to its length.
         """
         L_max = ds_t.am.full.shape[1]
-        # odeint_conf may gain len_buckets after construction (lego_eval's per-model odeint override)
-        buckets = self.rc.gen_len_buckets or resolve_len_buckets(self.rc.odeint_conf.get("len_buckets"), L_max)
-        if buckets is None:
+        spec = self.rc.odeint_conf.get("len_buckets", "auto")   # per call: lego_eval sets it after construction
+        if spec is None:
             return self._solve(ds_t, x_init=base, rng=rng, **kw)
-        buckets = [min(b, L_max) for b in buckets]
         lengths, order = ds_t.am.full.sum(1).sort()
-        counts = torch.bincount(lengths, minlength=L_max + 1).cumsum(0)[buckets].tolist()
+        buckets = torch.tensor(resolve_len_buckets(spec, L_max))
+        counts  = torch.bincount(torch.searchsorted(buckets.to(lengths.device), lengths), minlength=len(buckets)).cpu()
+        buckets, counts = buckets[counts > 0], counts[counts > 0]
+        tops    = cheapest_groups(counts, buckets, SOLVE_COST) if spec == "auto" else torch.arange(len(buckets))
         ds_t, base = ds_t[order], base[order]
         sols, lats, a = [], [], 0
-        for L, b in zip(buckets, counts):
-            if b > a:
-                sol = self._solve(ds_t[a:b].trim(L), x_init=base[a:b, :L],
-                                  rng=rng_sub(rng, order[a:b]), **kw)
-                sols.append(F.pad(sol, (0, 0, 0, L_max - L)))
-                lats.append(self._edep_latents)
+        for L, b in zip(buckets[tops].tolist(), counts.cumsum(0)[tops].tolist()):
+            sol = self._solve(ds_t[a:b].trim(L), x_init=base[a:b, :L], rng=rng_sub(rng, order[a:b]), **kw)
+            sols.append(F.pad(sol, (0, 0, 0, L_max - L)))
+            lats.append(self._edep_latents)
             a = b
         if self.rc.n_lat:
             self._edep_latents = torch.cat(lats).index_select(0, order.argsort())
@@ -428,6 +438,35 @@ class Solvers:
 
 
 # ---- plumbing ------------------------------------------------------------------------------------------------------
+
+def cheapest_groups(counts: Tensor, buckets: Tensor, solve_cost: int) -> Tensor:
+    """Returns the buckets to solve at: the grouping of neighbouring buckets that costs the fewest tokens.
+
+    ```
+    cost = sum over groups ( solve_cost + L * n )       L: the group's longest bucket, n: its events
+    ```
+
+    A solve has a fixed cost whatever it holds, so a few short events are cheaper padded up to the next group than
+    solved on their own.
+
+    Args:
+        counts:     (K,), the events per bucket, none empty.
+        buckets:    (K,), their lengths, ascending.
+        solve_cost: the fixed cost of a solve, in tokens.
+
+    Returns:
+        The index of each group's longest bucket, ascending; a group runs from the previous one's to its own.
+    """
+    K, cum = len(counts), F.pad(counts.cumsum(0), (1, 0))
+    best, start = torch.zeros(2, K + 1, dtype=torch.long)
+    for j in range(1, K + 1):   # the cheapest way to solve buckets 0 .. j-1 ends in a group start[j] .. j-1
+        best[j], start[j] = (best[:j] + solve_cost + buckets[j - 1] * (cum[j] - cum[:j])).min(0)
+    tops, j = [], K
+    while j > 0:
+        tops.append(j - 1)
+        j = int(start[j])
+    return torch.tensor(tops[::-1])
+
 
 def _time_grid(time_grid, step_size: float, method: str, reverse: bool, like: Tensor) -> Tensor:
     """Builds the solve's time grid: ``round(1 / step_size)`` equal steps over [0, 1], flipped for ``reverse``.

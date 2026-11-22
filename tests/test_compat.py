@@ -12,7 +12,7 @@ import pytest
 import torch
 
 from legofmt.cfm.cfm_trafo_x import CFMTrafo_x
-from legofmt.mod_comps.config import (
+from legofmt.config import (
     build_manifold, resolve_legoltng_config, resolve_mult_config,
 )
 

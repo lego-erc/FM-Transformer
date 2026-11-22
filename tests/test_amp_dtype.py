@@ -17,7 +17,7 @@ from __future__ import annotations
 import torch
 
 from legofmt.main.modules import LEGOLtng
-from legofmt.mod_comps.config import amp_dtype, resolve_legoltng_config
+from legofmt.config import amp_dtype, resolve_legoltng_config
 from test_helpers import _fake_batch, _tiny_config
 
 BF16_STAMP = {"precision": "bf16-mixed, medium"}

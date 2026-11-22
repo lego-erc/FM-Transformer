@@ -44,8 +44,8 @@ from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.geometry.symmetry_projections import CubeSymmetry
 from legofmt.legacy.mult_model import InvModel, ResidualHead, inverse_pid, inverse_tensors
 from legofmt.legacy.optimizers import ScheduleFreeSwitch, default_schedulefree, opt_is_schedulefree
-from legofmt.mod_comps.config import resolve_mult_config
-from legofmt.mod_comps.optimizers import build_optimizer
+from legofmt.config import resolve_mult_config
+from legofmt.optimizers import build_optimizer
 from legofmt.numerics import masked_mean
 from legofmt.rng import COUNT, PASSTHROUGH, SYM_COUNT, SYM_PT, categorical, randint_like, rng_sub, uniform_like
 
@@ -103,7 +103,8 @@ class MultLoader(torch.utils.data.Dataset):
             ts += (self.out_tok, self.out_pid_idx, self.out_mask, self.edep)
         if self.pt_target is not None:
             ts += (self.pt_target,)
-        return tuple(t[idx] for t in ts)
+        in_tok, counts, *rest = (t[idx] for t in ts)
+        return (in_tok, counts.long(), *rest)   # stored int16, batched as class targets
 
 
 class MultModel(ScheduleFreeSwitch, LightningModule):
@@ -343,7 +344,8 @@ class MultModel(ScheduleFreeSwitch, LightningModule):
         """Loads the dataset once and splits off the validation events."""
         if getattr(self, "_val_ds", None) is not None:
             return
-        self._train_ds, self._val_ds = split_val(MultLoader(self.rc.config), self.rc.val_conf)
+        data = MultLoader(self.rc.config) if self.rc.data is None else self.rc.data
+        self._train_ds, self._val_ds = split_val(data, self.rc.val_conf)
 
     def train_dataloader(self):
         return self._make_loader(self._train_ds, shuffle=True)

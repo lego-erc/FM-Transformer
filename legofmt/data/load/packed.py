@@ -2,6 +2,7 @@
 
     load_dataset       a dataset directory or file -> PackedData, on the model scale
     PackedData         the events; ``dataset[idx]`` pads a batch of them to a ``DataStruct``
+    EventView          some of a dataset's events, by index: the train / validation split, and
     interacting_only   the events without the pass-through ones (``model_conf.exclude_passthrough``)
 
 Everything but the particle tokens of a padded ``(f, m, am[, edep_layers])`` follows from a few per-event numbers:
@@ -30,7 +31,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from legofmt.data.struct import DataStruct, cond_slot, loss_mask
-from legofmt.legacy.dataset import PaddedData
+from legofmt.legacy.dataset import PaddedData, token_names
 
 PACKED_FORMAT = "lego-packed"
 PACKED_VERSION = 1
@@ -100,7 +101,7 @@ class PackedData:
         return self.tokens[self.offsets[:-1]]
 
     def species_counts(self, ptypes: Tensor) -> Tensor:
-        """Counts the outgoing particles of each species per event, ``(N, len(ptypes))``.
+        """Counts the outgoing particles of each species per event, ``(N, len(ptypes))`` int16.
 
         ```
         counts[i, j] = number of event i's outgoing tokens (all but its first) with pdgid ptypes[j]
@@ -110,7 +111,7 @@ class PackedData:
         if (ptypes == 0).any():
             raise ValueError("pdgid 0 is the padding's: a padded file would count its padded tokens")
         event, pid = self._outgoing()
-        return torch.stack([torch.bincount(event[pid == p], minlength=len(self)) for p in ptypes], -1)
+        return torch.stack([torch.bincount(event[pid == p], minlength=len(self)).to(torch.int16) for p in ptypes], -1)
 
     def select(self, idx: Tensor) -> "PackedData":
         """Returns the events ``idx`` (a 1-D index, repeats allowed) as a packed dataset of their own.
@@ -188,6 +189,7 @@ class PackedData:
         if not is_packed(d) or d.get("version") != PACKED_VERSION:
             raise ValueError(f"not a {PACKED_FORMAT} v{PACKED_VERSION} file: "
                              f"format={d.get('format')!r} version={d.get('version')!r}")
+        d = token_names(d)   # legacy: a file from before the token names
         return cls(**{k: v for k, v in d.items() if k not in ("format", "version")})
 
     # ---- plumbing ------------------------------------------------------------------------------------------------
@@ -200,33 +202,34 @@ class PackedData:
         return ev[out], self.tokens[out, -1]
 
     def _prefix_and_incoming(self) -> tuple:
-        """Returns every event's prefix and incoming tokens as a padded batch ``(f, m, am[, edep_layers])``."""
+        """Returns every event's prefix and incoming tokens as a padded batch ``(f, None, None[, edep_layers])``.
+
+        The masks, which ``norm_e`` does not read, are left out: for 20M events they were another GiB.
+        """
         N, P = len(self), self.n_prefix
         v = torch.empty(N, P + 1, 8)
         v[:, :P] = self.prefix_token
         v[:, :P, 0] = self.prefix
         v[:, P] = self.incoming
-        batch = (v, torch.zeros(N, P + 1, dtype=torch.long), torch.ones(N, P + 1, dtype=torch.bool))
-        return batch + (() if self.edep_layers is None else (self.edep_layers,))
+        return (v, None, None) + (() if self.edep_layers is None else (self.edep_layers,))
 
 
-class Interacting:
-    """Index view over the events that interacted (a deposit, or more than one particle out), without copying them."""
+class EventView:
+    """The events ``idx`` of a dataset, without copying them: ``view[i]`` is ``ds[idx[i]]``."""
 
-    def __init__(self, ds, keep_idx: Tensor) -> None:
-        self.ds, self.keep_idx = ds, keep_idx
+    def __init__(self, ds, idx: Tensor) -> None:
+        self.ds, self.idx = ds, idx
 
     def __len__(self) -> int:
-        return len(self.keep_idx)
+        return len(self.idx)
 
     def __getitem__(self, i):
-        return self.ds[self.keep_idx[i]]
+        return self.ds[self.idx[i]]
 
 
-def interacting_only(ds) -> Interacting:
+def interacting_only(ds) -> EventView:
     """Returns the view of ``ds`` without its pass-through events (no deposit, one particle out)."""
-    keep_idx = ((ds.edep.flatten() > 0) | (ds.n_out != 1)).nonzero(as_tuple=True)[0]
-    return Interacting(ds, keep_idx)
+    return EventView(ds, ((ds.edep.flatten() > 0) | (ds.n_out != 1)).nonzero(as_tuple=True)[0])
 
 
 def load_dataset(data: str | dict | tuple, *, prep=None, frac=None, device="cpu", **cut_args) -> PackedData:

@@ -21,7 +21,7 @@ from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.main.generate import GenerateOut
 from legofmt.main.modules import LEGOLtng
-from legofmt.mod_comps.config import resolve_legoltng_config
+from legofmt.config import resolve_legoltng_config
 from legofmt.multiplicity.model import MultModel
 from test_helpers import MANIFOLD, _flow_config, _pt_mult_config, _save_mult_ckpt
 from test_helpers import _head_batch as _batch, _head_config as _config

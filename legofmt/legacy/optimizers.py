@@ -1,4 +1,4 @@
-"""The schedule-free optimizer, superseded by Muon with a warmup-cosine schedule (``mod_comps/optimizers.py``).
+"""The schedule-free optimizer, superseded by Muon with a warmup-cosine schedule (``legofmt/optimizers.py``).
 
 Schedule-free AdamW keeps two weight sequences and must be told which one is live: ``opt.train()`` before a training
 step, ``opt.eval()`` before any evaluation or checkpoint. ``ScheduleFreeSwitch`` is that switch for both

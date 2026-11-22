@@ -4,6 +4,9 @@ A packed file (``legofmt.data.load.packed``) holds a dataset without its padding
 tensors ``(f, m, am[, edep_layers])``: a ``data_prepped.pt`` file, the same tuple in memory, or a raw dict that is cut
 and prepped on the spot. ``PaddedData`` holds them and answers the same calls as a ``PackedData``, which is what
 ``load_dataset`` returns for these inputs.
+
+A packed file from before a sequence element was called a token stores three fields under their old names;
+``token_names`` renames them.
 """
 
 import torch
@@ -11,6 +14,14 @@ from torch import Tensor
 
 from legofmt.data.write.cut import GetLEGOData
 from legofmt.data.struct import DataStruct, cond_slot, n_prefix
+
+
+OLD_PACKED_FIELDS = {"rows": "tokens", "pad_row": "pad_token", "prefix_row": "prefix_token"}
+
+
+def token_names(d: dict) -> dict:
+    """Returns a packed file's dict with ``rows`` / ``pad_row`` / ``prefix_row`` under their names of today."""
+    return {OLD_PACKED_FIELDS.get(k, k): v for k, v in d.items()}
 
 
 class PaddedData(DataStruct):
@@ -77,4 +88,4 @@ class PaddedData(DataStruct):
 
     def species_counts(self, ptypes: Tensor) -> Tensor:
         pid = self.f.out_p[..., -1]  # one species at a time: the broadcast compare made an (N, max_out, S) int64
-        return torch.stack([(pid == p).sum(1) for p in ptypes], -1)
+        return torch.stack([(pid == p).sum(1) for p in ptypes], -1).to(torch.int16)

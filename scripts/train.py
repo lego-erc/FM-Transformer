@@ -31,7 +31,7 @@ import lightning as ltng
 import torch
 from legofmt.cfm.project_model import uncompiled
 from legofmt.main.modules import LEGOLtng
-from legofmt.mod_comps.config import migrate_loss_weight_keys
+from legofmt.config import migrate_loss_weight_keys
 from legofmt.multiplicity.model import MultModel
 
 if "OMP_NUM_THREADS" not in os.environ:
@@ -43,7 +43,7 @@ torch.set_float32_matmul_precision(run["matmul_precision"])
 if run.get("compile"):
     import torch._dynamo
 
-    torch._dynamo.config.recompile_limit = 32
+    torch._dynamo.config.recompile_limit = 128   # a graph per (length bucket, plain or flow-map step); past it: eager
 
 epochs = run["epochs"]
 devices = run["devices"]

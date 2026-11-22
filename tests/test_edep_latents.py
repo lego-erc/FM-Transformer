@@ -17,7 +17,7 @@ import torch
 from legofmt.cfm.edep_ae import EdepLayerAE, build_edep_ae
 from legofmt.data.struct import DataStruct
 from legofmt.main.modules import LEGOLtng
-from legofmt.mod_comps.config import resolve_legoltng_config
+from legofmt.config import resolve_legoltng_config
 
 from test_helpers import GEOM, _fake_batch, _head_batch, _head_config, _tiny_config, _vf_kwargs
 
@@ -307,6 +307,17 @@ def test_whitened_solve_returns_u_scale_tokens_and_latents() -> None:
     e = sols[:, 1, 0]
     assert ((e > 0) & (e < m.gen_base.e_dep_max)).all(), e
     assert m._edep_latents.shape == (len(ds), K) and torch.isfinite(m._edep_latents).all()
+
+
+def test_a_step_evaluates_the_head_once() -> None:
+    """The draw of the base sets every prior parameter; whitening the target's E_dep reads its mu and sigma there."""
+    m, ds, calls = _whitened(train=True), _whitened_batch(), []
+    m.base_head.register_forward_hook(lambda *a: calls.append(1))
+    m._step(ds, 0)
+    assert len(calls) == 1
+    by_head = m._edep_whiten(ds.f.full, ds)                # the solver's call: the head, on the batch it is handed
+    m.gen_base_wrapper(ds)
+    assert torch.equal(m._edep_whiten(ds.f.full, ds, drawn=True), by_head) and len(calls) == 3
 
 
 def test_whitened_training_step_reaches_the_latent_token() -> None:

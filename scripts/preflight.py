@@ -163,7 +163,7 @@ if not FAIL:
         if ts is not None:
             sched["total_steps"] = ts
         if train_model == "fm":
-            from legofmt.mod_comps.config import resolve_legoltng_config
+            from legofmt.config import resolve_legoltng_config
             rc = resolve_legoltng_config(config)
             ok(f"resolved: max_seq_l={rc.max_seq_l} npdgids={rc.model_args['npdgids']} "
                f"n_prefix={rc.n_prefix} cond_scalars={rc.cond_scalars}")
@@ -172,7 +172,7 @@ if not FAIL:
                 m = LEGOLtng(config)
                 ok(f"model built on CPU: {sum(p.numel() for p in m.parameters()):,} params")
         else:
-            from legofmt.mod_comps.config import resolve_mult_config
+            from legofmt.config import resolve_mult_config
             rc = resolve_mult_config(cfg if "state_dict" in cfg else {"config": config})
             ok(f"resolved: species={rc.max_seq_len} max_particles={rc.max_particles} "
                f"in_dim={rc.in_dim} ptypes_in={rc.ptypes_in.tolist()}")

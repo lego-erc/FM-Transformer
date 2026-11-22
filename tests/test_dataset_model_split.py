@@ -103,7 +103,7 @@ def test_setup_normalises_the_training_data(dataset_dir) -> None:
            "opt_conf": {"opt": "schedulefree", "lr": 1e-3}}
     model = LEGOLtng(cfg)
     model.setup()
-    f = model._train_ds.dataset.data.f
+    f = model._train_ds.ds.data.f
     assert float(_F(f.full).in_p[..., 0, 0][0]) == pytest.approx(_in_scalar(), abs=1e-5)
     assert float(_F(f.full).edep[0]) == pytest.approx(E_DEP / 300.0, abs=1e-6)
 

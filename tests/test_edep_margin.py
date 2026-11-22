@@ -19,7 +19,7 @@ from legofmt.data.write.norm import DataPrep
 from legofmt.data.struct import _F
 from legofmt.main.generate import GenerateOut
 from legofmt.main.modules import LEGOLtng
-from legofmt.mod_comps.config import resolve_legoltng_config
+from legofmt.config import resolve_legoltng_config
 
 from test_helpers import MANIFOLD, _fake_batch, _fill_edep, _gun_cond, _save_flow_ckpt, _save_mult_ckpt, _tiny_config
 

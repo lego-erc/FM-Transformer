@@ -13,6 +13,7 @@ from torch.utils.data import random_split
 from test_helpers import PACKED_COND, packed_prep, write_two_dirs
 from legofmt.data.load.packed import load_dataset
 from legofmt.data.load.loader import event_lengths as _event_lengths
+from legofmt.data.load.loader import split_val
 from legofmt.data.load.packed import interacting_only as _interacting_only
 from legofmt.multiplicity.model import MultLoader
 
@@ -27,13 +28,13 @@ def _no_materialising():
 def test_event_lengths_and_interacting_match(tmp_path) -> None:
     pad, pk, _ = write_two_dirs(tmp_path)
     a, b = (load_dataset(str(d), prep=packed_prep()) for d in (pad, pk))
-    split = lambda ds: random_split(ds, [4, 2], generator=torch.Generator().manual_seed(0))[0]
+    split = lambda ds: split_val(ds, {"val_frac": 0.34})[0]
     with _no_materialising():
         lb, ib = _event_lengths(split(b)), _interacting_only(b)
         lib = _event_lengths(ib)
     assert torch.equal(_event_lengths(split(a)), lb)
     ia = _interacting_only(a)
-    assert torch.equal(ia.keep_idx, ib.keep_idx)
+    assert torch.equal(ia.idx, ib.idx)
     assert torch.equal(_event_lengths(ia), lib)
 
 
@@ -58,6 +59,30 @@ def test_multloader_matches(tmp_path, train_inverse) -> None:
         names += ["out_tok", "out_pid_idx", "out_mask", "edep"]
     for n in names:
         assert torch.equal(getattr(a, n), getattr(b, n)), n
+    assert b.counts.dtype == torch.int16 and b[[0, 1]][1].dtype == torch.int64   # stored small, batched as targets
+
+
+def test_split_val_holds_index_tensors_of_random_splits_events() -> None:
+    """``random_split`` keeps a Python list: 16M ints for the Ar cube, which every loader worker ends up copying."""
+    ds = torch.arange(1000) * 3
+    train, val = split_val(ds, {"val_frac": 0.1, "seed": 3})
+    ref = random_split(ds, [900, 100], generator=torch.Generator().manual_seed(3))
+    assert isinstance(train.idx, torch.Tensor) and isinstance(val.idx, torch.Tensor)
+    assert train.idx.tolist() == ref[0].indices and val.idx.tolist() == ref[1].indices
+    assert len(train) == 900 and torch.equal(train[[0, 5]], ds[train.idx[[0, 5]]]) and train[7] == ds[train.idx[7]]
+
+
+def test_fresh_count_model_reads_the_dataset_once(tmp_path, monkeypatch) -> None:
+    """The count heads are sized by the data's largest count; ``setup`` must not read the file again."""
+    from legofmt.multiplicity import model as mm
+    _, pk, _ = write_two_dirs(tmp_path)
+    built, init = [], mm.MultLoader.__init__
+    monkeypatch.setattr(mm.MultLoader, "__init__", lambda self, c: (built.append(1), init(self, c))[1])
+    model = mm.MultModel({"mm_conf": {"h_dim": 16, "n_layers": 1, "n_heads": 2},
+                          "dl_conf": {"lds_args": {"data": str(pk)}, "bs": 2, "num_workers": 0}})
+    model.setup("fit")
+    assert len(built) == 1 and len(model._train_ds) + len(model._val_ds) == 6
+    assert model.rc.max_particles == int(model._train_ds.ds.counts.max()) + 1
 
 
 def test_training_step_identical(tmp_path) -> None:

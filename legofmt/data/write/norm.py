@@ -40,7 +40,7 @@ from legofmt.data.struct import _F, cond_scalars, set_layout, species_values
 from legofmt.geometry.energy_proj import EnergyProjections
 from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.legacy.norm import HAND_SET_MARGIN_MEV, denorm_edep_linear, norm_edep_linear
-from legofmt.mod_comps.config import build_manifold
+from legofmt.config import build_manifold
 
 _MISSING_MEV = 1e-3   # the smallest missing energy cap - edep the margin scale resolves
 

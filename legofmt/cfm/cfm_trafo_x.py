@@ -1,10 +1,10 @@
 """The flow's vector field: a transformer over the event's padded token sequence.
 
 ```
-tokens     [z | g_1 .. g_K | x_1 .. x_L]               the event's latent and the geometry tokens are optional
+tokens     [z | g_1 .. g_K | c | x_1 .. x_L]           the event's latent, the geometry tokens and c are optional
 
 embed      h_i = mean_k(W_k[c_ik] x_i + b_k[c_ik])     k: the token's mask, type and pdgid; one linear map per value
-           h_z = lat_in z,   h_g = GeomEncoder()
+           h_z = lat_in z,   h_g = GeomEncoder(),   h_c = CondPool(cond scalars)
 
 time       h_i = h_i + emb_i,   emb_i = emb(t, d) on a generated token, emb(1, 0) on a conditioning one
            emb(t, d) = sinusoid(t) + step_gain sin(d freqs_d)
@@ -17,13 +17,14 @@ read-out   v_i = mean_k(V_k[c_ik] h_i + a_k[c_ik])      on a generated token, 0 
 
 A generated token (``mask == 1``) is one the flow moves: the outgoing particles, the E_dep token, the latent. A
 conditioning token sits at the data and is not transported, which is ``t = 1, d = 0``: the scalars, the incoming
-particle, the geometry tokens. ``(t, d)`` is one time and one step size per event.
+particle, the geometry tokens, ``c``. ``(t, d)`` is one time and one step size per event.
 
-Three parts are optional:
+Four parts are optional:
 
     step_cond      the step size ``d`` of a flow-map step enters the time embedding
     geom_encoder   K summary tokens of a layered stack (``geom_encoder.py``), prepended as conditioning tokens
     lat_dim        the event's latent ``z`` (``model_conf.edep_ae``), prepended as one generated token
+    cond_pool      the cond scalars as one token ``c`` (``cond_pool.py``); their own tokens leave the sequence
 
 The encoder is an x-transformers ``Encoder``. Everything else (``time_cond: false``, per-token times,
 ``dim_in_out``, ``grad_ckpt``) is :mod:`legofmt.legacy.cfm_trafo_x`.
@@ -36,6 +37,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 from x_transformers import ContinuousTransformerWrapper, Encoder
 
+from legofmt.cfm.cond_pool import CondPool
 from legofmt.cfm.geom_encoder import GeomEncoder
 from legofmt.cfm.event_cond import per_event_condition, per_event_gammas
 from legofmt.compat import fp32_attention, legacy_param_rename, needs_fp32_attention
@@ -65,6 +67,7 @@ class CFMTrafo_x(LegacyField):
         grad_ckpt: bool = False,
         geom_encoder: dict | None = None,
         lat_dim: int = 0,
+        cond_pool: int = 0,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -79,6 +82,9 @@ class CFMTrafo_x(LegacyField):
         self.lat_dim   = lat_dim
 
         self._add_geometry_tokens(geom_encoder, h_dim)   # model_args.geom_encoder; self.geom None without
+        # model_args.cond_pool, the number of prefix tokens: E_dep is token 1, the others hold one cond scalar each
+        self.n_prefix  = cond_pool
+        self.cond_pool = CondPool(cond_pool - 1, h_dim) if cond_pool else None
 
         # the encoder
         self.vf = ContinuousTransformerWrapper(
@@ -198,9 +204,9 @@ class CFMTrafo_x(LegacyField):
         oh           = self._one_hot(mask, types, pdgids)
         emb          = torch.where(gen.unsqueeze(-1), c_gen, c_con)
         h            = self._embed(x, oh) + emb
-        h, emb, gen, attn_mask = self._with_extra_tokens(h, emb, gen, attn_mask, c_con, c_gen, z)   # [z | g | x]
+        h, emb, gen, attn_mask = self._with_extra_tokens(h, emb, gen, attn_mask, c_con, c_gen, z, x)   # [z | g | c | x]
         h            = self._encode(h, emb, gen, attn_mask, c_con, c_gen)
-        v            = self._project_out(h[:, -x.shape[1]:], mask, oh)
+        v            = self._project_out(self._token_states(h, x.shape[1]), mask, oh)
         return (v, self.lat_out(h[:, 0])) if self.lat_dim else v
 
     # ---- plumbing -----------------------------------------------------------------------------------------------
@@ -254,13 +260,18 @@ class CFMTrafo_x(LegacyField):
         return c_con, c_gen
 
     def _with_extra_tokens(self, h: Tensor, emb: Tensor, gen: Tensor, attn_mask: Tensor, c_con: Tensor,
-                           c_gen: Tensor, z: Tensor | None) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """Prepends the geometry tokens (conditioning) and the latent token (generated), where the field has them.
+                           c_gen: Tensor, z: Tensor | None, x: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Prepends the pooled cond token and the geometry tokens (conditioning) and the latent token (generated),
+        where the field has them.
 
-        Returns the sequence ``(h, emb, gen, attn_mask)`` with them; ``geom_hide`` masks the cond-scalar tokens out of
-        the attention.
+        Returns the sequence ``(h, emb, gen, attn_mask)`` with them. The pooled token replaces the cond-scalar
+        tokens, which leave the sequence; ``geom_hide`` masks them out of the attention.
         """
         seq = (h, emb, gen, attn_mask)
+        if self.cond_pool is not None:   # one conditioning token for the scalars' values, x[:, scalar tokens, 0]
+            P, values = self.n_prefix, torch.cat((x[:, :1, 0], x[:, 2:self.n_prefix, 0]), dim=1)
+            seq = _prepend(self.cond_pool(values).to(h.dtype), c_con, False,
+                           *(torch.cat((s[:, 1:2], s[:, P:]), dim=1) for s in seq))
         if self.geom is not None:   # K conditioning tokens
             if self.geom_hide:
                 seq = (h, emb, gen, attn_mask.index_fill(1, self.geom_scalar_tokens, False))
@@ -268,6 +279,16 @@ class CFMTrafo_x(LegacyField):
         if self.lat_dim:            # one generated token
             seq = _prepend(self.lat_in(z.to(h.dtype)).unsqueeze(1), c_gen, True, *seq)
         return seq
+
+    def _token_states(self, h: Tensor, L: int) -> Tensor:
+        """Returns the encoder's states of the event's ``L`` tokens, the last of ``h``: zero at the cond-scalar tokens
+        ``cond_pool`` took out of the sequence."""
+        if self.cond_pool is None:
+            return h[:, -L:]
+        P    = self.n_prefix
+        own  = h[:, P - 1 - L:]   # E_dep, the incoming particle, the outgoing ones
+        gone = h.new_zeros(len(h), P - 2, h.shape[-1])
+        return torch.cat((gone[:, :1], own[:, :1], gone, own[:, 1:]), dim=1)
 
     def _encode(self, h: Tensor, emb: Tensor, gen: Tensor, attn_mask: Tensor, c_con: Tensor, c_gen: Tensor) -> Tensor:
         """Runs the encoder on ``h`` with the time condition ``emb``, handed to the norms per event where it can be."""

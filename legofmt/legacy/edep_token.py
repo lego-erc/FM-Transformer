@@ -68,10 +68,10 @@ class LegacyEdepToken:
             return x0
         return self._edep_whiten(x0, ds_t)
 
-    def _edep_whiten(self, f: Tensor, ds_t: DataStruct, inverse: bool = False) -> Tensor:
+    def _edep_whiten(self, f: Tensor, ds_t: DataStruct, inverse: bool = False, drawn: bool = False) -> Tensor:
         """Not whitened: ``f`` as it is."""
         if _plain(self.rc):
-            return super()._edep_whiten(f, ds_t, inverse)
+            return super()._edep_whiten(f, ds_t, inverse, drawn)
         if not self.rc.edep_whiten:
             return f
         _, mu, sig, _, _, _ = self.base_head_params(ds_t)   # by position: a legacy head returns a plain tuple

@@ -47,6 +47,18 @@ def test_forward_compiles_static_or_dynamic(monkeypatch, dynamic: bool, buckets,
     assert getattr(xt.einx, "_legofmt_where", False) or not dynamic
 
 
+def test_fwd_compile_is_dynamic_unless_static_is_asked_for(monkeypatch) -> None:
+    """A static graph recompiles on every new row count (the last chunk of a GenerateOut call: ~10 s each)."""
+    seen = {}
+    monkeypatch.setattr(torch, "compile", lambda m, **k: seen.update(k) or m)
+    model = _model(_config(odeint={"method": "euler", "step_size": 0.25, "fwd_compile": True}))
+    rows = []
+    model.model.register_forward_pre_hook(lambda mod, args: rows.append(args[0].shape[0]))
+    model(_ragged_batch(n_out=(1, 2, 5, 3, 1))[:1])        # a 1-row batch: tiled to 2 for the dynamic graph
+    assert seen["dynamic"] is True and seen["mode"] is None
+    assert rows and all(n >= 2 for n in rows), rows
+
+
 def test_dynamic_graph_sees_no_shape_it_would_specialise_on(monkeypatch) -> None:
     """Dynamo still guards a symbolic graph on a 1-row batch (0/1 specialisation) and on the strides / storage
     offset of its inputs; length buckets and split chunks are views. Either recompiles the whole flow (16 graphs and

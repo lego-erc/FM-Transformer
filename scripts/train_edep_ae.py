@@ -60,12 +60,8 @@ lego.setup("fit")                               # no trainer attached: the base 
 
 
 def _layers(ds):
-    """The normalised per-layer E_dep of a (Subset of a) (Interacting view of a) loaded dataset."""
-    if hasattr(ds, "indices"):
-        return _layers(ds.dataset)[torch.as_tensor(ds.indices)]
-    if hasattr(ds, "keep_idx"):
-        return _layers(ds.ds)[ds.keep_idx]
-    return ds.edep_layers
+    """The normalised per-layer E_dep of a loaded dataset, through the views on it."""
+    return _layers(ds.ds)[ds.idx] if hasattr(ds, "idx") else ds.edep_layers
 
 
 dev = "cuda"

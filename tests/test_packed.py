@@ -79,6 +79,17 @@ def test_dict_round_trip(cond) -> None:
         PackedData.from_dict({**d, "version": 2})
 
 
+def test_file_with_the_old_field_names_reads() -> None:
+    """Files packed before the token names store ``rows`` / ``pad_row`` / ``prefix_row``."""
+    cond = CONDS[1]
+    t = prepped_padded(cond, layers=True)
+    old = {"rows": "tokens", "pad_row": "pad_token", "prefix_row": "prefix_token"}
+    d = _pack(t, cond, True).to_dict()
+    for was, now in old.items():
+        d[was] = d.pop(now)
+    assert _equal(PackedData.from_dict(d).unpack(), t)
+
+
 @pytest.mark.parametrize("cond", CONDS)
 def test_accessors(cond) -> None:
     t, n_prefix = prepped_padded(cond), len(cond) + 1
@@ -89,7 +100,9 @@ def test_accessors(cond) -> None:
     assert torch.equal(p.incoming, t[0][:, n_prefix])
     pid = t[0][:, n_prefix + 1:, -1]
     ptypes = torch.tensor([22.0, 2212.0])
-    assert torch.equal(p.species_counts(ptypes), torch.stack([(pid == q).sum(1) for q in ptypes], -1))
+    counts = p.species_counts(ptypes)
+    assert counts.dtype == torch.int16                      # a count is below L: int64 is 1.9 GiB for 20M events
+    assert torch.equal(counts.long(), torch.stack([(pid == q).sum(1) for q in ptypes], -1))
     with pytest.raises(ValueError):
         p.species_counts(torch.tensor([0.0, 22.0]))
     assert p.tokens.shape[0] == int(t[2][:, n_prefix:].sum())

@@ -4,7 +4,7 @@ every rank emits it)."""
 import torch
 
 from legofmt.data.struct import DataStruct, set_layout
-from legofmt.log_metrics.val_metrics import (
+from legofmt.main.val_metrics import (
     KIN_NAMES,
     SUMMARY_FEATURE_NAMES,
     ShowerValMetrics,

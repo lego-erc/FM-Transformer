@@ -17,7 +17,7 @@ import torch
 
 from legofmt.cfm.geom_encoder import GeomEncoder
 from legofmt.main.modules import LEGOLtng
-from legofmt.mod_comps.config import resolve_legoltng_config
+from legofmt.config import resolve_legoltng_config
 
 from test_helpers import GEOM, _fake_batch, _tiny_config, _vf_kwargs
 

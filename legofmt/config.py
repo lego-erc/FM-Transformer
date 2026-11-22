@@ -86,7 +86,6 @@ class ResolvedLEGOConfig:
     len_mode: str                            # dl_conf key, default "split" (| "group")
     len_split: int                           # dl_conf key, default 8
     len_max_tokens: int | None               # dl_conf key
-    gen_len_buckets: tuple[int, ...] | None  # odeint_conf.len_buckets: generation (Solvers.forward)
     reflow_kwargs: dict                # model_conf key, default {}
     edep_ae: dict | None               # model_conf.edep_ae, loaded: {"config", "state_dict"} of the frozen per-layer
                                        # E_dep autoencoder
@@ -152,6 +151,8 @@ def _build_resolved(config: dict, max_seq_l: int, pdgids: torch.Tensor, state_di
     n_prefix = len(cond_scalars) + 1  # + edep slot (generated)
     set_layout(cond_scalars)
     _expand_geom_encoder(model_args.get("geom_encoder"), n_prefix)
+    if model_args.get("cond_pool"):
+        model_args["cond_pool"] = n_prefix   # the field takes the number of prefix tokens (CFMTrafo_x)
     len_buckets = resolve_len_buckets(dl_conf.get("len_buckets"), max_seq_l)
     _check_lego(config, c, cond_scalars, len_buckets, state_dict)
     edep_ae = _edep_ae_spec(model_conf)
@@ -179,7 +180,6 @@ def _build_resolved(config: dict, max_seq_l: int, pdgids: torch.Tensor, state_di
         len_mode=dl_conf.get("len_mode", "split"),
         len_split=dl_conf.get("len_split", 8),
         len_max_tokens=dl_conf.get("len_max_tokens"),
-        gen_len_buckets=resolve_len_buckets(config.get("odeint_conf", {}).get("len_buckets"), max_seq_l),
         reflow_kwargs=model_conf.get("reflow_kwargs", {}),
         edep_ae=edep_ae,
         n_lat=edep_ae["config"]["K"] if edep_ae else 0,
@@ -226,6 +226,7 @@ class ResolvedMultConfig:
     val_conf: dict                     # default {}
     config: dict                       # the whole config, as resolved
     state_dict: dict | None            # the checkpoint's; None: fresh training
+    data: Any                          # the dataset (MultLoader), when resolving read it for its largest count
     inv_model_args: dict[str, Any]     # mm_conf key, default model_args
     inv_h_dim: int                     # mm_conf key, default h_dim
     inv_n_layers: int                  # mm_conf key, default n_layers
@@ -262,9 +263,11 @@ def _resolve_fresh_mult(config: dict) -> ResolvedMultConfig:
     mm_conf.setdefault("ptypes", torch.tensor(meta["particles"]).sort().values)
     mm_conf.setdefault("ptypes_in", torch.tensor(meta["particles_in"]).sort().values)
 
-    if "max_count" not in mm_conf:
-        mm_conf["max_count"] = int(MultLoader(config).counts.max().item()) + 1
-    return _build_resolved_mult(config, state_dict=None)
+    data = None
+    if "max_count" not in mm_conf:   # the count heads' size: the dataset is read here, and kept for training
+        data = MultLoader(config)
+        mm_conf["max_count"] = int(data.counts.max()) + 1
+    return _build_resolved_mult(config, state_dict=None, data=data)
 
 
 def _resolve_from_checkpoint_mult(config: dict, state_dict: dict) -> ResolvedMultConfig:
@@ -285,7 +288,7 @@ def _resolve_from_checkpoint_mult(config: dict, state_dict: dict) -> ResolvedMul
     return _build_resolved_mult(config, state_dict=state_dict)
 
 
-def _build_resolved_mult(config: dict, state_dict: dict | None) -> ResolvedMultConfig:
+def _build_resolved_mult(config: dict, state_dict: dict | None, data=None) -> ResolvedMultConfig:
     mm_conf = config["mm_conf"]
     c = {f.name: mm_conf.get(f.name, f.default) for f in fields(ResolvedMultConfig) if f.default is not MISSING}
     ptypes, ptypes_in = torch.as_tensor(mm_conf["ptypes"]), torch.as_tensor(mm_conf["ptypes_in"])
@@ -308,6 +311,7 @@ def _build_resolved_mult(config: dict, state_dict: dict | None) -> ResolvedMultC
         val_conf=config.get("val_conf", {}),
         config=config,
         state_dict=state_dict,
+        data=data,
         inv_model_args=mm_conf.get("inv_model_args", mm_conf.get("model_args", {})),
         inv_h_dim=mm_conf.get("inv_h_dim", c["h_dim"]),
         inv_n_layers=mm_conf.get("inv_n_layers", c["n_layers"]),
@@ -332,10 +336,15 @@ def build_manifold(spec: str | list) -> ProductManifold:
 
 
 def resolve_len_buckets(spec, max_seq_l: int) -> tuple[int, ...] | None:
+    """Returns the ascending bucket lengths a ``len_buckets`` spec names, ``max_seq_l`` the last; None: no buckets.
+
+    ``"auto"``: four per octave from 8 on (8, 10, 12, 14, 16, 20, ...). Padded to these, 7 % of the tokens a training
+    step runs are padding (Ar cube, 16M events); to powers of two it is 29 %, to ``max_seq_l`` 85 %.
+    """
     if spec is None:
         return None
     if spec == "auto":
-        spec = [2 ** k for k in range(3, max_seq_l.bit_length())]
+        spec = [2 ** k * j // 4 for k in range(3, max_seq_l.bit_length()) for j in (4, 5, 6, 7)]
     return tuple(sorted({int(b) for b in spec if int(b) < max_seq_l} | {max_seq_l}))
 
 
@@ -464,6 +473,13 @@ def _check_lego(config: dict, c: dict, cond_scalars: tuple, len_buckets, state_d
             raise ValueError(f"dl_conf.len_mode must be 'split' or 'group', got {len_mode!r}.")
         if len_mode == "split" and dl_conf["bs"] % len_split:
             raise ValueError(f"dl_conf.len_split={len_split} must divide dl_conf.bs={dl_conf['bs']}.")
+
+    model_args = model_conf.get("model_args", {})
+    if model_args.get("cond_pool") and (model_args.get("geom_encoder") is not None
+                                        or not model_args.get("time_cond", True)
+                                        or c["reflow_path"] or c["reflow_start_epoch"] > 0):
+        raise ValueError("model_args.cond_pool does not go with geom_encoder (both stand in for the cond-scalar "
+                         "tokens), nor with time_cond: false or reflow (their forward does not pool).")
 
     if model_conf.get("edep_ae") is not None:
         # len_mode group keeps a batch whole and in order (the per-layer targets stay with their events); split
