@@ -59,6 +59,48 @@ def test_saturation_refill_adds_no_unpredicted_species(generator: GenerateOut, m
     assert not (out_idx == 3).any(), "a 2212 (flow index 3) was refilled"
 
 
+def _counts_of(out_pid: torch.Tensor) -> list:
+    """Returns each event's outgoing count per species of the multiplicity model's ``ptypes`` = (22, 211)."""
+    return torch.stack([(out_pid == p).sum(1) for p in (22, 211)], dim=1).tolist()
+
+
+@torch.no_grad()
+def test_gt_mult_replaces_the_sampled_counts(generator: GenerateOut, monkeypatch) -> None:
+    """``gt_mult`` takes the place of the multiplicity model's sample, so that the flow is evaluated on its own: the
+    multiplicity model is not run, the slots hold exactly the given counts, and no event is a pass-through."""
+    def sampled(*args, **kwargs):
+        raise AssertionError("the multiplicity model was sampled")
+    monkeypatch.setattr(type(generator.gen_mult), "forward", sampled)
+    monkeypatch.setattr(type(generator.gen_mult), "sample_passthrough", sampled)
+    gt_mult = torch.tensor([[2, 1], [0, 3], [1, 0]])
+
+    sols, mask, _ = generator(_gun_cond(generator.pdgids[0].item(), batch=3), gt_mult=gt_mult)
+
+    assert _counts_of(_F(sols).out_p[..., -1]) == gt_mult.tolist()
+    assert (mask.sum(-1) > 0).all(), "an event generates nothing: it was treated as a pass-through"
+
+
+@torch.no_grad()
+def test_gt_mult_through_the_g4_arguments(generator: GenerateOut) -> None:
+    """``gen_model_w_g4_args`` takes ``gt_mult`` per generated event: ``B * n`` rows, in the events' order."""
+    gt_mult = torch.tensor([[1, 1], [0, 2], [3, 0], [2, 2]])   # 2 energies, n = 2 events each
+
+    out = generator.gen_model_w_g4_args(
+        2, torch.tensor([[0.0, 0.0, -1.0]]), torch.tensor([[0.0, 0.0, 1.0]]), torch.tensor([150.0, 300.0]),
+        torch.tensor([1.0]), torch.tensor([1.0]), generator.pdgids[:1], gt_mult=gt_mult)
+
+    assert _counts_of(out["per_particle"]["Outgoing"][..., -1]) == gt_mult.tolist()
+
+
+@torch.no_grad()
+@pytest.mark.parametrize("shape", [(3, 3), (2, 2)])   # a species too many; an event too few
+def test_gt_mult_of_another_shape_raises(generator: GenerateOut, shape: tuple) -> None:
+    """``gt_mult`` is one row per event and one column per species of ``ptypes``. A column too many would be
+    read as if it were not there, and the events would be generated from the wrong counts."""
+    with pytest.raises(ValueError, match="gt_mult"):
+        generator(_gun_cond(generator.pdgids[0].item(), batch=3), gt_mult=torch.ones(shape, dtype=torch.long))
+
+
 def _fake_shower(B: int = 2, L: int = 7) -> tuple:
     """Returns a synthetic batch ``(f, m, am)`` with raw PDG ids in the pdgid channel, as a dataset batch has them."""
     f = torch.zeros(B, L, 8)

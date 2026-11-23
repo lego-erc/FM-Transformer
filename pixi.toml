@@ -25,7 +25,7 @@ numpy = "*"
 matplotlib = "*"
 corner = "*"
 schedulefree = ">=1.4.1"
-pytorch-optimizer = "*"
+pytorch-optimizer = "<4"  # 4.0 moved shampoo_utils (BatchedMuon's Newton-Schulz import)
 flow-matching = ">=1.0.10"
 torch-linear-assignment = "==0.1.0"  # OT coupling (Triton on CUDA, SciPy on CPU)
 legofmt = { path = ".", editable = true }

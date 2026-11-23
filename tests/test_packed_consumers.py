@@ -21,7 +21,7 @@ from legofmt.multiplicity.model import MultLoader
 @contextmanager
 def _no_materialising():
     with warnings.catch_warnings():
-        warnings.simplefilter("error", UserWarning)
+        warnings.filterwarnings("error", message="materialising", category=UserWarning)
         yield
 
 

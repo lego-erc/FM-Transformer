@@ -6,7 +6,8 @@ One call, in the order it runs:
 cond      [*cond_scalars, mom * E_MeV (3), pos (3), pdgid] per incoming particle, as given;
           [*cond_scalars, e, dir (3), pos (3), pdgid] on the model's scales: the position ray-traced onto the cube,
           the energy split off the momentum (_model_cond); after the scalars it is the incoming token
-counts    the multiplicity model samples the pass-through flag and the counts per species (sample_counts)
+counts    the multiplicity model samples the pass-through flag and the counts per species (sample_counts); a
+          given gt_mult takes the counts' place, and then no event is a pass-through (gen_batch)
 slots     n_s = floor(c_s min(1, max_particles / C)),  C = sum_s c_s;  the slots the rounding frees take species
           sampled ~ c_s (fit_counts); the slots fill species by species (slot_species)
 tokens    [prefix, incoming, slot_1 .. slot_max_particles], the prefix being the conditioning scalar tokens and the
@@ -167,7 +168,8 @@ class GenerateOut(torch.nn.Module):
         # cuboid_dim is kept apart from proj_ray: for a model trained without the ray trace, callers stub proj_ray
         self.cuboid_dim = self.proj_ray.cuboid_dim
 
-    def __call__(self, cond: torch.Tensor, prepped: bool = False, passthrough: bool = True, rng=None):
+    def __call__(self, cond: torch.Tensor, prepped: bool = False, passthrough: bool = True, rng=None,
+                 gt_mult: torch.Tensor | None = None):
         """Generates the outgoing particles and E_dep of a batch of incoming particles.
 
         Args:
@@ -179,6 +181,9 @@ class GenerateOut(torch.nn.Module):
                 flag itself (``passthrough_prob``) and generates the interacting events.
             rng:         makes every random draw a function of the event's key: independent of the batch, and shared by
                 two models run on the same keys (``legofmt.rng.EventRNG``, one unique key per event).
+            gt_mult:     (B, S), each event's counts per species of the multiplicity model's ``ptypes``, e.g. the
+                data's: the flow generates them, and the multiplicity model is not sampled (``gen_batch``). None: the
+                sampled counts.
 
         Returns:
             ``(sols, mask, attn_mask)``: the tokens (B, L, 8) on the model's scales, the pdgid in the last channel;
@@ -186,11 +191,11 @@ class GenerateOut(torch.nn.Module):
             With ``model_conf.edep_ae`` the E_dep layers [MeV] are left in ``self.edep_layers`` (None without).
 
         Raises:
-            ValueError: ``rng`` does not hold one key per event.
+            ValueError: ``rng`` does not hold one key per event, or ``gt_mult`` is not (B, S).
         """
         rng  = rng_on(rng, cond)
         cond = self._model_cond(cond, prepped)
-        cond_fm, mask, attn_mask = self.gen_batch(cond, passthrough=passthrough, rng=rng)
+        cond_fm, mask, attn_mask = self.gen_batch(cond, passthrough=passthrough, rng=rng, gt_mult=gt_mult)
         e_in, pid_in = self._incoming_energy_pid(cond)
 
         pt_mask = mask.sum(-1) == 0                                             # nothing to generate
@@ -245,9 +250,21 @@ class GenerateOut(torch.nn.Module):
 
     # ---- the multiplicity model -------------------------------------------------------------------------------------
 
-    def gen_batch(self, cond: torch.Tensor, passthrough: bool = True, rng=None):
-        """Samples the counts and builds the flow's padded ``(cond_fm, mask, attn_mask)`` from them."""
-        return self.build_batch(cond, *self.sample_counts(cond, passthrough, rng=rng), rng=rng)
+    def gen_batch(self, cond: torch.Tensor, passthrough: bool = True, rng=None, gt_mult: torch.Tensor | None = None):
+        """Builds the flow's padded ``(cond_fm, mask, attn_mask)`` from the sampled counts, or from a given ``gt_mult``.
+
+        ``gt_mult`` is (B, S), each event's counts per species of the multiplicity model's ``ptypes``. It takes the
+        place of the sample, so that the flow is evaluated without the multiplicity model: no event is a
+        pass-through then, whatever ``passthrough`` says.
+
+        Raises:
+            ValueError: ``gt_mult`` is not (B, S).
+        """
+        if gt_mult is None:
+            pt_mask, counts = self.sample_counts(cond, passthrough, rng=rng)
+        else:
+            pt_mask, counts = self._given_counts(cond, gt_mult)
+        return self.build_batch(cond, pt_mask, counts, rng=rng)
 
     def sample_counts(self, cond: torch.Tensor, passthrough: bool = True,
                       rng=None) -> tuple[torch.Tensor, torch.Tensor]:
@@ -326,7 +343,7 @@ class GenerateOut(torch.nn.Module):
     # ---- Geant4-shaped arguments ------------------------------------------------------------------------------------
 
     def gen_model_w_g4_args(self, n, pos, mom, energy, density, size, pdgids, Z=None, A=None, passthrough=True,
-                            rng=None):
+                            rng=None, gt_mult=None):
         """Generates events from Geant4-shaped arguments.
 
         Each argument has 1 or B rows. Row b is generated ``n`` times: ``B * n`` events, ordered by row
@@ -344,6 +361,7 @@ class GenerateOut(torch.nn.Module):
                 ``cond_scalars`` name them.
             passthrough: as in ``__call__``.
             rng:         as in ``__call__``, with ``B * n`` keys in the events' order.
+            gt_mult:     as in ``__call__``, with ``B * n`` rows in the events' order.
 
         Returns:
             ``{per_event, per_particle, per_voxel}`` on the model's scales:
@@ -360,7 +378,7 @@ class GenerateOut(torch.nn.Module):
             the E_dep layers are on the same scale.
         """
         cond = self._g4_cond(n, pos, mom, energy, density, size, pdgids, Z, A)
-        sols, _, _ = self(cond, passthrough=passthrough, rng=rng)
+        sols, _, _ = self(cond, passthrough=passthrough, rng=rng, gt_mult=gt_mult)
         s = _F(sols)
         out = {
             "per_event": {"E_dep": self._edep_on_layer_scale(s), **{k: s.cond(k) for k in self.cond_names}},
@@ -407,6 +425,17 @@ class GenerateOut(torch.nn.Module):
         if not known.all():
             raise ValueError(f"incoming pdgid(s) not in the mult model's ptypes_in={self.pdgid_in.tolist()}")
         return pdgid_in_idx
+
+    def _given_counts(self, cond: torch.Tensor, gt_mult: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns ``(pt_mask, counts)`` as ``sample_counts`` does, for the given counts: no pass-through event.
+
+        Raises:
+            ValueError: ``gt_mult`` is not (B, S), a row per event and a column per species of ``ptypes``.
+        """
+        if gt_mult.shape != (len(cond), len(self.ptypes)):
+            raise ValueError(f"gt_mult needs a row per event and a column per species of ptypes="
+                             f"{self.ptypes.tolist()}: {(len(cond), len(self.ptypes))}, got {tuple(gt_mult.shape)}")
+        return torch.zeros(len(cond), dtype=torch.bool, device=cond.device), gt_mult.to(cond.device).long()
 
     def _flow(self, cond_fm, mask, attn_mask, pt_mask, rng):
         """Runs the flow on the events that interact; a pass-through event keeps its tokens as built.
