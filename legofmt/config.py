@@ -62,6 +62,8 @@ class ResolvedLEGOConfig:
                                                # not zoomed
     max_loss_weight: float = -6.0              # the floor of lv: a loss cell's weight exp(-lv) <= exp(-max_loss_weight)
     overflow_delta: float = 0.0
+    energy_border: bool = False                # the field sees the generated outgoing energy held in [0, 1], and an
+                                               # energy outside moves straight to the border (cfm/project_model.py)
     canon_sym: bool = False
     sym_aug: bool = False
     reflow_path: str | None = None
@@ -465,6 +467,9 @@ def _check_lego(config: dict, c: dict, cond_scalars: tuple, len_buckets, state_d
         raise ValueError(f"dir_zoom_nucleons_max must be an int >= 0 or absent, got {nuc}.")
     if c["overflow_delta"] < 0:
         raise ValueError(f"overflow_delta must be >= 0, got {c['overflow_delta']}.")
+    if c["energy_border"] and c["overflow_delta"] > 0:
+        raise ValueError(f"energy_border holds the outgoing energy in [0, 1], but overflow_delta puts targets at "
+                         f"{-c['overflow_delta']}, outside it: set overflow_delta to 0.")
     cuboid_dim = model_conf.get("cuboid_dim")
     if c["canon_sym"] and cuboid_dim and len(set(cuboid_dim)) > 1:
         raise ValueError(f"canon_sym rotates every face onto +x, which is a symmetry of a cube only; "

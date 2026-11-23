@@ -255,6 +255,7 @@ Top-level FM options:
 | `energy_kin` | from `meta.json`, else `True` | Use Geant4's recorded kinetic energy as the energy scalar instead of `|p|` (which saturates for hadrons). |
 | `edep_log_min` | `None` | Log-scale the E_dep token: `log(E_dep/edep_log_min)/log(max_energy/edep_log_min)`, clamped to `[0, 1]`; `None` keeps the linear `E_dep/max_energy` (superseded, `legofmt/legacy/norm.py`). |
 | `overflow_delta` | `0.0` | Sentinel offset: zero-valued outgoing-energy cells (the full-energy atom, `E_out >= E_in`) and zero-deposit E_dep targets are written to `-overflow_delta`, so the flow can separate the atom from the continuum. |
+| `energy_border` | `False` | The field is evaluated with the energy of the generated outgoing particles held in `[0, 1]`, and an energy outside moves on the straight line that reaches the border at `t = 1`: `v = (border - e) / (1 - t)`. No training path leaves `[0, 1]`, so the field is untrained outside (`legofmt/cfm/project_model.py`). Needs `overflow_delta: 0`. |
 | `proj_ray` | `True` (read by `DataPrep` only) | At prep-time, ray-trace the incoming position onto the unit-cube surface via `CubeTrace`. |
 | `canon_sym` | `False` | Canonicalise directions onto a reference cube face before the flow and undo it after (`CubeSymmetry`). Cube only (`cuboid_dim` with unequal sides raises). |
 | `sym_aug` | `False` | With `canon_sym`: a random in-face symmetry per event on top of the canonicalisation (training and generation). |

@@ -112,7 +112,7 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
 
     def _build_model(self, rc) -> nn.Module:
         """Constructs the field between its two projections (``ProjectModel``); ``LEGOLtngDirect`` overrides this."""
-        return ProjectModel(CFMTrafo_x(**rc.model_args), rc.manifold)
+        return ProjectModel(CFMTrafo_x(**rc.model_args), rc.manifold, energy_border=rc.energy_border)
 
     # ---- token maps the mixins share ------------------------------------------------------------------------------
 
