@@ -66,25 +66,29 @@ if mode is None:
 
 if mode == "chunk":
     rows = np.array_split(np.arange(len(density)), n_chunks)[int(arg)]
+    # pyg4lego takes one incoming species per batch item: every density point gets one item per species, which share
+    # its n_events_per_item events
+    items, species = np.repeat(rows, len(pdgids_in)), np.tile(pdgids_in, len(rows))
     # the chunk's materials (density, Z, A): Geant4 builds their physics tables once, instead of at every change
     chunk_materials = np.unique(np.stack((density[rows], atomic_number[rows], mass_number[rows]), axis=1), axis=0)
     data = pyg4lego.run_simulation(
-        n_events_per_item, pos, mom, energy,
+        n_events_per_item // len(pdgids_in), pos, mom, energy,
         random_energy_emax=energy_max,
         random_energy_emin=energy_min,
         random_gun=True,
-        density=density[rows],
-        atomic_number=atomic_number[rows],
-        mass_number=mass_number[rows],
+        density=density[items],
+        atomic_number=atomic_number[items],
+        mass_number=mass_number[items],
         size=np.unique(size[rows]),   # pyg4lego takes one cube edge per call: a chunk holds one material's items
         random_energy=True,
-        SourceParticles=pdgids_in,
+        SourceParticles=species,
         preregistered_materials=chunk_materials,
     )
     missing = [k for k in cond_scalars if k not in data["per_event"]]
     if missing:   # here, not in the merge after every chunk has run
         raise ValueError(f"pyg4lego wrote no per_event {missing}, which cond_scalars needs: this pyg4lego lacks main's "
                          "writeout of Z, A and Size (f3d358e)")
+    data.pop("seed", None)   # the run's Geant4 seed (pyg4lego since a483579), the one entry that is no group
     data = {grp: {k: torch.as_tensor(v) for k, v in d.items()} for grp, d in data.items()}
     if "per_slab" in data:   # per-layer E_dep (slab geometry): stored as a 4th tensor next to (f, m, am)
         data["per_event"]["E_dep_layers"] = data["per_slab"]["E_dep"]
