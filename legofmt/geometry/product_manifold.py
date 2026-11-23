@@ -1,8 +1,8 @@
-"""``ProductManifold``: one manifold per slice of the feature dimension.
+"""``ProductManifold``: one manifold per group of a token's channels.
 
-Each factor's map is applied to its own slice of the last dimension, so the
-factor dims must sum to the model's ``in_dim``. The path sampler that trains
-against it lives in ``legofmt.cfm.path_sampler``.
+Each factor's map is applied to its own channels of the last dimension, so the factors' ``ambient_dims`` must sum to
+the number of channels. ``sphere_logmap`` and ``sphere_expmap`` replace flow_matching's ``Sphere`` methods on the
+sphere factors. The path sampler on this manifold is ``legofmt/cfm/path_sampler.py``.
 """
 
 import torch
@@ -23,10 +23,10 @@ def sphere_logmap(x, y):
 
 
 def sphere_expmap(x, u):
-    """Computes ``Sphere.expmap`` with its arithmetic (bit-identical), differentiable at ``u = 0``.
+    """Computes ``Sphere.expmap`` with the same arithmetic (bit-identical values), differentiable at ``u = 0``.
 
-    ``u = 0`` is every conditioning token of a solve. The division sees 1 where the velocity is below EPS, so the unused
-    branch of the ``where`` carries no ``0/0`` (``norm``'s backward is 0 at a zero norm).
+    ``u = 0`` is every conditioning token of a solve. Where ``|u|`` is below ``Sphere.EPS`` the division sees 1, so
+    the unselected branch of the ``where`` carries no ``0/0`` (``norm``'s backward is 0 at a zero norm).
     """
     n    = u.norm(dim=-1, keepdim=True)
     big  = n > Sphere.EPS[n.dtype]

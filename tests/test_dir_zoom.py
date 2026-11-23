@@ -1,10 +1,10 @@
-"""model_conf.dir_zoom: outgoing momentum directions are learned with their polar angle about the incoming
+"""``model_conf.dir_zoom``: outgoing momentum directions are learned with their polar angle about the incoming
 direction remapped by theta' = pi * log1p(theta / theta_s) / log1p(pi / theta_s).
 
 A chained thin plate needs survivors resolved to ~1 mrad (G4: a 1 GeV proton scatters 7 mrad in 1.4 mm W, 0.5 mrad
 in 0.3 mm Si); the flow resolves ~10 mrad on the plain sphere and the error random-walks over the stack. The remap
-is a bijection of the sphere that magnifies small deflections, applied to the targets in training and undone on the
-generated sample.
+is a bijection of the sphere that magnifies small deflections. It is applied to the targets in training and undone
+on the generated events.
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ GATED = {"dir_zoom_nucleons_max": 1}
 
 
 def _nucleon_batch(model: LEGOLtng) -> DataStruct:
-    """Event 0 emits two protons (a nuclear interaction), event 1 a proton and a photon (a survivor)."""
+    """Returns a batch: event 0 emits two protons (a nuclear interaction), event 1 a proton and a photon (survivor)."""
     ds = _fake_batch()
     f, n = ds.f.full.clone(), model.rc.n_prefix
     f[0, n + 1:, 7] = 2212.0
@@ -96,9 +96,9 @@ def test_only_outgoing_tokens_of_forward_events_are_zoomed() -> None:
 
 
 def test_events_with_more_nucleons_than_the_gate_are_not_zoomed() -> None:
-    """Nuclear secondaries are spread over the sphere; the zoom is for near-identity survivors and squeezes them. In
-    G4, >= 2 outgoing nucleons marks a nuclear interaction in 99.4-99.9% of them (1.4 mm W, 0.1-1 GeV n/p); survivors
-    and EM events have <= 1 in 99.9%+."""
+    """The outgoing particles of a nuclear interaction are spread over the sphere; the zoom, made for survivors that
+    barely deflect, would squeeze them. In G4, >= 2 outgoing nucleons mark a nuclear interaction in 99.4-99.9% of
+    such events (1.4 mm W, 0.1-1 GeV n/p); survivors and EM events have <= 1 in 99.9%+."""
     model = _model(**GATED)
     ds = _nucleon_batch(model)
     x, n = ds.f.full, model.rc.n_prefix
@@ -123,7 +123,7 @@ def test_training_step_learns_the_zoomed_targets(gate) -> None:
 
 @pytest.mark.parametrize("gate", [{}, GATED], ids=["plain", "gated"])
 def test_forward_undoes_the_zoom_on_the_generated_sample(gate) -> None:
-    """The solver works in zoomed coordinates; forward hands back physical directions."""
+    """The solver works in zoomed coordinates; ``forward`` hands back physical directions."""
     model = _model(**gate).eval()
     ds = _nucleon_batch(model) if gate else _fake_batch()
     target = ds.f.model_in.clone()
@@ -137,9 +137,9 @@ def test_forward_undoes_the_zoom_on_the_generated_sample(gate) -> None:
 
 @pytest.mark.parametrize("mix", [0.25, 0.5])
 def test_blended_zoom_round_trips_and_keeps_the_backward_hemisphere_wide(mix) -> None:
-    """dir_zoom_mix w blends the linear map in: theta' = w theta + (1 - w) pi log1p(theta/theta_s)/log1p(pi/theta_s).
+    """``dir_zoom_mix`` w blends the identity in: theta' = w theta + (1 - w) pi log1p(theta/theta_s)/log1p(pi/theta_s).
     The pure log puts the whole backward hemisphere into the last 9% of theta' (theta_s 2e-3), where the flow's error
-    is magnified ~4x in physical angle; nuclear secondaries going backwards came out 2-4x too often."""
+    is magnified ~4x in physical angle: backward particles of nuclear interactions were generated 2-4x too often."""
     u, v = _pairs()
     z = zoom_polar(v, u, THETA_S, mix=mix)
     theta = torch.atan2(torch.linalg.cross(u, v).norm(dim=-1), (u * v).sum(-1))

@@ -1,17 +1,19 @@
-"""The sampler of the flow's base distribution: a draw of ``x_0``, the state the flow integrates from.
+"""The sampler of the flow's base: a sample of ``x_0``, the state the flow integrates from.
 
 ```
-energy     u = Energy(s, q).sample(z)                 the outgoing energy, as a fraction of the incoming one
-momentum   w = Angles(kappa, pw).sample(z)            its angle to the incoming momentum, / pi; azimuth uniform
-position   w = Angles(kappa, pw).sample(z)            the same about the incoming position
+energy     u = Energy(s, q).sample(z)                 an outgoing particle's energy scalar
+momentum   w = Angles(kappa, pw).sample(z)            theta / pi, its angle to the incoming momentum; azimuth uniform
+position   w = Angles(kappa, pw).sample(z)            the same about the incoming position direction
 E_dep      z                                          the event's deposit, in units of its prior
 ```
 
-``z ~ N(0, 1)``, one per cell; the distributions are ``base_dists.py``. Their parameters are the config's constants
-until the base head sets them for a batch (``interface._set_prior``), per outgoing slot.
+``z ~ N(0, 1)``, an independent one for every sampled value; the distributions are ``base_dists.py``. Their parameters
+are the config's constants (``base_conf.sm_scale``, ``base_conf.kappa``) until the base head sets them for a batch,
+per outgoing slot (``BaseDist._set_prior``).
 
-This is the recipe's draw (``scale_dist: sm_norm``, ``base_dist: poles``, ``tanh_theta`` with the shape exponent,
-``bs_frac: 0``). Every other option is :mod:`legofmt.legacy.gen_base`.
+This file samples with the recipe's options: ``scale_dist: sm_norm``, ``base_dist: poles``, ``bs_frac: 0``, and
+``tanh_theta`` with the exponent ``pw``, which only a base head sets. Every other option is
+:mod:`legofmt.legacy.gen_base`.
 """
 
 import torch
@@ -29,13 +31,13 @@ _GEOM = GeomTrafos()
 def sample_directions(angles, axis, noise, stream=0):
     """Samples unit directions about ``axis``.
 
-    The polar angle to the axis is ``theta = pi w`` with ``w`` drawn from ``angles``; the azimuth ``phi`` is uniform.
+    The polar angle to the axis is ``theta = pi w`` with ``w`` sampled from ``angles``; the azimuth ``phi`` is uniform.
 
     Args:
         angles: the distribution of ``w`` (``Angles``).
-        axis:   unit vectors (..., 3), broadcast against the noise: (B, 1, 3) is one axis per event.
-        noise:  the draws (``rng.Noise``), one per direction.
-        stream: the draw site of keyed noise: ``theta`` reads ``stream``, ``phi`` reads ``stream + 1``.
+        axis:   (..., 3), unit vectors that broadcast against the noise: (B, 1, 3) is one axis per event.
+        noise:  the noise source (``rng.Noise``); its shape is the shape of the directions.
+        stream: the draw site's id for keyed noise: ``theta`` reads ``stream``, ``phi`` reads ``stream + 1``.
 
     Returns:
         Unit vectors ``(*noise.shape, 3)``.
@@ -48,8 +50,8 @@ def sample_directions(angles, axis, noise, stream=0):
 class GenerateBase(LegacySampler):
     """The sampler of ``x_0`` for a batch.
 
-    Holds the distributions' parameters between ``interface._set_prior`` and the draw (``lego_eval`` reads
-    ``edep_mu`` / ``edep_sig`` back).
+    Holds the distributions' parameters that ``BaseDist._set_prior`` wrote for the last batch; ``lego_eval`` and
+    ``BaseDist._edep_whiten`` read ``edep_mu`` / ``edep_sig`` back.
     """
 
     def __init__(self, config: dict):
@@ -66,8 +68,8 @@ class GenerateBase(LegacySampler):
     def __call__(self, ds_t, rng=None):
         """Samples ``x_0`` for a batch.
 
-        Copies the batch and writes a draw on its E_dep token and on every outgoing slot. The conditioning tokens
-        (the scalars, the incoming particle) stay the data's.
+        Copies the batch's tokens and writes a sample on the E_dep token and on every outgoing slot. The other tokens
+        (the conditioning scalar tokens and the incoming token) keep the data's values.
 
         Args:
             ds_t: the batch (``DataStruct``).
@@ -75,9 +77,9 @@ class GenerateBase(LegacySampler):
                 None: torch's noise.
 
         Returns:
-            ``x_0`` (B, N, 7).
+            ``x_0`` (B, L, 7).
         """
-        if not self.is_recipe(): return super().__call__(ds_t, rng)   # any other option
+        if not self.is_recipe(): return super().__call__(ds_t, rng)   # legacy: every other option
         f      = ds_t.f
         slot   = R.Noise.per_slot(f.out_pid, rng)
         event  = R.Noise(f.edep.shape, f.edep.device, rng)
@@ -88,7 +90,7 @@ class GenerateBase(LegacySampler):
 
         x0 = _F(f.model_in.clone())
         x0.out_energy[:] = energy.sample(slot.normal(R.BASE_E))
-        x0.out_pos[:]    = sample_directions(angles, in_pos, slot, R.BASE_POS)   # torch's noise: position first
+        x0.out_pos[:]    = sample_directions(angles, in_pos, slot, R.BASE_POS)   # unkeyed noise is read in this order
         x0.out_mom[:]    = sample_directions(angles, in_mom, slot, R.BASE_MOM)
         x0.edep[:]       = event.normal(R.EDEP)
         return x0.full

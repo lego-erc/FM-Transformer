@@ -1,16 +1,16 @@
 """The field's time condition, handed to the encoder's adaptive norms once per event instead of once per token.
 
 Within an event the condition takes two values: ``c_gen`` on generated tokens, ``c_con`` on conditioning ones. The
-adaptive RMSNorm / layer scale of every block map a token's condition to a gain (``to_gamma``). Per event, that
-map runs on the two values instead of on every token, and each token picks its gain:
+adaptive RMSNorm / layer scale of every block maps a token's condition to a gain (``to_gamma``). In the per-event
+form that map runs on the two values instead of on every token, and each token picks its gain:
 
 ```
-per-event (B, 3, D) = [c_con, c_gen, sel]     sel[i] = 1 on a generated token (its first n_tokens entries)
+per-event (B, 3, D) = [c_con, c_gen, sel]     sel: (B, D), sel[i] = 1 where token i of the n <= D tokens is generated
 gamma_i             = to_gamma(c_gen) if sel[i] else to_gamma(c_con)
 ```
 
-~10% of a training step and of a solve (plate-Si config, H100). ``per_event_gammas`` teaches the norms of an
-x-transformers Encoder to read the per-event form, ``per_event_condition`` builds it.
+This saves ~10% of a training step and of a solve (plate-Si config, H100). ``per_event_gammas`` patches the norms of
+an x-transformers ``Encoder`` to read the per-event form; ``per_event_condition`` builds it.
 """
 
 from functools import partial
@@ -24,10 +24,11 @@ from x_transformers.x_transformers import AdaptiveLayerScale, AdaptiveRMSNorm
 def per_event_gammas(attn_layers: nn.Module) -> bool:
     """Patches the adaptive norms / layer scales of ``attn_layers`` to take a per-event ``(B, 3, D)`` condition.
 
-    Any other condition goes through the original forward.
+    Any other condition goes through the module's own forward.
 
     Returns:
-        Whether it patched: False, with nothing patched, when something else would consume the condition.
+        Whether it patched. False, with nothing patched, when ``attn_layers`` has no such module, or when something
+        else would read the condition too (another ``Adaptive*`` module, an ``adaptive_mlp``).
     """
     mods = [m for m in attn_layers.modules() if isinstance(m, (AdaptiveRMSNorm, AdaptiveLayerScale))]
     other = any(type(m).__name__.startswith("Adaptive") for m in attn_layers.modules() if m not in mods)
@@ -39,14 +40,19 @@ def per_event_gammas(attn_layers: nn.Module) -> bool:
 
 
 def _per_event_forward(mod, orig, x, *, condition, **kwargs):
+    """Applies the norm / layer scale ``mod`` with a per-event condition: each token picks one of its event's two gains.
+
+    A condition that is not (B, 3, D), and any condition on a sequence of 3 tokens (a per-token condition has that
+    shape too), goes to ``orig``, the module's own forward.
+    """
     if condition.shape[1] != 3 or x.shape[1] == 3:
         return orig(x, condition=condition, **kwargs)
     sel = condition[:, 2, :x.shape[1]].unsqueeze(-1) > 0.5
     g = mod.to_gamma(condition[:, :2])
     pick = lambda g: torch.where(sel, g[:, 1:2], g[:, :1])
-    if isinstance(mod, AdaptiveRMSNorm):  # x_transformers.AdaptiveRMSNorm.forward
+    if isinstance(mod, AdaptiveRMSNorm):  # as x-transformers' AdaptiveRMSNorm.forward
         return F.normalize(x, dim=-1) * mod.scale * (pick(g) + 1.)
-    g, out = pick(torch.sigmoid(g)), mod.fn(x, **kwargs)  # x_transformers.AdaptiveLayerScale.forward
+    g, out = pick(torch.sigmoid(g)), mod.fn(x, **kwargs)  # as x-transformers' AdaptiveLayerScale.forward
     return out * g if isinstance(out, Tensor) else (out[0] * g, *out[1:])
 
 

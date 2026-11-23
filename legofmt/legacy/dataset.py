@@ -1,12 +1,12 @@
 """Superseded dataset inputs: the padded tensors and the raw particles.
 
-A packed file (``legofmt.data.load.packed``) holds a dataset without its padding. Before it, a dataset was the padded
+A packed file (``legofmt.data.load.packed``) holds a dataset without its padding. A legacy dataset is the padded
 tensors ``(f, m, am[, edep_layers])``: a ``data_prepped.pt`` file, the same tuple in memory, or a raw dict that is cut
-and prepped on the spot. ``PaddedData`` holds them and answers the same calls as a ``PackedData``, which is what
-``load_dataset`` returns for these inputs.
+and prepped on the spot. ``PaddedData`` holds them and has the accessors of a ``PackedData``; ``load_dataset`` returns
+one for these inputs.
 
-A packed file from before a sequence element was called a token stores three fields under their old names;
-``token_names`` renames them.
+An older packed file stores three fields as ``rows`` / ``pad_row`` / ``prefix_row``; ``token_names`` gives them the
+names ``PackedData`` has (``tokens`` / ``pad_token`` / ``prefix_token``).
 """
 
 import torch
@@ -20,12 +20,12 @@ OLD_PACKED_FIELDS = {"rows": "tokens", "pad_row": "pad_token", "prefix_row": "pr
 
 
 def token_names(d: dict) -> dict:
-    """Returns a packed file's dict with ``rows`` / ``pad_row`` / ``prefix_row`` under their names of today."""
+    """Returns a packed file's dict with the keys of ``OLD_PACKED_FIELDS`` renamed to the fields of ``PackedData``."""
     return {OLD_PACKED_FIELDS.get(k, k): v for k, v in d.items()}
 
 
 class PaddedData(DataStruct):
-    """The padded tensors of a whole dataset, with the calls of a ``PackedData``."""
+    """The padded tensors of a whole dataset, with the accessors of a ``PackedData``."""
 
     @classmethod
     def read(cls, data: dict | tuple, prep, frac: float | None, device, *, inplace: bool, **cut_args) -> "PaddedData":
@@ -35,10 +35,11 @@ class PaddedData(DataStruct):
             data:     the padded tensors ``(f, m, am[, edep_layers])``, stored in MeV; or a raw dict, which is cut
                 (``GetLEGOData``, taking ``cut_args``) and prepped here.
             prep:     the ``DataPrep``: its ``norm_e`` puts padded tensors on the model scale, the whole of it preps
-                raw particles. None: the padded tensors are read as stored.
-            frac:     keep a fixed random fraction of the events.
+                raw particles. None: the padded tensors are read as stored. A ``prep`` without ``norm_e`` is called on
+                the padded tensors.
+            frac:     keep this fraction of the events, the same random ones every run.
             device:   of the raw particles' result and of ``frac``'s generator.
-            inplace:  the tensors are a fresh load nobody else holds: normalise them in place.
+            inplace:  the tensors are a fresh load nobody else holds: ``norm_e`` may normalise them in place.
 
         Raises:
             ValueError: a raw dict without a ``prep``.
@@ -87,5 +88,5 @@ class PaddedData(DataStruct):
         return self.f.in_p[..., 0, :]
 
     def species_counts(self, ptypes: Tensor) -> Tensor:
-        pid = self.f.out_p[..., -1]  # one species at a time: the broadcast compare made an (N, max_out, S) int64
+        pid = self.f.out_p[..., -1]  # one species at a time: all S at once is an (N, max_out, S) compare
         return torch.stack([(pid == p).sum(1) for p in ptypes], -1).to(torch.int16)

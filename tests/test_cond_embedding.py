@@ -1,10 +1,10 @@
-"""The conditional token embedding equals its gathered-weight einsum definition.
+"""The conditional token embedding equals its definition as an einsum over gathered weights.
 
 ``CFMTrafo_x`` embeds every token with the sum of three index-selected linear
-maps (mask, type, pdgid). The reference below materialises the summed
-``(B, L, h_dim, in_dim)`` weight and contracts it, which is the original
-formulation; the module must match it exactly (outputs and parameter
-gradients) while never building that tensor.
+maps (mask, type, pdgid). The reference below builds the summed
+``(B, L, h_dim, in_dim)`` weight and contracts it. The module must match the
+reference to float32 rounding (outputs and parameter gradients) without ever
+building that tensor.
 """
 
 import torch
@@ -30,7 +30,7 @@ def _reference(vf, x, mask, types, pdgids, h):
 
 
 def _module(vf, x, mask, types, pdgids, h):
-    """(embedding, output projection) the way the module computes them."""
+    """Returns (embedding, output projection) as the module computes them."""
     oh = vf._one_hot(mask, types, pdgids)
     return vf._embed(x, oh), vf._project_out(h, mask, oh)
 
@@ -78,15 +78,15 @@ def test_embedding_gradients_match_the_reference():
 
 
 def test_full_forward_matches_reference_path():
-    """End to end through the transformer: only the embedding changed, so a
-    forward with the reference embedding substituted must agree."""
+    """End to end through the encoder: a forward with the reference embedding and
+    projection in the module's place gives the same velocity."""
     vf, x, mask, types, pdgids = _setup()
     vf.eval()
     attn = torch.ones_like(mask, dtype=torch.bool)
     t = torch.rand(x.shape[0], x.shape[1])
     with torch.no_grad():
         v = vf(x, mask, attn, types, pdgids, t=t)
-        # reference: embed with the einsum, run the same trunk, project with the einsum
+        # reference: embed with the einsum, run the same encoder, project with the einsum
         embd_ref, _ = _reference(vf, x, mask, types, pdgids, torch.zeros(*x.shape[:2], vf.h_dim))
         tf = t.unsqueeze(-1) * vf.freqs
         cond = torch.where(vf.mask_freqs.bool(), tf.sin(), tf.cos())

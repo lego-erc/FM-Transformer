@@ -1,9 +1,10 @@
-"""``MultModel``: the count model, an autoregressive predictor of how many particles of each species leave.
+"""``MultModel``: the multiplicity model, an autoregressive model of the number of outgoing particles per species.
 
 ```
-sequence       [incoming, n_1, ..., n_{S-1}]: one slot per outgoing species s, in ptypes order
+sequence       S slots, one per outgoing species s = 0 .. S-1 in ptypes order; the tokens are
+               [incoming, n_0, ..., n_{S-2}], and slot s reads the incoming token and the counts before n_s
 incoming       h_in = proj_in([scalars, e, mom, pos on the cuboid]) + embd_pp[incoming species]
-               the directions in the canonical cube frame (canon_sym; sym_aug: a random cube symmetry on top)
+               the directions in the canonical cube frame (canon_sym; sym_aug: a random symmetry of that face on top)
 count token    embd_in[s, n_s]: the count of species s, read by the slots after it
 trunk          a causal Decoder over the sequence, h_in also its adaptive-norm condition;  out_s at slot s
 counts         P(n_s | n_<s, incoming) = softmax(out_s W_s + b_s)             one linear head per slot
@@ -11,16 +12,18 @@ pass-through   P(no interaction | incoming) = sigmoid(pt_head(out_0))         fo
 
 loss           ce_b    = mean_s CE(out_s W_s + b_s, n_s)
                L_count = sum_b w_b ce_b / sum_b w_b     w_b = 0 for a covered pass-through event, else 1
-               L_pt    = -mean log Bernoulli(pass-through | sigmoid(pt_head(out_0))), over the covered species
+               L_pt    = -mean log Bernoulli(pass-through | sigmoid(pt_head(out_0))), over the covered events
                L       = L_count + L_pt                 (L = mean_b ce_b without the head)
 log P          sum_s log softmax(out_s W_s + b_s)[n_s] + log Bernoulli(pass-through | sigmoid(pt_head(out_0)))
+               a pass-through event: the Bernoulli term alone; a species the head does not cover: the sum alone
 sampling       the pass-through flag first; then slot by slot, each count fed back as the next token (KV cache)
 ```
 
-The formulas are module functions (``count_log_prob``, ``bernoulli_log_prob``). ``MultLoader`` is its
-dataset: per event the incoming token, the counts per species, the pass-through flag. Superseded
-(:mod:`legofmt.legacy.mult_model`): the inverse-species model ``InvModel``, the residual and ``in_embd`` pass-through
-heads; a config without ``opt_conf`` and the schedule-free switch are :mod:`legofmt.legacy.optimizers`.
+An event is covered when the pass-through head covers its incoming species. The formulas are module functions
+(``count_log_prob``, ``bernoulli_log_prob``). ``MultLoader`` is the model's dataset: per event the incoming token, the
+counts per species, the pass-through flag. Superseded (:mod:`legofmt.legacy.mult_model`): the inverse-species model
+``InvModel``, the residual and ``in_embd`` pass-through heads; a config without ``opt_conf`` and the schedule-free
+switch are :mod:`legofmt.legacy.optimizers`.
 """
 
 import warnings
@@ -59,22 +62,29 @@ def count_log_prob(logits: Tensor, counts: Tensor) -> Tensor:
 
 
 def bernoulli_log_prob(logit: Tensor, x: Tensor) -> Tensor:
-    """Returns ``log P(x)`` under the Bernoulli ``sigmoid(logit)``: ``log sigmoid(logit)`` for x, else of ``-logit``."""
+    """Returns ``log P(x)`` of the Bernoulli with ``P(True) = sigmoid(logit)``.
+
+    ``log sigmoid(logit)`` where ``x`` is True, ``log sigmoid(-logit)`` where it is False.
+    """
     return torch.where(x, F.logsigmoid(logit), F.logsigmoid(-logit))
 
 
 class MultLoader(torch.utils.data.Dataset):
-    """The count model's dataset: per event ``(in_tok, counts, pdgid_in_idx[, pt_target])``.
+    """The multiplicity model's dataset: per event ``(in_tok, counts, pdgid_in_idx[, pt_target])``.
 
     ```
     in_tok         [*cond_scalars, e, mom (3), pos (3)] of the incoming particle
-    counts         the particles out per species of ptypes, held below max_out_particles
+    counts         the outgoing particles per species of ptypes, at most max_out_particles - 1 each
     pdgid_in_idx   the incoming species' index into ptypes_in
-    pt_target      1 for a pass-through event: no deposit and one particle out (passthrough_head)
+    pt_target      1 for a pass-through event: no deposit and one outgoing particle (passthrough_head)
     ```
 
+    With the legacy ``train_inverse``, ``InvModel``'s four tensors come before ``pt_target``.
+
     Args:
-        config: the count model's config; ``mm_conf.cond_scalars`` is the layout the file was written with.
+        config: the multiplicity model's config, with the defaults ``resolve_mult_config`` fills in. The token layout
+            must be set to ``mm_conf.cond_scalars``, the layout the dataset was written with (``resolve_mult_config``
+            does that).
     """
 
     def __init__(self, config: dict):
@@ -104,11 +114,11 @@ class MultLoader(torch.utils.data.Dataset):
         if self.pt_target is not None:
             ts += (self.pt_target,)
         in_tok, counts, *rest = (t[idx] for t in ts)
-        return (in_tok, counts.long(), *rest)   # stored int16, batched as class targets
+        return (in_tok, counts.long(), *rest)   # stored as int16; a batch needs int64 class targets
 
 
 class MultModel(ScheduleFreeSwitch, LightningModule):
-    """The count model (module docstring): network, loss, sampling, and its Lightning hooks.
+    """The multiplicity model (module docstring): its network, loss, sampling and Lightning hooks.
 
     Args:
         full_config: ``{"config": ..., "state_dict": ...}`` as a checkpoint stores it, or the config alone.
@@ -135,7 +145,7 @@ class MultModel(ScheduleFreeSwitch, LightningModule):
         if needs_fp32_attention(rc.model_args):
             fp32_attention(self.model)
 
-        # the tokens: the incoming particle, and one embedding table for every (slot, count)
+        # the tokens: the incoming particle, and one table with an embedding for every (slot, count)
         self.proj_in_ = nn.Linear(rc.in_dim, rc.h_dim)
         self.embd_pp_ = nn.Embedding(rc.n_ptypes_in, rc.h_dim)
         self.embd_in_ = nn.Embedding((rc.max_seq_len - 1) * rc.max_particles, rc.h_dim)
@@ -147,7 +157,7 @@ class MultModel(ScheduleFreeSwitch, LightningModule):
         self.pt_on_trunk = mm.get("passthrough_on", "in_embd") == "trunk"   # in_embd: legacy
         self.register_buffer("_pt_pdgid_allowed", _pt_covered(mm, rc.ptypes_in), persistent=False)
 
-        # the count heads: one Linear(h_dim, max_particles) per slot, fused into one table, each with nn.Linear's init
+        # the count heads: one Linear(h_dim, max_particles) per slot, stacked in one tensor, each with nn.Linear's init
         self.proj_out_w = nn.Parameter(torch.empty(rc.max_seq_len, rc.h_dim, rc.max_particles))
         self.proj_out_b = nn.Parameter(torch.empty(rc.max_seq_len, rc.max_particles))
         self._init_count_heads()
@@ -165,18 +175,18 @@ class MultModel(ScheduleFreeSwitch, LightningModule):
     def proj_in(self, x: Tensor, rng=None, stream: int = SYM_COUNT) -> Tensor:
         """Embeds the incoming token: its directions in the canonical cube frame, its position on the cuboid.
 
-        Out of place throughout: ``log_prob`` differentiates through it.
+        Without the species, which ``embd_pp_`` adds. Out of place throughout: ``log_prob`` differentiates through it.
 
         Args:
             x:      (B, in_dim), ``[*cond_scalars, e, mom (3), pos (3)]``.
-            rng:    keyed draws (``legofmt.rng.EventRNG``) for the ``sym_aug`` symmetry, or None.
-            stream: the keyed draw's site.
+            rng:    keys the ``sym_aug`` symmetry on the event (``legofmt.rng.EventRNG``), or None.
+            stream: the draw site's id (``legofmt.rng``), which a keyed symmetry uses.
 
         Returns:
-            (B, h_dim).
+            (B, h_dim), the embedding.
         """
         scalars, mom, pos = x.split((x.shape[-1] - 6, 3, 3), dim=-1)
-        if self.sym is not None:   # the canonical cube frame; sym_aug: a random cube symmetry on top
+        if self.sym is not None:   # the canonical cube frame; sym_aug: a random symmetry of that face on top
             face = self.sym.face_of(pos)
             g    = randint_like(8, face, rng, stream) if self.rc.sym_aug else None
             mom, pos = self.sym.canonicalize(torch.stack((mom, pos), dim=-2), face, g).unbind(-2)
@@ -196,7 +206,10 @@ class MultModel(ScheduleFreeSwitch, LightningModule):
         return torch.einsum("bsh,shp->bsp", out, self.proj_out_w) + self.proj_out_b, out, h_in
 
     def _pt_logit(self, out_0: Tensor, h_in: Tensor) -> Tensor:
-        """Returns the pass-through head's logit (B,), from the trunk's first output (``h_in``: the legacy head)."""
+        """Returns the pass-through head's logit, (B,), from the trunk's output at slot 0.
+
+        The legacy ``in_embd`` head reads the incoming embedding ``h_in`` instead.
+        """
         return self.pt_head(out_0 if self.pt_on_trunk else h_in).squeeze(-1)
 
     # ---- the loss ----------------------------------------------------------------------------------------------------
@@ -211,7 +224,7 @@ class MultModel(ScheduleFreeSwitch, LightningModule):
             loss_count = total = ce.mean()
         else:
             passed, covered = batch[-1].float(), self._pt_pdgid_allowed[pdgid_in_idx]
-            loss_count = masked_mean(ce, 1.0 - passed * covered)   # a covered pass-through event has no counts
+            loss_count = masked_mean(ce, 1.0 - passed * covered)   # a covered pass-through event has no count loss
             loss_pt    = masked_mean(-bernoulli_log_prob(self._pt_logit(out[:, 0], h_in), passed.bool()), covered)
             total      = loss_count + loss_pt
         if self.inv is not None:   # legacy
@@ -221,11 +234,17 @@ class MultModel(ScheduleFreeSwitch, LightningModule):
         return total
 
     def log_prob(self, in_tok: Tensor, counts: Tensor, pdgid_in_idx: Tensor, pt_mask: Tensor | None = None) -> Tensor:
-        """Returns log P of a ``forward`` sample, ``(B,)``.
+        """Returns log P of a ``forward`` sample, (B,).
 
-        The count slots' log-probabilities (teacher-forced) unless the pass-through token fired, plus the head's
-        Bernoulli term for the species it covers (``pt_mask`` as ``sample_passthrough`` drew it). Differentiable in
-        ``in_tok``: the score-function term of density design's gradient.
+        The sum of the slots' log-probabilities of ``counts``, plus the pass-through head's Bernoulli term where it
+        covers the incoming species; a pass-through event has the Bernoulli term alone. Differentiable in ``in_tok``:
+        the score-function term of the density design's gradient.
+
+        Args:
+            in_tok:       (B, in_dim), the incoming tokens.
+            counts:       (B, S), the counts, as ``forward`` returned them.
+            pdgid_in_idx: (B,), the incoming species' index into ``ptypes_in``.
+            pt_mask:      (B,), the pass-through flags, as ``sample_passthrough`` returned them; None: none passed.
 
         Raises:
             NotImplementedError: under ``sym_aug``, where ``proj_in`` samples a new cube symmetry per call and would
@@ -245,17 +264,21 @@ class MultModel(ScheduleFreeSwitch, LightningModule):
 
     @torch.no_grad()
     def passthrough_prob(self, in_tok: Tensor, pdgid_in_idx: Tensor, rng=None) -> Tensor:
-        """Returns P("this particle did not interact"), 0 for the species the head does not cover."""
+        """Returns each event's probability, (B,), that the incoming particle passes through unchanged.
+
+        0 for a species the pass-through head does not cover, and without a head. ``rng`` keys the ``sym_aug``
+        symmetry of ``proj_in``.
+        """
         if self.pt_head is None:
             return torch.zeros(in_tok.shape[0], device=in_tok.device)
         h_in = self.proj_in(in_tok, rng, SYM_PT) + self.embd_pp_(pdgid_in_idx)
         return torch.sigmoid(self._pt_logit(self._slot0(h_in), h_in)) * self._pt_pdgid_allowed[pdgid_in_idx]
 
     def sample_passthrough(self, in_tok: Tensor, pdgid_in_idx: Tensor, rng=None) -> Tensor:
-        """Samples the Bernoulli "this particle did not interact".
+        """Samples each event's pass-through flag, (B,), with probability ``passthrough_prob``.
 
-        A keyed sample (``rng``, a ``legofmt.rng.EventRNG``) evaluates the head in eval mode: dropout would be
-        randomness no key covers.
+        With ``rng`` (a ``legofmt.rng.EventRNG``) the module is put in eval mode first: dropout is randomness that no
+        key covers.
         """
         if rng is not None:
             self._eval_mode()
@@ -267,12 +290,13 @@ class MultModel(ScheduleFreeSwitch, LightningModule):
         """Samples the counts per species; puts the module in eval mode.
 
         Args:
-            batch:   ``(in_tok, _, pdgid_in_idx)``.
-            pt_mask: (B,), the pass-through events (``sample_passthrough``): each gets its incoming particle, once.
-            rng:     keyed draws (``legofmt.rng.EventRNG``), or None.
+            batch:   ``(in_tok, _, pdgid_in_idx)``; the second entry is not read.
+            pt_mask: (B,), the pass-through events (``sample_passthrough``): each gets one particle of its incoming
+                species and nothing else.
+            rng:     keys every count on the event (``legofmt.rng.EventRNG``), or None.
 
         Returns:
-            (B, S) counts.
+            (B, S), the counts per species of ``ptypes``.
         """
         self._eval_mode()
         if batch[0].dim() == 3: return inverse_pid(self, batch)   # legacy: InvModel on an outgoing set
@@ -302,17 +326,18 @@ class MultModel(ScheduleFreeSwitch, LightningModule):
     # ---- Lightning: validation on sampled counts -------------------------------------------------------------------
 
     def on_validation_epoch_start(self) -> None:
-        # rows: [0] generated counts, [1] true counts, [2, 0] event count
+        # rows: [0] the generated counts, [1] the true counts, both summed per species; [2, 0] the number of events
         self._val_acc = torch.zeros(3, self.rc.max_seq_len, device=self.device)
 
     @torch.no_grad()
     def validation_step(self, batch: tuple, batch_idx) -> None:
-        """Accumulates free-running per-species counts beside the true ones; the loss is not validated.
+        """Accumulates the sampled counts per species beside the true ones; the loss is not validated.
 
-        The loss saturates at the data's irreducible entropy while the sampled counts are still several percent off, so
-        only a rollout metric tracks the thing that is actually wrong. ``force_eager`` keeps the 19 decode shapes out of
-        the dynamo cache the compiled training step lives in. It runs in fp32, like GenerateOut: under bf16-mixed the
-        count logits (|logit| up to ~100) moved per-species counts by up to 3.7%, the size of the errors being tracked.
+        The loss saturates at the data's entropy while the sampled counts are still several percent off, so only a
+        metric on sampled counts shows the error. ``force_eager`` keeps the decode's shapes (one per slot) out of the
+        dynamo cache that holds the compiled training step. The decode runs in fp32, as in ``GenerateOut``: under bf16
+        autocast the count logits (|logit| up to ~100) move the counts per species by up to 3.7%, the size of the
+        errors being tracked.
         """
         in_tok, counts, pdgid_in_idx = batch[:3]
         with torch.compiler.set_stance("force_eager"), torch.autocast(in_tok.device.type, enabled=False):
@@ -323,7 +348,10 @@ class MultModel(ScheduleFreeSwitch, LightningModule):
         self._val_acc[2, 0] += in_tok.shape[0]
 
     def on_validation_epoch_end(self) -> None:
-        """Logs the generated / true mean count: in total, per species, and the ratios' mean absolute deviation."""
+        """Logs the generated / true mean count: in total, per species, and the species' mean of ``|ratio - 1|``.
+
+        The last two cover the species whose true mean count is above ``val_conf.count_floor``.
+        """
         acc = _summed_over_ranks(self._val_acc)
         n = acc[2, 0].clamp(min=1)
         gen, true = acc[0] / n, acc[1] / n
@@ -341,7 +369,10 @@ class MultModel(ScheduleFreeSwitch, LightningModule):
     # ---- Lightning: data and optimizer ------------------------------------------------------------------------------
 
     def setup(self, stage: str | None = None) -> None:
-        """Loads the dataset once and splits off the validation events."""
+        """Loads the dataset once and splits off the validation events.
+
+        Where resolving the config has read the dataset already (``rc.data``), that one is used.
+        """
         if getattr(self, "_val_ds", None) is not None:
             return
         data = MultLoader(self.rc.config) if self.rc.data is None else self.rc.data
@@ -390,7 +421,7 @@ class MultModel(ScheduleFreeSwitch, LightningModule):
         self.eval()
 
     def _check_scorable(self) -> None:
-        """Raises unless ``log_prob`` can score a sample: not under ``sym_aug`` (``log_prob``'s Raises)."""
+        """Raises NotImplementedError under ``sym_aug``, where ``log_prob`` cannot score a sample (see its Raises)."""
         if self.rc.sym_aug:
             raise NotImplementedError("log_prob under sym_aug: proj_in draws a new cube transform per call, so the "
                                       "counts would be scored under another one than they were sampled with")
@@ -398,7 +429,7 @@ class MultModel(ScheduleFreeSwitch, LightningModule):
     def _slot0(self, h_in: Tensor) -> Tensor:
         """Returns the trunk's output at slot 0 for the incoming token alone (``h_in`` itself for the legacy head).
 
-        Slot 0 is causal, so the one-token pass equals training's ``out[:, 0]``.
+        The trunk is causal, so slot 0's output on this one-token sequence equals training's ``out[:, 0]``.
         """
         return self.model(h_in.unsqueeze(1), mask=None, condition=h_in)[:, 0] if self.pt_on_trunk else h_in
 
@@ -412,19 +443,22 @@ class MultModel(ScheduleFreeSwitch, LightningModule):
                           input_not_include_cache=(s > 0))
 
     def _incoming_once(self, in_tok: Tensor, pdgid_in_idx: Tensor, pt_mask: Tensor) -> Tensor:
-        """Returns the counts (B, S) with one particle of the incoming species on the pass-through events, else 0."""
+        """Returns counts (B, S) that hold one particle of the incoming species on each pass-through event, else 0."""
         counts  = in_tok.new_zeros(in_tok.shape[0], self.rc.max_seq_len, dtype=torch.long)
         slot, _ = vocab_index(self.ptypes, self.ptypes_in[pdgid_in_idx[pt_mask]])
         counts[pt_mask, slot] = 1
         return counts
 
     def _log_losses(self, total: Tensor, **parts) -> None:
-        """Logs the loss and its parts (None: absent), unsynced: a per-step all-reduce for logging stalled DDP ranks."""
+        """Logs the loss and its parts; a None part is skipped.
+
+        Unsynced: an all-reduce per step, only for logging, stalls DDP ranks.
+        """
         logs = {f"loss/{k}": v.detach() for k, v in parts.items() if v is not None}
         self.log_dict({"train_loss": total, **logs}, prog_bar=True, sync_dist=False)
 
     def _make_loader(self, dataset, *, shuffle: bool):
-        """Returns ``make_loader`` with the config's batch size, workers and seed."""
+        """Constructs the DataLoader (``make_loader``) with the config's batch size, workers and seed."""
         return make_loader(dataset, bs=self.rc.mm_conf.get("bs", 2**12), shuffle=shuffle,
                            num_workers=self.rc.dl_conf.get("num_workers", 4), seed=loader_seed(self.rc.dl_conf))
 
@@ -432,7 +466,7 @@ class MultModel(ScheduleFreeSwitch, LightningModule):
 # ---- plumbing --------------------------------------------------------------------------------------------------------
 
 def _prep_config(mm_conf: dict, lds_conf: dict) -> dict:
-    """Returns the ``DataPrep`` config the count model's file is read with."""
+    """Returns the ``DataPrep`` config the multiplicity model's dataset is read with."""
     return {
         "max_energy": mm_conf["max_energy"],
         "cutoff_mev": lds_conf.get("cutoff_mev"),
@@ -451,12 +485,15 @@ def _pt_head(rc, mm: dict) -> nn.Module | None:
 
 
 def _pt_covered(mm: dict, ptypes_in: Tensor) -> Tensor:
-    """Returns which incoming species the pass-through head covers (``mm_conf.passthrough_pdgids``: the neutrals)."""
+    """Returns, (n_ptypes_in,), which incoming species the pass-through head covers.
+
+    ``mm_conf.passthrough_pdgids``; by default the neutrals, ``_NEUTRAL_PDGIDS``.
+    """
     return torch.isin(ptypes_in, ptypes_in.new_tensor(list(mm.get("passthrough_pdgids", _NEUTRAL_PDGIDS))))
 
 
 def _summed_over_ranks(acc: Tensor) -> Tensor:
-    """Sums ``acc`` over the DDP ranks, in place, and returns it (as it is without DDP)."""
+    """Sums ``acc`` over the DDP ranks, in place, and returns it; without DDP ``acc`` is returned unchanged."""
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         torch.distributed.all_reduce(acc, op=torch.distributed.ReduceOp.SUM)
     return acc

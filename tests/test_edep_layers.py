@@ -1,8 +1,9 @@
 """Optional per-layer E_dep: ``per_event["E_dep_layers"]`` of shape (B, n_layers).
 
 Prep carries it as a 4th tensor next to (f, m, am), in MeV like the E_dep token;
-``norm_e`` puts it on the E_dep token's model scale at load time. The token layout
-and the models are untouched, and 3-tuple files load as before.
+``norm_e`` puts it on the layer scale (``norm_edep_layer``) when the file is loaded.
+The token layout and the models are untouched, and a file without it (3 tensors)
+loads unchanged.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ CUTOFF = 10.0
 
 
 def _raw(n=4, k=3):
-    """n events, event 1 entirely below the cutoff (dropped by prep)."""
+    """Returns ``n`` raw events with ``k`` layers; event 1 lies entirely below the cutoff, so prep drops it."""
     def token(e, d, p, pid):
         return [e, *[e * c for c in d], *p, pid]
     inc = torch.tensor([[token(200.0, (1, 0, 0), (-50, 0, 0), 2212.0)]]).repeat(n, 1, 1)

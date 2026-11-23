@@ -1,4 +1,4 @@
-# Multiplicity model training config.
+# Training config of the multiplicity model.
 # Usage: python scripts/train.py configs/mult_default.yaml
 
 run:
@@ -10,7 +10,7 @@ run:
   matmul_precision: medium
   dtype: float32
   epochs: 10
-  dataset_size: 16_000_000     # placeholder for the scheduler at construction; fit uses the exact step count
+  dataset_size: 16_000_000     # for the scheduler's step count at construction only; fit uses the exact count
   compile: model             # false | model
   gradient_clip_val: 1.0
   val_check_interval: 0.2
@@ -20,13 +20,13 @@ run:
 
 logging:
   comet: true
-  csv_dir: null              # when comet is false: directory for a lightning CSVLogger (metrics.csv); null = no logging
-  project: lego_pdgid        # api key / workspace come from .env
+  csv_dir: null              # with comet false: the directory of a Lightning CSVLogger (metrics.csv); null: no logging
+  project: lego_pdgid        # the comet project; api key and workspace come from .env
 
 config:
   dl_conf:
     lds_args:
-      data: rp_200726   # prefixed with $LEGO_DATA_DIR at runtime
+      data: rp_200726   # the dataset directory, under $LEGO_DATA_DIR
       frac: 1.0
       cutoff_mev: 10
       min_particles: 0
@@ -34,7 +34,7 @@ config:
     num_workers: 16
 
   mm_conf:
-    cond_scalars: ["Density", "Z", "A", "Size"]   # in_dim is derived: len(cond_scalars) + 7
+    cond_scalars: ["Density", "Z", "A", "Size"]   # in_dim follows: len(cond_scalars) + 7
     dropout: 0.05
     h_dim: 128
     n_layers: 6
@@ -43,8 +43,8 @@ config:
     post_emb_norm: false
     use_abs_pos_emb: true
     canon_sym: false
-    train_inverse: false       # co-train the separate inverse-PID model (InvModel)
-    model_args:                # splatted into the count model's Decoder
+    train_inverse: false       # legacy: also train InvModel, the incoming species from the outgoing set
+    model_args:                # keyword arguments of the trunk's x-transformers Decoder
       ff_swish: true
       ff_glu: true
       attn_qk_norm: true
@@ -52,10 +52,9 @@ config:
       use_adaptive_rmsnorm: true
       use_adaptive_layerscale: true
       residual_attn: true
-    # inverse model (used only when train_inverse: true); inv_h_dim/_n_layers/
-    # _n_heads default to the count values, inv_model_args defaults to model_args.
-    # Note: rotary_xpos is invalid on the bidirectional Encoder.
-    inv_model_args:            # splatted into the inverse model's Encoder
+    # InvModel, read only with train_inverse: true. inv_h_dim / inv_n_layers / inv_n_heads default to h_dim /
+    # n_layers / n_heads, inv_model_args to model_args. rotary_xpos is invalid on its bidirectional Encoder.
+    inv_model_args:            # keyword arguments of InvModel's x-transformers Encoder
       ff_swish: true
       ff_glu: true
       attn_qk_norm: true
@@ -65,9 +64,9 @@ config:
       residual_attn: true
 
   val_conf:
-    val_frac: 0.01             # held out from training; MultModel.setup does the split
+    val_frac: 0.01             # the share of events held out for validation (MultModel.setup splits)
     seed: 0
-    count_floor: 0.005         # species below this mean count are left out of val/count_mae
+    count_floor: 0.005         # a species with a smaller mean count is left out of val/count_mae
 
   opt_conf:
     opt: muon
@@ -81,7 +80,7 @@ config:
     adamw_betas: [0.9, 0.999]
     adamw_wd: 1.0e-2
     adamw_eps: 1.0e-8
-    scheduler:                # total_steps = the trainer's exact step count
+    scheduler:                # total_steps: set to the trainer's exact step count
       cls: warmup_cosine
       warmup_frac: 0.1
       eta_min: 1.0e-6

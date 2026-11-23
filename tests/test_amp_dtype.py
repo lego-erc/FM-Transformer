@@ -1,15 +1,15 @@
-"""Inference autocast dtype: the checkpoint's precision stamp, overridable per solve.
+"""The autocast dtype of a solve: the checkpoint's precision stamp, which ``odeint_conf["amp"]`` overrides.
 
-``run.precision`` is a Lightning *training* autocast; ``scripts/train.py`` stamps it as ``additional.precision`` and
-``amp_dtype`` derives the inference autocast from it. Before, inference ran fp32 however the model was trained, which
-left 1.6x on the table for bf16-trained checkpoints: the per-token conditional-linear GEMM is 38% of inference CUDA
-time (2-step midpoint, N=16383: 0.1426 -> 0.0898 ms/event under bf16, MMD vs Geant4 0.0321 -> 0.0286). Unstamped
-(pre-2026-09) checkpoints resolve to ``None`` and keep running fp32.
+``run.precision`` is the autocast of training. ``scripts/train.py`` stamps it into the checkpoint as
+``additional.precision``, and ``config.amp_dtype`` maps the stamp to the autocast dtype of a solve. A checkpoint
+without a stamp resolves to ``None`` and is solved in fp32. Solving a bf16-trained checkpoint under bf16 is 1.6x
+faster than in fp32 (2-step midpoint, N=16383: 0.1426 -> 0.0898 ms/event, MMD vs Geant4 0.0321 -> 0.0286).
 
-The speed-up is not a property of how the checkpoint was trained (80 NFE, rho=3, N=16383: fp32-trained MMD 0.0100 fp32
-/ 0.0097 bf16, bf16-trained 0.0108 / 0.0111), so ``odeint_conf["amp"]`` overrides the stamp when present: absent
-means "use the stamp", "32" / ``None`` forces fp32 on a bf16-trained checkpoint. Pre-2.25.5 checkpoints, whose
-attention logits are ``1000*cos``, are kept fp32 elsewhere (``compat.fp32_attention``) and not re-gated here.
+``odeint_conf["amp"]`` overrides the stamp: absent means "use the stamp", "32" or ``None`` forces fp32. The override
+exists because a solve under bf16 is as good however the checkpoint was trained (80 NFE, rho=3, N=16383: MMD of an
+fp32-trained checkpoint 0.0100 in fp32 / 0.0097 under bf16, of a bf16-trained one 0.0108 / 0.0111).
+``compat.fp32_attention`` keeps the attention of checkpoints from before x-transformers 2.25.5 (logits ``1000*cos``)
+in fp32; that is not tested here.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ def _model(stamp: dict | None = None) -> LEGOLtng:
 
 
 def _dtypes_seen(model, **amp) -> list[torch.dtype]:
-    """Run one solve (``amp`` merged into odeint_conf) and report the autocast dtype the vector field ran under."""
+    """Runs one solve with ``amp`` merged into ``odeint_conf``; returns the autocast dtype of each call of the field."""
     model.rc.odeint_conf.update(method="euler", step_size=1.0, **amp)
     seen: list[torch.dtype] = []
     hook = model.model.register_forward_pre_hook(lambda *_a, **_k: seen.append(

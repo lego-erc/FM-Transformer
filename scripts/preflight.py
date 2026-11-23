@@ -1,13 +1,13 @@
-"""GPU-free preflight for a training config. Catches everything that fails before
-the first CUDA kernel -- data paths, device/allocation mismatch, ckpt_dir, config
-resolution, model construction -- in ~30s, so you don't queue for a GPU just to
-discover a typo.
+"""Checks a training config without a GPU.
+
+It catches what fails before the first CUDA kernel: the data paths, devices against the allocation, ``ckpt_dir``,
+optional dependencies, the config's resolution and, with ``--build``, the model's construction. It takes ~30 s, so a
+typo does not cost a wait for a GPU.
 
     CONDA_OVERRIDE_CUDA=13.0 pixi run -e train python scripts/preflight.py <config>
 
-The override is only needed where no GPU is visible (login node): the cuda-gated
-environment declares cuda = "13.0", so a lower value still fails.
-Exit code 0 = clear to submit; 1 = at least one blocking problem.
+The override is needed only where no GPU is visible (a login node): the cuda-gated environment declares
+``cuda = "13.0"``, so a lower value still fails. Exit code 0: clear to submit; 1: at least one blocking problem.
 """
 
 import argparse

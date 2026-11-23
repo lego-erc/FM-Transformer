@@ -1,4 +1,5 @@
-"""model_conf.exclude_passthrough removes non-interacting events from the flow."""
+"""Tests for ``interacting_only`` (``model_conf.exclude_passthrough``): the dataset view without the pass-through
+events, which the flow then never trains on."""
 
 from __future__ import annotations
 
@@ -52,7 +53,7 @@ def test_drops_only_zero_deposit_single_outgoing_events() -> None:
 
 
 def test_a_zero_deposit_event_with_secondaries_is_kept() -> None:
-    """Zero deposit alone is not pass-through; the guard is n_out == 1 too."""
+    """Zero deposit alone does not make a pass-through event: it also needs ``n_out == 1``."""
     assert len(_interacting_only(_dataset([0.0], [2]))) == 1
 
 
@@ -66,7 +67,7 @@ def test_nothing_is_dropped_when_every_event_interacts() -> None:
 
 
 def test_the_source_dataset_is_not_copied() -> None:
-    """The view must alias the original storage, not duplicate 23 GB of it."""
+    """The view must index the dataset's own storage, not duplicate 23 GB of it."""
     ds = _dataset([0.0, 0.5, 0.7], [1, 1, 1])
     view = _interacting_only(ds)
     assert view.ds is ds

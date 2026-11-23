@@ -1,14 +1,14 @@
-"""Minibatch OT coupling of the base sample to the data (``model_conf.ot_coupling``; training only).
+"""The OT coupling of each event's base sample to its data (``model_conf.ot_coupling``; training only).
 
 Each event's base slots are permuted onto its data slots by the assignment that minimises the summed cost
 
 ```
-cost[i, j] = sum_k d_k(data_i, base_j)^2     k: the token's manifold factors
+cost[i, j] = sum_k d_k(data_i, base_j)**2     k: the token's manifold factors
 d_k        = the arc on a sphere, the Euclidean distance otherwise
 ```
 
-A pair is blocked (cost 1e6) when its slots differ in pdgid, or one of them is padding. Within a species an event's
-base slots are i.i.d., so permuting them leaves the base distribution as it is.
+A pair is blocked (1e6 added to its cost) when its two slots differ in pdgid, or exactly one of them is padding.
+Within a species an event's base slots are i.i.d., so permuting them leaves the base distribution as it is.
 """
 
 import torch
@@ -22,13 +22,13 @@ try:
     from torch_linear_assignment import batch_linear_assignment
 except ImportError:
     batch_linear_assignment = None
-try:  # skips TLA's NaN / infeasibility .item() checks: our costs are finite and square
+try:  # the CUDA solver without torch-linear-assignment's NaN / infeasibility checks (an .item() each)
     from torch_linear_assignment._triton import batch_linear_assignment as _lap_cuda_unchecked
 except ImportError:
     _lap_cuda_unchecked = None
 
 
-_BLOCKED = 1e6   # the cost of a blocked pair
+_BLOCKED = 1e6   # added to the cost of a blocked pair
 
 
 def distance(manifold, a: Tensor, b: Tensor) -> Tensor:
@@ -42,12 +42,12 @@ def ot_couple(base: Tensor, ds_t: DataStruct, manifold) -> Tensor:
     """Permutes each event's base slots onto its data slots by optimal assignment.
 
     Args:
-        base:     (B, N, 7), the base sample.
+        base:     (B, L, 7), the base sample.
         ds_t:     the batch; its tokens replace the sample on padding.
-        manifold: the outgoing token's product manifold.
+        manifold: the token's product manifold.
 
     Returns:
-        ``base`` (B, N, 7) with each event's outgoing slots permuted.
+        (B, L, 7), ``base`` with each event's outgoing slots permuted.
 
     Raises:
         RuntimeError: ``torch-linear-assignment`` is not installed.
@@ -77,19 +77,22 @@ def require_lap() -> None:
 # ---- plumbing --------------------------------------------------------------------------------------------------------
 
 def _pair_cost(data: Tensor, base: Tensor, manifold) -> Tensor:
-    """Computes ``cost[b, i, j] = sum_k d_k(data_i, base_j)^2`` (B, n, n) over the manifold's factors."""
+    """Computes ``cost[b, i, j] = sum_k d_k(data_i, base_j)**2`` (B, n, n) over the manifold's factors."""
     data_i = data.unsqueeze(2).split(manifold.ambient_dims, dim=-1)   # per factor (B, n, 1, .)
     base_j = base.unsqueeze(1).split(manifold.ambient_dims, dim=-1)   # per factor (B, 1, n, .)
     return sum(distance(mf, a, b) ** 2 for mf, a, b in zip(manifold.manifolds, data_i, base_j))
 
 
 def _blocked(valid: Tensor, pid: Tensor) -> Tensor:
-    """Returns the pairs (B, n, n) whose slots differ in pdgid, or of which one is padding."""
+    """Returns the pairs (B, n, n), bool, whose two slots differ in pdgid, or of which exactly one is padding."""
     return (valid.unsqueeze(2) != valid.unsqueeze(1)) | (pid.unsqueeze(2) != pid.unsqueeze(1))
 
 
 def _assign(cost: Tensor) -> Tensor:
-    """Solves the assignment of each event's cost matrix (unchecked on CUDA: our costs are finite and square)."""
+    """Solves each event's assignment: returns (B, n), for every data slot the base slot assigned to it.
+
+    On CUDA the solver runs without its input checks: the costs here are finite and the matrices square.
+    """
     if cost.is_cuda and _lap_cuda_unchecked is not None:
         return _lap_cuda_unchecked(cost, validation="off").long()
     return batch_linear_assignment(cost).long()

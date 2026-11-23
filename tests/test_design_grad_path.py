@@ -1,6 +1,6 @@
 """The differentiable generation path: ``_solve`` / ``_forward`` are ``solve`` / ``forward`` without their
-``torch.no_grad`` (which stays on the public methods), so a design parameter written into a conditioning token can be
-differentiated through a sampled event."""
+``torch.no_grad`` (which stays on the public methods), so a sampled event can be differentiated with respect to a
+design parameter written into a conditioning token."""
 
 import pytest
 import torch
@@ -18,8 +18,11 @@ from test_helpers import _fake_batch, _head_batch, _head_config, _tiny_config
 
 
 def _wake(m: LEGOLtng) -> LEGOLtng:
-    """ada-LN-zero layerscale makes every block an identity at init, so no token sees another and a conditioning
-    cell cannot reach a generated one; perturb every trainable weight so the field mixes tokens."""
+    """Perturbs every trainable weight, so that the field mixes tokens.
+
+    At init the zero-initialised adaptive layer scale makes every block an identity: no token sees another, and a
+    conditioning cell cannot reach a generated one.
+    """
     g = torch.Generator().manual_seed(2)
     with torch.no_grad():
         for p in m.model.parameters():
@@ -87,7 +90,7 @@ def test_to_sph_gradient_finite_at_the_pole() -> None:
 
 
 def test_to_sph_gradient_finite_next_to_the_pole() -> None:
-    # x^2 + y^2 subnormal (within ~1e-19 of the axis): sqrt's and atan2's backward overflow there, as in rotate
+    # x**2 + y**2 subnormal (within ~1e-19 of the axis): sqrt's and atan2's backward overflow there, as in rotate
     cc = torch.tensor([[-2.7e-22, -2.5e-22, 1.0]], requires_grad=True)
     sph = GeomTrafos().to_sph(cc)
     assert sph[0, 0].item() < 1e-18
@@ -100,16 +103,16 @@ def test_rotate_gradient_finite_at_the_axis() -> None:
     sph = torch.tensor([[1e-5, 0.3], [0.5, 0.3]], requires_grad=True)
     zero = torch.zeros(2, 1)
     out = GeomTrafos().rotate(sph, zero, zero)
-    assert out[0, 0].item() == 0.0 and abs(out[1, 0].item() - 0.5) < 1e-6   # forward as before
+    assert out[0, 0].item() == 0.0 and abs(out[1, 0].item() - 0.5) < 1e-6   # the guard leaves the values as they are
     (g,) = torch.autograd.grad(out.sum(), sph)
     assert torch.isfinite(g).all()
 
 
 @pytest.mark.parametrize("ang_pow", [0.6, None])
 def test_sample_gradient_finite_at_a_zero_draw(monkeypatch, ang_pow) -> None:
-    # CUDA's normal draw is exactly 0 about once in 2**24 (a chunk of the optimizer draws ~6.5e4): theta = 0 about a gun
-    # along z is atan2(0, 0) in rotate, and with the trained head's ang_pow < 1 also t^p's infinite slope at t = 0;
-    # either way 0 * inf = NaN reached kappa and the density
+    # A normal draw on CUDA is exactly 0 about once in 2**24 (a chunk of the optimizer draws ~6.5e4). Then theta = 0
+    # about a gun along z: atan2(0, 0) in rotate, and with the trained head's ang_pow < 1 also the infinite slope of
+    # t**p at t = 0. Unguarded, 0 * inf = NaN reaches the gradients of kappa and of the density.
     monkeypatch.setattr(torch, "randn", lambda n, device=None: torch.zeros(n, device=device))
     kappa = torch.tensor(3.0, requires_grad=True)
     p = None if ang_pow is None else torch.tensor(ang_pow, requires_grad=True)
@@ -124,7 +127,7 @@ def test_sample_gradient_finite_at_a_zero_draw(monkeypatch, ang_pow) -> None:
 @pytest.mark.parametrize("theta", [0.0, 3.7e-22])
 def test_rotate_gradient_finite_at_the_pole(theta: float) -> None:
     # a sampled angle of 3.7e-22 about the z axis (an optimizer chunk on CUDA): rotate's atan2 backward takes the
-    # reciprocal of x^2 + y^2 = 1.4e-43, a subnormal whose reciprocal overflows to inf (exactly 0 torch masks)
+    # reciprocal of x**2 + y**2 = 1.4e-43, a subnormal whose reciprocal overflows to inf (torch masks an exact 0)
     sph = torch.tensor([[theta, 3.895]], requires_grad=True)
     alpha = torch.zeros(1, 1, requires_grad=True)
     out = GeomTrafos().to_cc(GeomTrafos().rotate(sph, alpha, torch.zeros(1, 1)))
@@ -151,7 +154,7 @@ def test_to_sph_and_rotate_values_are_the_plain_formulas() -> None:
     g = torch.Generator().manual_seed(0)
     cc = F.normalize(torch.randn(4096, 3, generator=g), dim=-1)
     cc[:3] = torch.tensor([[0.0, 0.0, 1.0], [-0.0, 0.0, 1.0], [3e-20, -2e-20, -1.0]])
-    x, y, z = F.normalize(cc, dim=-1).unbind(-1)   # to_sph normalizes its input
+    x, y, z = F.normalize(cc, dim=-1).unbind(-1)   # to_sph normalises its input
     assert torch.equal(GeomTrafos().to_sph(cc), torch.stack((torch.atan2(torch.hypot(x, y), z), torch.atan2(y, x)), -1))
     sph, alpha, beta = GeomTrafos().to_sph(cc), torch.rand(4096, 1, generator=g), torch.rand(4096, 1, generator=g)
     sph[:2, 0] = torch.tensor([1e-5, 3.7e-22])

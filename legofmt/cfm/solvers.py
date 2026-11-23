@@ -1,8 +1,9 @@
 """Integrating the flow: the manifold solvers, ``solve``, and the ``forward`` that generates a batch.
 
-One step from ``t_a`` to ``t_b = t_a + dt`` of the state ``s = (x, z)`` (``state.py``): the tokens ``x`` and the
-``model_conf.edep_ae`` latent ``z``, Euclidean (empty without one). ``v(s, t; d)`` is the field; ``d`` is the step
-size a flow-map field (``step_cond``) is told it takes, and ``d = 0`` is the instantaneous velocity.
+A step takes the state ``s = (x, z)`` (``state.py``) from ``t_a`` to ``t_b = t_a + dt``: ``x`` are the tokens, ``z``
+is the ``model_conf.edep_ae`` latent, which is Euclidean (and empty in a model without one). ``v(s, t; d)`` is the
+field; ``d`` is the step size a flow-map field (``step_cond``) is told it takes, and ``d = 0`` is the instantaneous
+velocity.
 
 ```
 euler      s_b = exp_s(dt v(s, t_a; dt))
@@ -17,16 +18,18 @@ rk4        k1  = v(s, t_a; 0)
            s_b = proj_M(s + dt (k1 + 3 (k2 + k3) + k4) / 8)
 ```
 
-``exp``, ``proj_s`` (onto the tangent space at ``s``) and ``proj_M`` (onto the manifold) are the product manifold's,
-acting on ``x``. Every step is ``step(field, man, s, t_a, t_b) -> s_b``: ``field(s, t, d=...)`` the velocity at ``s``
-(a ``State``), ``man`` the manifold's maps on a state (``LatentManifold``). Only generated tokens move.
+``exp_s``, ``proj_s`` (onto the tangent space at ``s``) and ``proj_M`` (onto the manifold) are the product manifold's
+maps, acting on ``x``. Every step is ``step(field, man, s, t_a, t_b) -> s_b``, where ``field(s, t, d=...)`` is the
+velocity at ``s`` (a ``State``) and ``man`` holds the manifold's maps on a state (``LatentManifold``). Only the
+generated tokens move.
 
 ``Solvers`` is a mixin rather than a solver object: ``lego_eval`` version-probes it with
 ``hasattr(ltng, "_midpoint_steps")`` / ``hasattr(lego, "log_likelihood")``, so the methods must stay bound on the
 LightningModule. It reads from ``LEGOLtng``: ``model``, ``types_embd``, ``rc``, ``gen_base_wrapper``,
 ``_edep_whiten``, ``convert_pdgids``, ``species_idx``, ``_enter_frame`` / ``_leave_frame``, ``_opt_eval``.
 
-Any other ``method`` (flow_matching's ``ODESolver``, e.g. ``dopri5``) is :mod:`legofmt.legacy.solvers`.
+Any other ``method`` (one of flow_matching's ``ODESolver``, e.g. ``dopri5``) is legacy
+(:mod:`legofmt.legacy.solvers`).
 """
 
 import contextlib
@@ -48,8 +51,8 @@ from legofmt.legacy.solvers import odesolver_sample
 
 from legofmt.config import amp_dtype, resolve_len_buckets
 
-# ``len_buckets: auto``: what one more solve costs, in tokens it could have run instead. Measured on the 256 x 6 field:
-# generation time is flat from 2000 to 8000, eager and compiled.
+# ``len_buckets: auto``: the fixed cost of one more solve, in the tokens it could have processed instead
+# (``cheapest_groups``). On the 256 x 6 field, generation time is flat for values from 2000 to 8000, eager and compiled.
 SOLVE_COST = 4_000
 
 
@@ -64,9 +67,9 @@ def _euler(field, man, s, t_a, t_b):
 def _midpoint(field, man, s, t_a, t_b):
     """Takes one midpoint step.
 
-    The half step is told its ``d = h``; the midpoint velocity is applied as a full step from ``s`` and stays
-    instantaneous (tests/test_midpoint_flow_map.py). Its ``d = 0`` is a tensor, not None: a None is a separate dynamo
-    guard, i.e. a second compiled graph.
+    In the half step the field is told ``d = h``. The midpoint velocity is the instantaneous one (``d = 0``) and is
+    applied as a full step from ``s`` (``tests/test_midpoint_flow_map.py``). Its ``d = 0`` is passed as a tensor:
+    None would be a second dynamo guard, and so a second compiled graph.
     """
     dt  = t_b - t_a
     h   = dt / 2
@@ -77,9 +80,9 @@ def _midpoint(field, man, s, t_a, t_b):
 def _rk4(field, man, s, t_a, t_b):
     """Takes one fourth-order Runge-Kutta step.
 
-    torchdiffeq's rk4 (the 3/8 rule) as a projection method: the stages combine in the ambient space, every step
-    ends on the manifold (through the Euclidean ODESolver the sphere factors drifted off it, shortening every later
-    angular step). All stages are instantaneous velocities (no ``d``).
+    torchdiffeq's rk4 (the 3/8 rule) as a projection method: the stages are combined in the ambient space and the
+    result is projected onto the manifold. Without the projection the sphere factors drift off the manifold, which
+    shortens every later angular step. All stages are instantaneous velocities (no ``d``).
     """
     dt = t_b - t_a
     k1 = field(s, t_a)
@@ -99,22 +102,24 @@ class Solvers:
 
     @torch.no_grad()
     def forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None, rng=None) -> tuple:
-        """Runs ``_forward`` under ``torch.no_grad``: generates a batch."""
+        """Generates a batch: ``_forward`` under ``torch.no_grad``."""
         return self._forward(batch, _batch_idx, rng=rng)
 
     def _forward(self, batch: DataStruct | tuple, _batch_idx: int | Tensor | None = None, rng=None) -> tuple:
         """Generates a batch: ``forward`` without ``torch.no_grad`` (the density design differentiates through it).
 
-        Samples the base, solves as ``odeint_conf`` says, and maps the directions back from the frame the flow works
-        in (``canon_sym``, ``dir_zoom``).
+        Samples the base, solves as ``odeint_conf`` says, and maps the directions back out of the flow's frame
+        (``canon_sym``, ``dir_zoom``).
 
         Args:
-            batch:      the conditions, a ``DataStruct`` or the three tensors it is built from.
+            batch:      the conditions: a ``DataStruct``, or the ``(f, m, am)`` it is built from.
             _batch_idx: unused.
-            rng:        keys every random draw on its event (``legofmt.rng.EventRNG``, one key per row of ``batch``).
+            rng:        keys every random draw on its event (``legofmt.rng.EventRNG``, one key per row of ``batch``);
+                None: torch's noise.
 
         Returns:
-            ``(sols, mask, attn_mask)``: the samples (B, L, 8), pdgids last, and the batch's two masks.
+            ``(sols, mask, attn_mask)``: the generated events (B, L, 8), the pdgid in the last channel and NaN on
+            padding, and the batch's two masks. With ``odeint_conf.return_timesteps`` ``sols`` is (T, B, L, 8).
         """
         cfg  = self._ready_to_generate()
         ds   = DataStruct(*batch) if isinstance(batch, tuple) else batch
@@ -128,9 +133,9 @@ class Solvers:
 
     @torch.no_grad()
     def solve(self, *args, **kwargs) -> Tensor:
-        """Runs ``_solve`` under ``torch.no_grad``: every sampling caller.
+        """Integrates the flow as ``_solve`` does, under ``torch.no_grad``: for every caller that only samples.
 
-        ``_solve`` keeps the graph (density design).
+        ``_solve`` itself keeps the graph (the density design differentiates through it).
         """
         return self._solve(*args, **kwargs)
 
@@ -150,16 +155,17 @@ class Solvers:
         """Integrates the flow along a time grid.
 
         Args:
-            ds_t:                 the batch, a ``DataStruct`` or the three tensors it is built from.
-            x_init:               (B, L, 7), the start; None: a sample of the base. At ``t = 0`` its E_dep token is in
-                the flow's unit, past it a deposit (a state as ``solve`` returns it; ``reverse``: the data).
+            ds_t:                 the batch: a ``DataStruct``, or the ``(f, m, am)`` it is built from.
+            x_init:               (B, L, 7), the start; None: a sample of the base. Its E_dep token is in the flow's
+                unit when the grid starts at ``t = 0``, and a deposit when it starts later (a state as ``solve``
+                returned it, or the data for ``reverse``).
             reverse:              integrate from 1 to 0.
-            split_size:           solve in chunks of that many events.
-            step_size:            the step; the grid has ``round(1 / step_size)`` of them.
-            method:               ``euler``, ``midpoint`` or ``rk4``.
-            time_grid:            an explicit grid, used as given.
+            split_size:           solve in chunks of that many events; None: in one.
+            step_size:            the step size; the grid has ``round(1 / step_size)`` equal steps.
+            method:               ``euler``, ``midpoint`` or ``rk4``; any other: an ``ODESolver`` method (legacy).
+            time_grid:            an explicit grid, used as given (``reverse`` does not flip it).
             return_intermediates: return the state at every grid point.
-            buckets:              pad every chunk to one of these batch sizes (``chunked``).
+            buckets:              tile every chunk up to one of these batch sizes (``chunked``).
             rng:                  keys the base and the latent on the event (``legofmt.rng.EventRNG``).
 
         Returns:
@@ -180,18 +186,20 @@ class Solvers:
                z: Tensor | None = None, **extras):
         """Integrates ``x`` along ``time_grid`` with manifold ``euler`` / ``midpoint`` / ``rk4`` steps.
 
-        Only the ``mask == 1`` tokens move; the ``model_conf.edep_ae`` latent ``z`` is integrated alongside.
+        Only the generated tokens (``mask == 1``) move; the ``model_conf.edep_ae`` latent ``z`` is integrated
+        alongside.
 
         Args:
-            method:               the step.
+            method:               ``euler``, ``midpoint`` or ``rk4``.
             x:                    (B, L, 7), the start.
-            time_grid:            the grid.
+            time_grid:            (T,), the times to step through.
             return_intermediates: return every grid point's state.
             z:                    (B, K), the latent's start; None: no latent.
-            extras:               the field's keyword inputs.
+            extras:               the field's keyword inputs: ``mask``, ``attn_mask``, ``types``, ``pdgids``.
 
         Returns:
-            The final state, or the stack of every grid point's; with ``z`` paired with the latent's.
+            The final ``x`` (B, L, 7), or every grid point's (T, B, L, 7); with ``z`` the pair ``(x, z)``, the latent
+            (B, K) or (T, B, K).
         """
         step  = _STEPPED[method]
         man   = LatentManifold(self.model.manifold)
@@ -223,9 +231,9 @@ class Solvers:
         flow_matching's ``ODESolver.compute_likelihood``.
 
         Args:
-            ds_t:      the batch, a ``DataStruct`` or the three tensors it is built from.
+            ds_t:      the batch: a ``DataStruct``, or the ``(f, m, am)`` it is built from.
             log_p0:    the base's log density, a function of the state at ``t = 0``.
-            step_size: the solver's step.
+            step_size: the solver's step size.
             method:    a torchdiffeq method.
 
         Returns:
@@ -237,7 +245,7 @@ class Solvers:
         """
         self._refuse_unsupported_likelihood()
         ds_t, pdgids_idx = self._prep_solve(ds_t)
-        x1 = torch.where(ds_t.am.full.unsqueeze(-1), ds_t.f.model_in, ds_t.f.in_cc)   # data; padding: the incoming one
+        x1 = torch.where(ds_t.am.full.unsqueeze(-1), ds_t.f.model_in, ds_t.f.in_cc)   # data; padding: incoming token
         with _field_sees_graph(self.model, after=False):
             _, log_ll = _ode_solver(self.model, method).compute_likelihood(
                 x_1=x1, log_p0=log_p0,
@@ -250,7 +258,7 @@ class Solvers:
     # ---- plumbing -----------------------------------------------------------------------------------------------
 
     def _to_eval(self) -> None:
-        """Puts the field in eval mode, and a schedule-free optimizer with it (legacy), once."""
+        """Puts a field that is in training mode in eval mode, and a schedule-free optimizer (legacy) with it."""
         if self.model.training:
             self.model.eval()
             self._opt_eval()
@@ -265,7 +273,7 @@ class Solvers:
         return ds_t, self.species_idx(ds_t.f.pdgids)
 
     def _ready_to_generate(self) -> dict:
-        """Puts the model in eval mode and compiles it once; returns ``odeint_conf``."""
+        """Puts the field in eval mode and compiles it once; returns ``odeint_conf``."""
         self._to_eval()
         cfg = self.rc.odeint_conf
         self._compile_once(cfg)
@@ -274,27 +282,34 @@ class Solvers:
     def _compile_once(self, cfg: dict) -> None:
         """Compiles the field for generation on the first call (``odeint_conf.fwd_compile``).
 
-        One graph for every batch shape, unless ``compile_dynamic: false`` asks for a graph per shape: that one
-        recompiles for every new row count.
+        By default one dynamic graph serves every batch shape. ``compile_dynamic: false`` asks for a static graph per
+        shape, which recompiles for every new number of rows.
         """
         if not cfg.get("fwd_compile", False) or is_compiled(self.model) or is_compiled(self.model.vf):
             return
         dynamic = cfg.get("compile_dynamic", True)
         if dynamic:
             dynamic_shape_attention()
-        # CUDA graphs are recorded per distinct shape and kept: a dynamic graph takes them only when compile_buckets
-        # bounds the row counts
+        # ``reduce-overhead`` records a CUDA graph per distinct shape and keeps it: a dynamic graph uses the mode only
+        # when ``compile_buckets`` bounds the numbers of rows
         self.model = torch.compile(self.model, dynamic=dynamic, mode="reduce-overhead"
                                    if not dynamic or cfg.get("compile_buckets") else None)
         len_b = resolve_len_buckets(cfg.get("len_buckets", "auto"), self.rc.max_seq_l)
-        if len_b is not None and not dynamic:
+        if len_b is not None and not dynamic:   # room for a static graph per (length bucket, compile bucket)
             torch._dynamo.config.recompile_limit += len(len_b) * max(1, len(cfg.get("compile_buckets") or ()))
 
     def _solve_as_configured(self, ds_t: DataStruct, base: Tensor, cfg: dict, rng) -> tuple[Tensor, Tensor]:
-        """Solves from ``base`` as ``odeint_conf`` says; returns the samples, NaN on padding, and their pdgids.
+        """Solves from ``base`` as ``odeint_conf`` (``cfg``) says.
 
-        ``return_base``: the base itself. ``amp``: the autocast dtype. ``filter_pdgid``: every other species NaN, with
-        pdgid 0.
+        ``split_size``, ``step_size``, ``method``, ``time_grid``, ``return_timesteps`` and ``compile_buckets`` (its
+        ``buckets``) go to ``_solve``, and:
+
+            return_base     no solve: the base itself, its E_dep token as a deposit
+            amp             the autocast dtype of the solve, in place of the model's
+            filter_pdgid    the tokens of every other species become NaN, their pdgid 0 (padding is left as it is)
+
+        Returns:
+            ``(sols, pdgids)``: the generated events (B, L, 7), NaN on padding, and the tokens' pdgids (B, L, 1).
         """
         pdgids = ds_t.f.pdgids
         am     = ds_t.am.full.unsqueeze(-1)
@@ -323,15 +338,21 @@ class Solvers:
         return sols, pdgids
 
     def _solve_by_length(self, ds_t: DataStruct, base: Tensor, rng=None, **kw) -> Tensor:
-        """Solves the events in groups of similar length, each trimmed to its bucket (``odeint_conf.len_buckets``).
+        """Solves the events in groups of similar length, each group trimmed to its length bucket.
 
-        ``"auto"``, which an absent key means too: neighbouring buckets run as one group wherever a solve of their
-        own would cost more than their padding (``cheapest_groups``). A list is taken as given. ``None``: one
-        ``_solve`` at full length. ``base`` is ``x_init``; ``kw`` goes to ``_solve``. Returns the solutions in the
-        batch's order, padded back to its length.
+        ``odeint_conf.len_buckets`` sets the buckets:
+
+            "auto"    also when the key is absent: the buckets of ``resolve_len_buckets``, with neighbouring buckets
+                      solved as one group wherever a solve of their own would cost more than the padding
+                      (``cheapest_groups``)
+            a list    these buckets, one solve for each that holds events
+            None      one ``_solve`` at the batch's full length
+
+        ``base`` (B, L, 7) is the ``x_init`` of ``_solve``; ``rng`` and ``kw`` go to ``_solve`` too. Returns the
+        solutions in the batch's order, padded back to its length ``L``.
         """
         L_max = ds_t.am.full.shape[1]
-        spec = self.rc.odeint_conf.get("len_buckets", "auto")   # per call: lego_eval sets it after construction
+        spec = self.rc.odeint_conf.get("len_buckets", "auto")   # read per call: lego_eval sets it after construction
         if spec is None:
             return self._solve(ds_t, x_init=base, rng=rng, **kw)
         lengths, order = ds_t.am.full.sum(1).sort()
@@ -351,7 +372,7 @@ class Solvers:
         return torch.cat(sols, dim=-3).index_select(-3, order.argsort())
 
     def _x_start(self, ds_t: DataStruct, x_init: Tensor | None, rng) -> Tensor:
-        """Returns ``x_init``, or a sample of the base; padding holds the incoming particle."""
+        """Returns ``x_init``, or a sample of the base when it is None; padding holds the incoming token's values."""
         if x_init is None:
             x_init = self.gen_base_wrapper(ds_t, rng=rng)
         if x_init.shape == ds_t.f.model_in.shape:
@@ -359,7 +380,7 @@ class Solvers:
         return x_init
 
     def _z_start(self, x0: Tensor, rng) -> tuple:
-        """Samples the latent's start ``(z_0,)``, N(0, 1) (B, K); ``()`` without ``model_conf.edep_ae``."""
+        """Samples the latent's start ``z_0 ~ N(0, 1)`` (B, K) as ``(z_0,)``; ``()`` without ``model_conf.edep_ae``."""
         K = self.rc.n_lat
         if not K:
             return ()
@@ -371,8 +392,8 @@ class Solvers:
                          buckets: list[int] | None) -> Tensor:
         """Runs ``_steps`` (any other method: the legacy ODESolver) on chunks of the batch (``chunked``).
 
-        The field sees x with its graph. The latent travels as extra tokens (``_pack_latent``); the final one is left
-        in ``self._edep_latents``.
+        The field sees ``x`` with its graph. The latent passes through ``chunked`` as extra tokens of the solution
+        (``_pack_latent``); the final latent is left in ``self._edep_latents``.
         """
         def sample(x, mask, attn_mask, pdgids_idx, *z):
             # contiguous: a dynamic graph is guarded on the strides / offsets of the bucket and chunk views
@@ -391,11 +412,11 @@ class Solvers:
             )
         if z0:
             sols, z = _split_latent(sols, ds_t.am.full.shape[1], self.rc.n_lat)
-            self._edep_latents = z if z.dim() == 2 else z[-1]  # the final state's, with return_intermediates
+            self._edep_latents = z if z.dim() == 2 else z[-1]  # with return_intermediates: the final state's
         return sols
 
     def _refuse_unsupported_likelihood(self) -> None:
-        """Raises for a model whose likelihood ``log_likelihood`` would get wrong."""
+        """Raises ``NotImplementedError`` for a model whose likelihood ``log_likelihood`` would get wrong."""
         if self.rc.n_lat:
             raise NotImplementedError("log_likelihood does not cover the model_conf.edep_ae latent token.")
         if self.rc.edep_whiten:
@@ -411,8 +432,8 @@ class Solvers:
             dim:        the axis to split.
             cat_dim:    the axis to concatenate along; None: ``dim``. ``-3`` is the batch axis of both a ``(B, L, C)``
                 solution and a ``(T, B, L, C)`` intermediates stack.
-            buckets:    pad every chunk to the smallest bucket that holds it, so a compiled ``fn`` only ever sees
-                ``len(buckets)`` batch shapes.
+            buckets:    batch sizes: every chunk is tiled up to the smallest one that holds it (a larger chunk runs as
+                it is), which bounds the batch shapes a compiled ``fn`` sees.
 
         Returns:
             The concatenated results.
@@ -426,7 +447,7 @@ class Solvers:
 
     @staticmethod
     def _bucketed(fn, tensors, dim, cat_dim, buckets):
-        """Applies ``fn`` to one chunk, tiled up to the smallest bucket that holds it and cut back after."""
+        """Applies ``fn`` to one chunk, tiled up to the smallest bucket that holds it; the result is cut back."""
         n = tensors[0].shape[dim]
         target = next((b for b in sorted(buckets or ()) if b >= n), None)
         if target is None or target == n:
@@ -455,7 +476,8 @@ def cheapest_groups(counts: Tensor, buckets: Tensor, solve_cost: int) -> Tensor:
         solve_cost: the fixed cost of a solve, in tokens.
 
     Returns:
-        The index of each group's longest bucket, ascending; a group runs from the previous one's to its own.
+        The index of each group's longest bucket, ascending. A group holds the buckets after the previous group's
+        index, up to its own.
     """
     K, cum = len(counts), F.pad(counts.cumsum(0), (1, 0))
     best, start = torch.zeros(2, K + 1, dtype=torch.long)
@@ -481,7 +503,10 @@ def _time_grid(time_grid, step_size: float, method: str, reverse: bool, like: Te
 
 
 def _as_returned(s: State, path: list, stacked: bool, latent: bool):
-    """Returns ``_steps``' result: the final state or the stack of ``path``, paired with the latent if there is one."""
+    """Returns the result of ``_steps``: the final state ``s``, or with ``stacked`` the stack of the states of ``path``.
+
+    As ``x`` alone, or with ``latent`` as the pair ``(x, z)``.
+    """
     if stacked:
         s = State(torch.stack([p.x for p in path]), torch.stack([p.z for p in path]))
     return tuple(s) if latent else s.x
@@ -522,7 +547,7 @@ def _ode_solver(model, method: str) -> ODESolver:
 
 @contextlib.contextmanager
 def _field_sees_graph(model, after: bool | None = None):
-    """Sets ``model.no_detach`` for the block: the field sees x with its graph (inert under ``no_grad``).
+    """Sets ``model.no_detach`` for the block: the field sees ``x`` with its graph (inert under ``no_grad``).
 
     Afterwards the flag goes back to what it was, or to ``after`` when that is given.
     """

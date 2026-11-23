@@ -1,4 +1,4 @@
-# Flow-matching model training config.
+# Training config of the flow.
 # Usage: python scripts/train.py configs/fm_default.yaml
 
 run:
@@ -6,12 +6,12 @@ run:
   name: rp_fm_v3_ddtv_220726
   devices: [1, 2, 4, 6, 7]
   nodes: 1                   # number of nodes (SLURM --nodes / Trainer num_nodes); devices are per node
-  precision: bf16-mixed      # ~20% faster than 32 at equal metrics; pre-2.25.5 (qk scale 1000) checkpoints get
-                             # fp32 attention automatically
+  precision: bf16-mixed      # ~20% faster than 32 at equal metrics; a model with a large attn_qk_norm_scale (a
+                             # checkpoint from x-transformers < 2.25.5: 1000) gets fp32 attention automatically
   matmul_precision: medium
   dtype: float32
   epochs: 10
-  dataset_size: 20_000_000     # placeholder for the scheduler at construction; fit uses the exact step count
+  dataset_size: 20_000_000     # for the scheduler's step count at construction only; fit uses the exact count
   compile: model             # false | model
   gradient_clip_val: 1.0
   val_check_interval: 0.2
@@ -21,13 +21,13 @@ run:
 
 logging:
   comet: true
-  csv_dir: null              # when comet is false: directory for a lightning CSVLogger (metrics.csv); null = no logging
-  project: lego_pdgid        # api key / workspace come from .env
+  csv_dir: null              # with comet false: the directory of a Lightning CSVLogger (metrics.csv); null: no logging
+  project: lego_pdgid        # the comet project; api key and workspace come from .env
 
 config:
   dl_conf:
     lds_args:
-      data: rp_010726   # prefixed with $LEGO_DATA_DIR at runtime
+      data: rp_010726   # the dataset directory, under $LEGO_DATA_DIR
       frac: 1.0
       cutoff_mev: 10
       min_particles: 0
@@ -43,9 +43,9 @@ config:
     bs_frac: 0.0
     base_dist: poles
     scale_dist: sm_norm
-    sm_scale: 0.5            # sm_norm tanh temperature (0.5 = old /2); raise to flatten the energy base
+    sm_scale: 0.5            # s of the energy base u = 1 - tanh(s |z|^q); a fresh base head starts from it
     tanh_theta: true
-    base_head_lik: true      # likelihood-fitted base head; needs tanh_theta and the four flags below
+    base_head_lik: true      # the base head, fitted by likelihood; needs tanh_theta and the four flags below
     base_head_nout: true
     ang_shape: true
     ang_nout: true
@@ -60,15 +60,16 @@ config:
     max_energy: 300.0
     t_dist: sd3
     t_dist_scale: 0.0
-    t_dist_shift: 1.3       # density ~ k*t^(k-1): slight right shift toward t=1 (1.0 = off)
+    t_dist_shift: 1.3       # k: t -> t^(1/k), density ~ k t^(k-1), a slight shift toward t = 1 (legacy; 1.0: off)
     one_step_euler_fac: 0.
     reflow_kwargs: {method: midpoint, step_size: 0.5}
-    reflow_start_epoch: 0    # >0 is the only on-switch for self-reflow (a reflow_path teacher runs from step 0)
+    reflow_start_epoch: 0    # legacy; > 0: self-reflow from that epoch on (a reflow_path teacher runs from step 0)
     reflow_every: 4
-    base_pretrain_batches: 9000   # base_head_lik recipe: 9000 x 16384
+    base_pretrain_batches: 9000   # the base head's fit: this many batches of base_pretrain_bs events
     base_pretrain_bs: 16384
-    edep_log_min: 1.0e-6     # the E_dep token's log scale: its floor [MeV]
-    edep_margin: true        # e-/e+/gamma: the E_dep token as the log-odds of the deposited fraction of E_in + margin
+    edep_log_min: 1.0e-6     # the floor [MeV] of E_dep's log scale
+    edep_margin: true        # the margin token: E_dep as the log-odds of the deposited fraction of E_in + margin,
+                             # for the incoming species of edep_margin_species
     edep_margin_species: [11, -11, 22]
     edep_whiten: true        # the flow carries the E_dep token in units of the base head's per-event prior
     mask_conf: { p_forward: 1. }
@@ -102,7 +103,7 @@ config:
     adamw_betas: [0.9, 0.999]
     adamw_wd: 1.0e-2
     adamw_eps: 1.0e-8
-    scheduler:                # total_steps = the trainer's exact step count
+    scheduler:                # total_steps: set to the trainer's exact step count
       cls: warmup_cosine
       warmup_frac: 0.1
       eta_min: 1.0e-6

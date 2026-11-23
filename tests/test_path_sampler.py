@@ -1,5 +1,5 @@
-"""The closed-form geodesic path equals flow_matching's GeodesicProbPath, and the
-sphere log map keeps its precision at small angles in fp32."""
+"""``ProductPathSampler``'s closed-form geodesic path equals flow_matching's ``GeodesicProbPath``, and
+``sphere_logmap`` keeps its precision at small angles in fp32."""
 
 import torch
 from flow_matching.path import GeodesicProbPath

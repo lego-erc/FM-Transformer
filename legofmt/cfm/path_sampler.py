@@ -11,8 +11,8 @@ Euclidean   x_t  = x_0 + t (x_1 - x_0)
             dx_t = x_1 - x_0
 ```
 
-``dx_t`` is the velocity the field regresses on. Both are written out per factor of the product manifold: the vmap +
-forward-mode jvp this replaces cost ~4 ms of a ~80 ms training step.
+``dx_t`` is the velocity the field regresses on. Both are written out in closed form, per factor of the product
+manifold: flow_matching's path computes ``dx_t`` by a vmap of a forward-mode jvp, ~4 ms of a ~80 ms training step.
 """
 
 import torch
@@ -26,8 +26,9 @@ from legofmt.geometry.product_manifold import ProductManifold, sphere_logmap
 def _sphere_geodesic(x0, x1, t):
     """Returns the point ``x_t`` and the velocity ``dx_t`` at ``t`` of the great circle from ``x0`` to ``x1``.
 
-    ``x_t`` is normalised like flow_matching's retraction branch, which also maps the E_dep token's (1, 1, 1) direction
-    filler onto the sphere; ``th = 0`` (x_0 = x_1) divides by the smallest float instead.
+    ``x_t`` is normalised, as in flow_matching's retraction branch; that also puts the E_dep token's (1, 1, 1)
+    direction filler onto the sphere. For ``th = 0`` (``x0 = x1``) the division is by the smallest positive float,
+    which leaves ``x_t = x0``.
     """
     v    = sphere_logmap(x0, x1)
     th   = v.norm(dim=-1, keepdim=True)
@@ -65,7 +66,7 @@ class ProductPathSampler:
 
         Returns:
             ``PathSample`` with ``x_0``, ``x_1``, ``x_t``, ``dx_t`` and ``t`` as (B, 1), the per-event form the
-            vector field conditions on.
+            field conditions on.
         """
         t_b       = _per_event(t, bases)                    # (B, 1, 1): over the tokens and channels
         x_t, dx_t = _per_factor(self.geodesics, self.manifold.ambient_dims, bases, data, t_b)
@@ -91,7 +92,10 @@ def _per_event(t, like):
 
 
 def _per_factor(geodesics, dims, x0, x1, t):
-    """Applies each factor's geodesic to its own ``dims`` channels; returns ``x_t`` and ``dx_t``, joined back."""
+    """Applies each factor's geodesic to that factor's channels (``dims``: the channels per factor).
+
+    Returns ``(x_t, dx_t)`` with the factors' channels concatenated again.
+    """
     parts     = [geodesic(a, b, t) for geodesic, a, b in zip(geodesics, x0.split(dims, dim=-1), x1.split(dims, dim=-1))]
     x_t, dx_t = (torch.cat(p, dim=-1) for p in zip(*parts))
     return x_t, dx_t

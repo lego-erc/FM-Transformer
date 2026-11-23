@@ -1,7 +1,7 @@
-"""``CornerHist``: corner plots and per-step animations of model output.
+"""``CornerHist``: corner plots of generated events against the data, as a figure or an animation.
 
-Calls the LightningModule directly, so ``odeint_conf.return_timesteps`` decides
-whether the animation has intermediate frames to draw.
+It calls the ``LEGOLtng`` itself, so ``odeint_conf.return_timesteps`` (set from ``anim_intermediates``) decides
+whether a call returns the solver's intermediate states to animate.
 """
 
 import shutil
@@ -25,6 +25,21 @@ plt.rcParams.update({"text.usetex": all(shutil.which(b) for b in ("latex", "dvip
 
 
 class CornerHist:
+    """A corner plot of the outgoing directions, the model in orange and the truth in maroon.
+
+    Args:
+        config:             the ``LEGOLtng``'s ``{"config": ...}`` dict; None: no model, a call plots given tensors.
+        figsize:            the figure's size without the cube plots.
+        title:              the figure's title.
+        anim_save_path:     where an animation is saved.
+        cube:               also plot the particles on the cube, model and truth side by side (``PlotGeom``).
+        corner:             plot the corner plot.
+        plot_en:            add the outgoing energy channel to the corner plot.
+        plot_edep:          add E_dep to the corner plot.
+        anim_intermediates: a call on a batch animates the solver's states.
+        device:             the model's device (keyword).
+    """
+
     def __init__(
         self,
         config: dict,
@@ -58,6 +73,16 @@ class CornerHist:
                                                 markerfacecolor=col)
 
     def __call__(self, batch: tuple, truth=None):
+        """Plots ``batch``; returns the figure, or the animation.
+
+        ```
+        a batch (f, m, am)                  the model's samples against the batch's data; with
+                                            ``anim_intermediates`` an animation over the solver's states
+        a tensor of samples [, truth]       the tensors as given, (B, N, 7) or (B, N, 8)
+        tuples of such tensors, truth       an animation, one frame per pair
+        a tuple of tensors of > 3 axes      an animation, one frame per entry: each is run through the model
+        ```
+        """
         self.fig_sup, self.fig = self.make_fig(self.title, cube=self.cube, corner_=self.corner_)
 
         def is_t_tup(x):
@@ -102,7 +127,7 @@ class CornerHist:
             anim.save(self.anim_save_path, writer="pillow")
         return anim
 
-    # sols / truth are (B, N, 7) model blocks or (B, N, 8) with the pdgid column; [..., :7] is the block for both
+    # sols / truth: (B, N, 7) tokens, or (B, N, 8) with the pdgid channel; [..., :7] are the model's channels of both
 
     def plot_tensors(self, sols, truth=None):
         truth_e_dep = truth_cc = None

@@ -1,7 +1,7 @@
-"""base_conf.ang_species: one angular prior (kappa, and pow with ang_shape) per outgoing species.
+"""``base_conf.ang_species``: one angular prior (kappa, and pow with ``ang_shape``) per outgoing species.
 
-The pooled prior lands between the species: photons came out over-dispersed while electrons sat
-at the null. Per-slot moment matching lets each species get its own opening-angle distribution.
+A prior pooled over the species lies between them: photons were generated over-dispersed while electrons
+matched Geant4. Matching the moments per outgoing slot gives each species its own opening-angle distribution.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ def test_head_width_one_angular_block_per_species(ang_shape) -> None:
 
 def test_per_slot_prior_recovers_species_specific_kappas() -> None:
     """Two species with different opening angles in every event: fitting the per-slot branch of
-    _base_moment_loss recovers one kappa per species, while the pooled branch can only settle on a
+    ``_base_moment_loss`` recovers one kappa per species, while the pooled branch can only settle on a
     compromise between them."""
     class M(LegacyBaseDist):
         def __init__(self):

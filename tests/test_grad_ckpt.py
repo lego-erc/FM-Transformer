@@ -1,9 +1,8 @@
-"""Tests for ``model_args.grad_ckpt`` -- per-block gradient checkpointing in
+"""Tests for ``model_args.grad_ckpt`` (legacy): gradient checkpointing of every encoder block of
 :class:`legofmt.cfm.cfm_trafo_x.CFMTrafo_x`.
 
-Checkpointing must be a pure memory/speed trade: identical outputs, identical
-gradients, identical state_dict (so checkpoints load in both directions), and
-it must actually recompute the blocks during backward.
+Checkpointing must change memory and speed only: the same outputs and gradients, the same ``state_dict`` keys (so
+checkpoints load in both directions), and the blocks really are recomputed during backward.
 """
 
 from __future__ import annotations
@@ -64,7 +63,7 @@ def test_grad_ckpt_recomputes_blocks_in_backward() -> None:
     for ckpt in (False, True):
         m = _build(ckpt)
         m.train()
-        attn = m.vf.attn_layers.layers[0][1].fn  # first Attention block
+        attn = m.vf.attn_layers.layers[0][1].fn  # the first attention block
 
         def hook(*_a, _ck=ckpt, **_k):
             calls[_ck] += 1
@@ -73,7 +72,7 @@ def test_grad_ckpt_recomputes_blocks_in_backward() -> None:
         _fwd(m, _inputs()).square().sum().backward()
         h.remove()
     assert calls[False] == 1, calls
-    assert calls[True] == 2, calls  # forward + recompute during backward
+    assert calls[True] == 2, calls  # the forward, and the recomputation during backward
 
 
 def test_grad_ckpt_state_dict_keys_unchanged() -> None:

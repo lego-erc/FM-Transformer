@@ -1,6 +1,8 @@
-"""legofmt.rng.EventRNG: opt-in per-event counter-based random numbers for generation. Every draw is a pure function
-of (seed, event key, draw site, element), so an event's randomness does not depend on its batch, its row, or which
-other events a caller subsets -- and two models generating the same keyed events share it (common random numbers)."""
+"""Tests for ``legofmt.rng.EventRNG``, the opt-in keyed random numbers for generation.
+
+Every draw is a function of (seed, event key, stream, element) only. An event's draws therefore do not depend on its
+batch, on its row, or on the other events of the call, and two models that generate the same keyed events share them
+(common random numbers)."""
 
 from __future__ import annotations
 
@@ -21,7 +23,8 @@ from test_helpers import _flow_config, _gun_cond, _pt_mult_config, _save_mult_ck
 
 @pytest.fixture(scope="module")
 def generator(tmp_path_factory: pytest.TempPathFactory) -> GenerateOut:
-    """A velocity flow and a pass-through-head count model, both drawing a cube transform (canon_sym + sym_aug)."""
+    """A flow and a multiplicity model with a pass-through head; both sample a cube symmetry per event (``canon_sym``
+    + ``sym_aug``)."""
     tmp = tmp_path_factory.mktemp("rng_ckpts")
     torch.manual_seed(0)
     cfg = _flow_config()
@@ -39,7 +42,7 @@ def _layout(generator: GenerateOut) -> None:
 
 
 def _mixed_cond(n: int = 24) -> torch.Tensor:
-    """Photons (the pass-through head covers them) and protons, interleaved."""
+    """Returns ``cond`` for photons (the pass-through head covers them) and protons, interleaved."""
     return torch.stack((_gun_cond(22, batch=n), _gun_cond(2212, batch=n)), 1).reshape(2 * n, -1)
 
 
@@ -55,7 +58,7 @@ def test_draws_depend_on_the_key_not_the_row() -> None:
         assert torch.equal(draw(full)[rows], draw(sub)) and torch.equal(draw(sub), draw(other))
     assert torch.equal(full.uniform(6, per_row)[rows], sub.uniform(6, per_row[rows]))
     assert not torch.equal(full.uniform(1), EventRNG(keys, seed=6).uniform(1))     # the seed matters
-    assert not torch.equal(full.uniform(1), full.uniform(2))                       # so does the draw site
+    assert not torch.equal(full.uniform(1), full.uniform(2))                       # so does the stream
 
 
 def test_draws_have_the_requested_distributions() -> None:
@@ -117,7 +120,7 @@ def test_keyed_generation_does_not_depend_on_batch_layout(generator: GenerateOut
 
 @torch.no_grad()
 def test_keyed_base_pairs_slots_by_species_and_rank(generator: GenerateOut) -> None:
-    """An extra particle of one species leaves every other slot's x_0 as it was."""
+    """An extra particle of one species leaves the x_0 of every other particle as it was, whichever slot it is in."""
     cm = generator._model_cond(_gun_cond(2212, batch=1), False)
     pt = torch.zeros(1, dtype=torch.bool)
     draws = {}
@@ -135,7 +138,8 @@ def test_keyed_base_pairs_slots_by_species_and_rank(generator: GenerateOut) -> N
 
 @torch.no_grad()
 def test_keyed_counts_couple_two_count_models(generator: GenerateOut) -> None:
-    """Inverse-CDF draws from shared uniforms: a slightly different count model mostly draws the same counts."""
+    """With shared keys a slightly different multiplicity model samples mostly the same counts (inverse CDF of shared
+    uniforms)."""
     mult_in, pidx = generator._mult_in(generator._model_cond(_mixed_cond(200), False))
     other = copy.deepcopy(generator.gen_mult)
     other.proj_out_b.data += 0.2 * torch.randn(other.proj_out_b.shape, generator=torch.Generator().manual_seed(0))

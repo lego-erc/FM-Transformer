@@ -1,4 +1,4 @@
-"""``DataPrep.norm_edep_layer`` / ``denorm_edep_layer``: the optional log scale for E_dep."""
+"""``DataPrep.norm_edep_layer`` / ``denorm_edep_layer``: E_dep's log scale (``edep_log_min``); linear without it."""
 
 import pytest
 import torch
@@ -23,8 +23,8 @@ def test_default_is_the_linear_scale():
 
 def test_log_scale_lifts_the_low_end_off_zero():
     out = _prep(1e-6).norm_edep_layer(MEV)
-    assert out[0] == 0.0                       # zero deposit stays the atom
-    assert out[1] == 0.0                       # at the floor -> atom
+    assert out[0] == 0.0                       # no deposit stays exactly 0
+    assert out[1] == 0.0                       # at the floor -> exactly 0
     assert out[2] > 0.25                       # smallest real deposit, clear of 0
     assert torch.all(out[2:].diff() >= 0)      # monotone above the floor
     assert out.max() <= 1.0                    # bounded, so > max_energy clamps

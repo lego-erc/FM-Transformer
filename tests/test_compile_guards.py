@@ -1,11 +1,11 @@
-"""``_step`` hands a step-conditioned field an explicit zero ``d``, never ``None``.
+"""``_step`` hands a field with ``step_cond`` a zero tensor as ``d``, never ``None``.
 
-``torch.compile`` guards ``d is None`` apart from ``d: Tensor``, and that axis multiplies with the grad-mode guard
-(the CFM step and flow-map student run under grad, the teacher and validation under ``no_grad``): four graphs for
-one function before the batch shapes are counted, which reaches dynamo's default ``recompile_limit`` of 8. Past it
-dynamo silently runs the frame eager for the rest of the run (``flow/kin_1step_040926``, 2026-09-04).
-``ProjectModel.forward`` substitutes ``zeros_like(t)`` for ``None``, so the zero is bitwise identical -- asserted
-below, because that is the change's whole justification.
+``torch.compile`` guards ``d is None`` apart from a tensor ``d``, and that guard multiplies with the grad-mode guard
+(the CFM step and the flow-map student run under grad, the teacher and validation under ``no_grad``): four graphs of
+one function before the batch shapes are counted. That reaches dynamo's default ``recompile_limit`` of 8, and past it
+dynamo silently runs the frame eager for the rest of the run (seen in ``flow/kin_1step_040926``).
+``ProjectModel`` replaces a ``None`` by ``zeros_like(t)``, so the zero tensor gives bitwise the same velocity: the
+first test asserts it.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ def test_zero_d_is_bitwise_identical_to_none() -> None:
 
 
 def test_step_passes_a_tensor_d_when_step_conditioned() -> None:
-    """The guard axis is closed only if the CFM step passes a Tensor, not None."""
+    """The CFM step passes ``d`` as a zero tensor; a ``None`` would add the ``d is None`` guard and its graphs."""
     m = _model(step_cond=True)
     seen: list[object] = []
     m.model.register_forward_pre_hook(lambda _mod, _a, kw: seen.append(kw.get("d", None)), with_kwargs=True)
@@ -51,6 +51,6 @@ def test_step_passes_a_tensor_d_when_step_conditioned() -> None:
 
 
 def test_no_d_kwarg_when_not_step_conditioned() -> None:
-    """Models without step_cond must keep passing None (vf never sees a d)."""
+    """A model without ``step_cond`` builds a field without it: that field never reads a ``d``."""
     m = _model(step_cond=False)
     assert getattr(m.model.vf, "step_cond", False) is False

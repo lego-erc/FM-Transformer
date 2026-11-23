@@ -9,17 +9,21 @@ cells      L_c = the mean of |v - dx_t|**2 over the generated tokens' channels o
              out_pos   channels 4:7
              edep      the E_dep token's channel 0 (edep_cell)
              lat       |v_z - (z_1 - z_0)|**2 (edep_ae)
-total      sum_c exp(-lv_c) L_c + lv_c                     learned_loss_weights (Kendall), lv_c >= its floor
+total      sum_c (exp(-lv_c) L_c + lv_c)                   learned_loss_weights (Kendall), lv_c >= its floor
            sum_c L_c                                       otherwise
-flow map   + fac (lv_f + every exp(-lv_f) L_fm)            on the steps it fires (every one_step_euler_every-th)
-           + fac lv_f                                      on the others: in expectation the Kendall term
+flow map   + fac (lv_f + every exp(-lv_f) L_fm)            where global_step % every == 0: L_fm is evaluated
+           + fac lv_f                                      on the other steps
+                                                           fac = one_step_euler_fac, every = one_step_euler_every
 ```
 
+Averaged over the steps, the two flow-map lines are ``fac (lv_f + exp(-lv_f) L_fm)``, the Kendall form of a cell;
+without learned loss weights ``lv_f`` is 0.
+
 The formulas are module functions (``sd3_time``, ``latent_path``, ``loss_cells``, ``kendall_total``,
-``flow_map_term``); ``TrainStep`` puts the batch into the frame the flow learns in, samples the path, and reduces.
-Inverse events (``mask_conf.p_forward < 1``), the ``sm_norm`` time and reflow are :mod:`legofmt.legacy.train_step`.
-``reduce_loss`` returns ``(total, logs)`` so that it runs without a Trainer; ``LEGOLtngDirect`` (``legacy/reflow.py``)
-reuses it.
+``flow_map_term``); ``TrainStep`` puts the batch into the frame the flow learns in, samples the path, and reduces the
+squared errors to the loss. Inverse events (``mask_conf.p_forward < 1``), the ``sm_norm`` and the shifted time
+distribution, and reflow are :mod:`legofmt.legacy.train_step`. ``reduce_loss`` returns ``(total, logs)`` so that it
+runs without a Trainer; ``LEGOLtngDirect`` (``legacy/reflow.py``) reuses it.
 """
 
 import torch
@@ -44,10 +48,10 @@ def latent_path(z0: Tensor, z1: Tensor, t: Tensor) -> tuple[Tensor, Tensor]:
 
 
 def loss_cells(sq: Tensor, gen: Tensor, edep: Tensor | None = None, sq_lat: Tensor | None = None) -> Tensor:
-    """Returns each loss cell's mean squared error (C,), in the order of the loss weights.
+    """Returns each loss cell's mean squared error (C,), in the order of the loss weights ``lv``.
 
     ```
-    energy    the energy channel of the generated particles       (without ``edep``: of every generated token)
+    energy    the energy channel of the generated tokens          (with ``edep``: without the E_dep tokens)
     out_dir   the direction channels of the generated tokens
     out_pos   the position channels of the generated tokens
     edep      the energy channel of the generated E_dep tokens    (with ``edep``)
@@ -56,9 +60,10 @@ def loss_cells(sq: Tensor, gen: Tensor, edep: Tensor | None = None, sq_lat: Tens
 
     Args:
         sq:     (B, L, 7), the squared error per token and channel.
-        gen:    (B, L, 1), the generated tokens.
-        edep:   (B, L, 1), the generated E_dep tokens where E_dep is a cell of its own, else None.
-        sq_lat: the squared error of the edep_ae latent's velocity, or None.
+        gen:    (B, L, 1), bool: the generated tokens.
+        edep:   (B, L, 1), bool: the generated E_dep tokens when E_dep is a loss cell of its own (``edep_cell``),
+            else None.
+        sq_lat: (B, K), the squared error of the edep_ae latent's velocity, or None.
     """
     energy, out_dir, out_pos = sq.split((1, 3, 3), dim=-1)
     particles = gen if edep is None else gen & ~edep
@@ -71,12 +76,18 @@ def loss_cells(sq: Tensor, gen: Tensor, edep: Tensor | None = None, sq_lat: Tens
 
 
 def kendall_total(cells: Tensor, lv: Tensor) -> Tensor:
-    """Returns ``sum_c exp(-lv_c) L_c + lv_c``: each cell weighted by its learned inverse variance, plus the barrier."""
+    """Returns ``sum_c (exp(-lv_c) L_c + lv_c)``: each cell times its learned inverse variance, plus its log-variance.
+
+    The ``+ lv_c`` keeps a variance from growing without bound.
+    """
     return (torch.exp(-lv) * cells).sum() + lv.sum()
 
 
 def flow_map_term(l_fm: Tensor, fac: float, every: int, lv_f: Tensor | None = None) -> Tensor:
-    """Returns ``fac every exp(-lv_f) L_fm``, the flow-map term on a step it fires (``fac every L_fm`` without lv_f)."""
+    """Returns ``fac every exp(-lv_f) L_fm``, the flow-map term of a step that evaluates ``L_fm``.
+
+    Without ``lv_f`` (no learned loss weights): ``fac every L_fm``.
+    """
     w = fac * every
     if lv_f is not None:
         w = w * torch.exp(-lv_f)
@@ -87,16 +98,16 @@ class TrainStep:
     """Training-step mixin for :class:`~legofmt.main.modules.LEGOLtng`."""
 
     def _step(self, ds_t: DataStruct, _batch_idx: int | Tensor) -> Tensor:
-        """Computes one batch's loss, as the module docstring has it.
+        """Computes one batch's loss (module docstring).
 
         Args:
-            ds_t:       the batch.
+            ds_t:       the batch, as the DataLoader delivers it.
             _batch_idx: unused (Lightning's signature).
 
         Returns:
             The loss (a scalar).
         """
-        layers = ds_t.edep_layers   # taken first: the frame's rewrapped batches drop it
+        layers = ds_t.edep_layers   # read first: the batches rebuilt below do not carry the per-layer E_dep
         ds_t, model = self._length_bucket(ds_t)
         with torch.no_grad():
             ds_t = self._flow_frame(ds_t)
@@ -105,7 +116,8 @@ class TrainStep:
             pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
             t = self._sample_t(ds_t)
             if self.reflow_teacher is not None: ds_t = self._reflow_coupling(ds_t, base)   # legacy: reflow
-            f    = self._edep_whiten(ds_t.f.full, ds_t, drawn=True)   # base's E_dep unit, by the prior drawn above
+            # the data's E_dep token in units of its prior, which gen_base_wrapper set above (no second head call)
+            f    = self._edep_whiten(ds_t.f.full, ds_t, drawn=True)
             ds_t = DataStruct(f, ds_t.m.full, ds_t.am.full)
             path = self.ps.sample(base, ds_t.f.model_in, t)
             z_t, dz = (None, None) if z is None else latent_path(*z, path.t)
@@ -134,10 +146,10 @@ class TrainStep:
         Args:
             sq:     (B, L, 7), the squared error per token and channel.
             ds_t:   the batch; ``m`` and ``am`` pick the generated tokens.
-            sq_lat: the squared error of the latent's velocity, or None.
+            sq_lat: (B, K), the squared error of the latent's velocity, or None.
 
         Returns:
-            ``(total, logs)``: the loss, and in training the unweighted cells (and the weights' variances) to log.
+            ``(total, logs)``: the loss, and the entries to log (``_loss_logs``; empty outside training).
         """
         gen   = _generated(ds_t)
         cells = loss_cells(sq, gen, _edep_token(gen) if self.rc.edep_cell else None, sq_lat)
@@ -149,25 +161,25 @@ class TrainStep:
 
     def _flow_map_loss(self, loss: Tensor, base: Tensor, ds_t: DataStruct, pdgid_idx: Tensor, model=None,
                        z=None) -> Tensor:
-        """Adds the flow-map term (module docstring) to ``loss``; validation evaluates ``L_fm`` every step.
+        """Adds the flow-map term (module docstring) to ``loss``; validation evaluates ``L_fm`` on every step.
 
         Args:
             loss:      the velocity loss.
-            base:      the batch's x_0.
+            base:      (B, L, 7), the batch's x_0.
             ds_t:      the batch, in the frame and units of the velocity loss.
-            pdgid_idx: the tokens' species indices.
-            model:     the field (the piecewise one in split mode).
+            pdgid_idx: (B, L, 1), the tokens' species indices.
+            model:     the field to call (in split mode the piecewise one); None: ``self.model``.
             z:         ``(z_0, z_1)`` of the edep_ae latent, or None.
 
         Returns:
-            ``loss`` with the term added.
+            ``loss`` with the term added; ``loss`` itself when ``one_step_euler_fac`` is 0.
         """
         fac, every = self.rc.one_step_euler_fac, self.rc.one_step_euler_every
         if fac <= 0:
             return loss
         lv_f = self._flow_map_lv()
         if lv_f is not None:
-            loss = loss + fac * lv_f                                  # the Kendall barrier, on every step
+            loss = loss + fac * lv_f                                  # the log-variance term, on every step
         if self.training and self.global_step % every != 0:
             return loss
 
@@ -180,12 +192,14 @@ class TrainStep:
 
     @torch.no_grad()
     def _flow_frame(self, ds_t: DataStruct) -> DataStruct:
-        """Returns the batch as the flow learns it: the zero atoms moved, the canonical frame, the zoomed directions.
+        """Returns the batch as the flow learns it: the exact zeros moved, the canonical frame, the zoomed directions.
 
         ```
-        overflow    an outgoing energy 0 (the full-energy atom) and an E_dep 0 (no deposit) -> -overflow_delta
-        canon_sym   every event rotated onto the canonical cube face; sym_aug: a random cube symmetry on top
-        dir_zoom    the outgoing polar angles zoomed about the incoming direction
+        overflow_delta   an outgoing energy of exactly 0 (the particle keeps the full incoming energy) and an E_dep
+                         of exactly 0 (no deposit) -> -overflow_delta
+        canon_sym        every event rotated onto the canonical cube face; sym_aug: a random symmetry of that face
+                         on top
+        dir_zoom         the outgoing polar angles zoomed about the incoming direction
         ```
         """
         m = self._sample_mask(ds_t) if self.rc.inverse_events else ds_t.m.full   # legacy: inverse events
@@ -196,7 +210,10 @@ class TrainStep:
         return ds_t
 
     def _shift_overflow_targets(self, ds_t: DataStruct) -> DataStruct:
-        """Returns a copy of the batch with its zero atoms at ``-overflow_delta``, outside [0, 1]."""
+        """Returns a copy of the batch with its exact zeros at ``-overflow_delta``, outside [0, 1].
+
+        The zeros are an outgoing energy 0 on a real outgoing token, and an E_dep 0.
+        """
         f = ds_t.f.full.clone()
         out_e, edep = _F(f).out_energy, _F(f).edep
         out_e.masked_fill_((out_e == 0) & ds_t.am.out_p.bool(), -self.rc.overflow_delta)
@@ -204,14 +221,18 @@ class TrainStep:
         return DataStruct(f, ds_t.m.full, ds_t.am.full)
 
     def _sample_t(self, ds_t: DataStruct) -> Tensor:
-        """Samples each event's time ``t`` (``sd3_time``)."""
+        """Samples each event's time ``t``, (B,), with ``sd3_time``."""
         if self.rc.t_dist != "sd3" or self.rc.t_dist_shift != 1.0: return self._sample_t_options(ds_t)   # legacy
         return sd3_time(torch.rand_like(ds_t.f.d), self.rc.t_dist_scale)
 
     def _latent_ends(self, layers: Tensor | None, base: Tensor) -> tuple[Tensor, Tensor] | None:
-        """Returns the edep_ae latent's ``(z_0, z_1)``: noise, and the encoding of the true per-layer deposits.
+        """Returns the edep_ae latent's ``(z_0, z_1)``, (B, K) each: noise, and the encoding of the true E_dep layers.
 
         None without an edep_ae.
+
+        Args:
+            layers: (B, n_layers), the batch's E_dep layers on the layer scale, or None.
+            base:   the batch's x_0; ``z_1`` takes its dtype.
 
         Raises:
             ValueError: the dataset has no per-layer E_dep.
@@ -225,7 +246,7 @@ class TrainStep:
 
     def _velocity(self, model, path, ds_t: DataStruct, pdgid_idx: Tensor,
                   z_t: Tensor | None) -> tuple[Tensor, Tensor | None]:
-        """Returns the field's velocity at ``(x_t, t)``, and the latent's (None without one)."""
+        """Returns the field's velocity at ``(x_t, t)``, and the latent's velocity (None without ``z_t``)."""
         am = ds_t.am.full
         v  = model(path.x_t, path.t, mask=ds_t.m.full, attn_mask=am, types=self.types_embd[:, :am.shape[1]],
                    pdgids=pdgid_idx, **self._field_extras(path, z_t))
@@ -234,9 +255,10 @@ class TrainStep:
     # ---- plumbing -------------------------------------------------------------------------------------------------
 
     def _flow_map_lv(self) -> Tensor | None:
-        """Returns the flow-map term's log-variance held on its floor, or None without learned loss weights.
+        """Returns the flow-map term's log-variance ``lv_f``, held at its floor or above; None when it is not learned.
 
-        L_fm (~5e-5) runs three decades below the velocity cells, so its weight has a floor of its own.
+        ``L_fm`` (~5e-5) is three decades smaller than the velocity cells, so its floor is its own
+        (``max_loss_weight_flow``).
         """
         if not hasattr(self, "lv_flow"):
             return None
@@ -245,14 +267,22 @@ class TrainStep:
     def _field_extras(self, path, z_t: Tensor | None) -> dict:
         """Returns the field's optional inputs: the step ``d = 0`` (``step_cond``), the latent's ``z_t`` (edep_ae).
 
-        ``d = 0`` goes in as a tensor, not None: the flow-map calls pass one, and None is a dynamo guard of its own.
+        ``d = 0`` is passed as a tensor, not as None: the flow-map calls pass a tensor, and a None would compile a
+        second graph.
         """
         step = {"d": torch.zeros_like(path.t)} if getattr(self.model.vf, "step_cond", False) else {}
         lat  = {} if z_t is None else {"z": z_t}
         return {**step, **lat}
 
     def _loss_logs(self, cells: Tensor) -> dict[str, Tensor]:
-        """Returns the cells unweighted (comparable across weightings), their raw sum, and the learned variances."""
+        """Returns the cells' log entries, by log name.
+
+        ```
+        loss/<cell>              each cell unweighted, so that runs with different loss weights compare
+        loss/raw                 the sum of the first three cells (energy, out_dir, out_pos)
+        loss_weight/var_<cell>   each cell's learned variance exp(lv_c) (learned_loss_weights); <cell> without "out_"
+        ```
+        """
         names = _cell_names(self.rc.edep_cell, len(cells))
         cells = cells.detach()
         logs  = {f"loss/{c}": L for c, L in zip(names, cells)}
@@ -263,7 +293,7 @@ class TrainStep:
         return logs
 
     def _log_step(self, logs: dict) -> None:
-        """Logs a training step's scalars (None: absent), detached and unsynced; nothing outside training."""
+        """Logs a training step's scalars, detached and unsynced; nothing outside training. A None value is skipped."""
         logs = {k: v.detach() for k, v in logs.items() if v is not None}
         if self.training and logs:
             self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
@@ -273,14 +303,17 @@ class TrainStep:
         self.log("Validation Loss", loss, on_step=True, on_epoch=True, sync_dist=True, batch_size=bs)
 
     def _log_val_metrics(self, metrics: dict, bs: int) -> None:
-        """Logs the validation metrics per epoch; population-dependent keys unsynced (deadlock: UNSYNCED_PREFIXES)."""
+        """Logs the validation metrics per epoch, synced across the DDP ranks except the ``UNSYNCED_PREFIXES`` keys."""
         for name, val in metrics.items():
             self.log(name, val, on_epoch=True, sync_dist=not name.startswith(UNSYNCED_PREFIXES), batch_size=bs)
 
     # ---- length buckets -------------------------------------------------------------------------------------------
 
     def _length_bucket(self, ds_t: DataStruct):
-        """Returns the batch cut to its length bucket, and the field to run (once per length piece in split mode)."""
+        """Returns the batch cut to its length bucket, and the field to call on it.
+
+        In split mode with several length pieces the field is ``_piecewise``: ``self.model`` run once per piece.
+        """
         if self.rc.len_buckets is None:
             return ds_t, self.model
         ds_t, pieces = self._len_pieces(ds_t)
@@ -289,12 +322,14 @@ class TrainStep:
     def _len_pieces(self, ds_t: DataStruct) -> tuple[DataStruct, list[tuple[slice, int]]]:
         """Cuts the batch to its length bucket; in split mode also into ``len_split`` pieces by length.
 
+        A batch that ``len_split`` does not divide stays one piece.
+
         Returns:
-            ``(ds_t, pieces)``: the batch (in split mode sorted by length), and per piece its rows and its bucket
-            length, the bucket of its longest event.
+            ``(ds_t, pieces)``: the batch (in split mode sorted by length), and per piece its rows (a slice) and its
+            length: the bucket of its longest event.
         """
         lengths = ds_t.am.full.sum(1)
-        cpu = self.__dict__.pop("_cpu_lengths", None)   # on_before_batch_transfer's copy: no host sync
+        cpu = self.__dict__.pop("_cpu_lengths", None)   # on_before_batch_transfer's CPU copy: no GPU sync here
         if cpu is None or len(cpu) != len(lengths):
             cpu = lengths.cpu()
         n = len(cpu)
@@ -309,7 +344,10 @@ class TrainStep:
         return ds_t.trim(Ls[-1]), [(slice(j * size, (j + 1) * size), L) for j, L in enumerate(Ls)]
 
     def _piecewise(self, pieces: list[tuple[slice, int]]):
-        """Returns the field run once per length piece, each cut to its own length and padded back."""
+        """Returns a function that runs the field once per length piece.
+
+        Each piece is cut to its own length; its velocity is padded back to the batch's length.
+        """
         def run(x, t, mask, attn_mask, types, pdgids, d=None):
             return torch.cat([F.pad(self.model(
                 x[i, :L].contiguous(), t[i, :L].contiguous(), mask[i, :L].contiguous(),
@@ -320,7 +358,7 @@ class TrainStep:
 
 
 def _generated(ds_t: DataStruct) -> Tensor:
-    """Returns the generated tokens, (B, L, 1): the loss mask on the real tokens."""
+    """Returns the generated tokens, (B, L, 1): the real tokens (``am``) on which the loss mask ``m`` is 1."""
     return ((ds_t.m.full == 1) & (ds_t.am.full == 1)).unsqueeze(-1)
 
 

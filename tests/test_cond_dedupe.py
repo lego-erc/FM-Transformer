@@ -1,7 +1,7 @@
-"""Per-event conditioning reproduces the per-token computation.
+"""The per-event time condition (``cfm/event_cond.py``) reproduces the per-token computation.
 
 ``to_gamma`` is zero-initialised, so at init every condition gives the same gamma
-and any packing bug is invisible; the weights are randomised here first.
+and an error in the per-event form is invisible; the weights are randomised here first.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ def test_per_event_condition_matches_per_token(step_cond: bool) -> None:
     per_token = vf(x, mask, am, types, pdg, t=torch.where(gen, t, 1.0),
                    d=torch.where(gen, d, 0.0) if step_cond else None)
     torch.testing.assert_close(per_event, per_token, rtol=0, atol=1e-12)
-    scalar = vf(x, mask, am, types, pdg, t=t[:1, :1], d=d[:1, :1] if step_cond else None)  # solver form
+    scalar = vf(x, mask, am, types, pdg, t=t[:1, :1], d=d[:1, :1] if step_cond else None)  # the solver's: one t
     torch.testing.assert_close(scalar, vf(x, mask, am, types, pdg, t=torch.where(gen, t[0, 0], 1.0),
                                           d=torch.where(gen, d[0, 0], 0.0) if step_cond else None),
                                rtol=0, atol=1e-12)

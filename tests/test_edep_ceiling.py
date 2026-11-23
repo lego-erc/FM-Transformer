@@ -1,8 +1,12 @@
-"""``GenerateOut`` caps the generated E_dep at the incoming kinetic energy for primaries
-that cannot deposit more (e-, gamma, p; e+ plus the 1.022 MeV its annihilation
-releases) and leaves pi+- and n alone, whose captures release rest mass / binding
-energy (stack59 500k test set: pi+- exceed E_in in 14-17% of events, by up to 178 MeV).
-The flow's E_dep token has no wall at E_in -- it is normalised by ``max_energy``."""
+"""``GenerateOut`` caps the generated E_dep at the incoming kinetic energy plus what the incoming
+species can deposit above it: nothing for e-, gamma and p, 1.022 MeV for e+ (its annihilation),
+10 MeV for n (binding energy) and 150 MeV for pi+- (their capture releases the rest mass; stack59
+500k test set: pi+- exceed E_in in 14-17% of events, by up to 178 MeV).
+
+The layer-scale E_dep token needs the cap: it is normalised by ``max_energy`` and has no margin at
+E_in. The pi+ case below (E_in = 150 MeV) reaches the token's ceiling of 300 MeV, which is also its
+cap.
+"""
 
 from __future__ import annotations
 
@@ -25,7 +29,7 @@ def generator(tmp_path_factory: pytest.TempPathFactory) -> GenerateOut:
 @torch.no_grad()
 @pytest.mark.parametrize("pdgid, capped", [(22, True), (2212, True), (211, False)])
 def test_edep_is_capped_at_the_incoming_energy(generator, monkeypatch, pdgid, capped) -> None:
-    # a flow that puts every event's E_dep at the channel ceiling (max_energy = 300 MeV), twice E_in
+    # a flow that puts every event's E_dep at the token's ceiling (max_energy = 300 MeV), twice E_in
     monkeypatch.setattr(generator.model, "forward", _fill_edep(1.0))
     dp = DataPrep(generator.model.rc.config)
     e_in = 150.0

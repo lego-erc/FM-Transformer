@@ -1,10 +1,9 @@
-"""Under DDP every rank must build the same shuffled batch list.
+"""Under DDP every rank must build the same shuffled list of batches.
 
-Lightning wraps ``make_loader``'s batch sampler in ``DistributedSamplerWrapper``,
-which hands rank ``r`` every W-th batch of the list *that rank* built. With the
-shuffle drawn from each rank's own global RNG (unseeded runs, or rank 0 after
-pretraining the base head), the shards overlapped: on 2 GPUs a quarter of every
-epoch was never seen and another quarter was seen twice.
+Lightning wraps ``make_loader``'s batch sampler in ``DistributedSamplerWrapper``, which hands rank ``r`` every W-th
+batch of the list that rank built itself. With the shuffle drawn from each rank's global RNG (an unseeded run, or
+rank 0 after it pretrained the base head) the lists differ and the shards overlap: on 2 GPUs a quarter of every epoch
+is never seen and another quarter is seen twice.
 """
 
 import pytest
@@ -19,7 +18,7 @@ def test_ddp_ranks_partition_every_epoch(wrapper_shuffle: bool) -> None:
     N, W, bs = 4096, 2, 64
     seen = [[], []]  # per epoch
     for rank in range(W):
-        torch.manual_seed(1000 + rank)  # per-rank global RNG state
+        torch.manual_seed(1000 + rank)  # each rank's global RNG is in another state
         loader = make_loader(range(N), bs=bs, shuffle=True, num_workers=0, batched_sampler=True, seed=3)
         sampler = DistributedSamplerWrapper(loader.sampler, num_replicas=W, rank=rank, shuffle=wrapper_shuffle)
         for epoch in range(2):

@@ -1,5 +1,5 @@
-"""The training-side readers of a whole dataset give the same values on a packed file,
-without materialising its padded tensors (``PackedData.data`` warns when it does)."""
+"""What training reads from a whole dataset has the same values on a packed file as on a padded one, and is read
+without materialising the padded tensors (``PackedData.data`` warns when it does)."""
 
 from __future__ import annotations
 
@@ -63,7 +63,8 @@ def test_multloader_matches(tmp_path, train_inverse) -> None:
 
 
 def test_split_val_holds_index_tensors_of_random_splits_events() -> None:
-    """``random_split`` keeps a Python list: 16M ints for the Ar cube, which every loader worker ends up copying."""
+    """``split_val`` holds the events ``random_split`` picks, as index tensors: ``random_split`` keeps a Python list,
+    16M ints for the Ar cube, which every loader worker ends up copying."""
     ds = torch.arange(1000) * 3
     train, val = split_val(ds, {"val_frac": 0.1, "seed": 3})
     ref = random_split(ds, [900, 100], generator=torch.Generator().manual_seed(3))
@@ -73,7 +74,8 @@ def test_split_val_holds_index_tensors_of_random_splits_events() -> None:
 
 
 def test_fresh_count_model_reads_the_dataset_once(tmp_path, monkeypatch) -> None:
-    """The count heads are sized by the data's largest count; ``setup`` must not read the file again."""
+    """Resolving a fresh config reads the dataset for its largest count, which sizes the count heads; ``setup`` must
+    reuse that dataset, not read the file again."""
     from legofmt.multiplicity import model as mm
     _, pk, _ = write_two_dirs(tmp_path)
     built, init = [], mm.MultLoader.__init__
@@ -93,7 +95,7 @@ def test_training_step_identical(tmp_path) -> None:
     for d in (pad, pk):
         cfg = _tiny_config()
         cfg["config"]["dl_conf"]["lds_args"]["data"] = str(d)
-        cfg["config"]["model_conf"]["model_args"]["max_seq_l"] = 10   # prepped_padded's L with 4 cond scalars
+        cfg["config"]["model_conf"]["model_args"]["max_seq_l"] = 10   # prepped_padded's L with 4 conditioning scalars
         torch.manual_seed(0)
         model = LEGOLtng(cfg)
         with _no_materialising():

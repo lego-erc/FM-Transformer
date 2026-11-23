@@ -1,9 +1,11 @@
-"""odeint_conf.energy_balance: GenerateOut closes E_in = E_dep + sum E_out per event, keeping the generated E_dep.
+"""``odeint_conf.energy_balance`` (legacy): ``GenerateOut`` closes E_in = E_dep + sum E_out per event, keeping the
+generated E_dep.
 
 A chained thin-plate model cannot resolve a particle that crosses a plate almost unchanged: the outgoing energy
-of a 1 GeV proton losing 3 MeV sits 4e-4 from the channel's clamp, so the flow hands out 0 or ~28 MeV losses and
-every e- call violates the balance by ~2.6%. On the 0.1 MeV-cutoff plate data Geant4's own balance is exact
-(median residual 0), so the projection is safe there; it is opt-in because a 10 MeV cutoff loses ~7% below it.
+of a 1 GeV proton losing 3 MeV sits 4e-4 from the energy channel's clamp, so the flow hands out losses of 0 or
+~28 MeV, and every e- call violates the balance by ~2.6%. On the 0.1 MeV-cutoff plate data Geant4's own balance is
+exact (median residual 0), so closing it is safe there. It is opt-in because under a 10 MeV cutoff ~7% of the energy
+leaves below the cutoff.
 """
 
 from __future__ import annotations
@@ -27,7 +29,8 @@ def codec():
 
 
 def _event(pen, dp, e_in: float, edep: float, out: list[tuple[int, float]], L: int = 9) -> torch.Tensor:
-    """One (1, L, 8) model-space event: E_dep token, incoming token, outgoing tokens (pdgid, MeV), NaN padding."""
+    """Returns one event (1, L, 8) on the model's scales: the prefix tokens with E_dep, the outgoing tokens ``out`` as
+    (pdgid, MeV), NaN elsewhere (the incoming token, which ``_balance_energy`` does not read, and the padding)."""
     set_layout(COND)
     f = torch.full((1, L, 8), float("nan"))
     f[..., 7] = 0.0
@@ -85,7 +88,7 @@ def test_positron_annihilation_releases_the_pair_mass(codec) -> None:
 @pytest.mark.parametrize("pid, expect", [(22, 0.5), (11, 0.5), (-11, 0.5 + 1.022)])
 def test_absorbed_em_particle_deposits_everything(codec, pid, expect) -> None:
     """Nothing leaves: the balance has no outgoing energy to adjust, so the deposit is E_in (+ 2 m_e for a positron).
-    A flow E_dep below that loses energy in every photoabsorption -- 6 MeV per 1 GeV e- shower in a W/Si chain."""
+    A flow E_dep below that loses energy in every photoabsorption: 6 MeV per 1 GeV e- shower in a W/Si chain."""
     pen, dp = codec
     f = _event(pen, dp, 0.5, 0.2, [])
     _run(pen, dp, f, 0.5, pid)
@@ -103,7 +106,7 @@ def test_absorbed_hadron_keeps_its_deposit(codec) -> None:
 
 
 def test_hadron_survivor_loses_exactly_its_deposit(codec) -> None:
-    """A proton the flow left at E_in (zero loss, clamped) leaves with E_in - E_dep - others."""
+    """A proton the flow left at E_in (zero loss, clamped) leaves with E_in - E_dep - the other outgoing energies."""
     pen, dp = codec
     f = _event(pen, dp, 1000.0, 3.0, [(2212, 1000.0), (2112, 0.5)])
     _run(pen, dp, f, 1000.0, 2212)
@@ -113,8 +116,9 @@ def test_hadron_survivor_loses_exactly_its_deposit(codec) -> None:
 
 
 def test_em_only_survivor_closes_at_any_share(codec) -> None:
-    """A 1 GeV proton crossing the 108.8 mm W/Si stack keeps 75-79% of E_in; when everything else out is a gamma /
-    e+- Geant4's balance is exact (residual 0.00 MeV up to q90, 37.8% of events) -- the 90% rule never fired there."""
+    """A 1 GeV proton crossing the 108.8 mm W/Si stack keeps 75-79% of E_in, so the 90% rule never applies to it. When
+    every other outgoing particle is a gamma / e+-, Geant4's balance is exact (residual 0.00 MeV up to q90, 37.8% of
+    events): such a survivor closes the balance at any share of E_in."""
     pen, dp = codec
     f = _event(pen, dp, 1000.0, 230.0, [(2212, 700.0), (22, 2.0)])
     _run(pen, dp, f, 1000.0, 2212)
@@ -124,7 +128,8 @@ def test_em_only_survivor_closes_at_any_share(codec) -> None:
 
 
 def test_survivor_with_too_large_a_deposit_leaves_at_the_cutoff(codec) -> None:
-    """E_dep + others > E_in leaves the leader a negative budget: it leaves at the cutoff (to_scalar_e's clamp)."""
+    """E_dep + the other outgoing energies > E_in gives the survivor a negative budget: it leaves at the cutoff
+    (``to_scalar_e``'s clamp)."""
     pen, dp = codec
     f = _event(pen, dp, 1000.0, 990.0, [(2212, 760.0), (22, 20.0)])
     _run(pen, dp, f, 1000.0, 2212)
@@ -147,9 +152,9 @@ def test_open_or_degenerate_balance_is_left_alone(codec, edep, out, e_in, pid) -
 
 
 def test_edep_cap_covers_every_gun_species_above_geant4() -> None:
-    """GenerateOut caps E_dep at E_in + excess for every gun species, never below the largest excess Geant4 shows
-    on the 0.1 MeV plates (n 2.3 MeV: capture; pi+ 70.5, pi- 142.5: the pion mass), so an unbounded neutron or
-    pion deposit cannot create energy in a chain."""
+    """``GenerateOut`` caps E_dep at E_in + excess for every incoming species. The hand-set excess is never below the
+    largest one Geant4 shows on the 0.1 MeV plates (n 2.3 MeV: capture; pi+ 70.5, pi- 142.5: the pion mass), and it
+    is bounded, so a neutron or pion deposit cannot create energy in a chain."""
     from legofmt.legacy.norm import HAND_SET_EXCESS_MEV
     g4_max = {11: 0.0, -11: 1.022, 22: 0.0, 2212: 0.001, 2112: 2.263, 211: 70.513, -211: 142.498}
     assert all(HAND_SET_EXCESS_MEV.get(pid, -1.0) >= m - 1e-3 for pid, m in g4_max.items())
@@ -163,7 +168,8 @@ def test_padding_stays_padding(codec) -> None:
 
 
 def _exit_event(tokens: list[tuple[list[float], list[float]]], L: int = 12) -> torch.Tensor:
-    """(1, L, 8) event whose outgoing tokens carry (momentum direction, position direction), pdgid 11."""
+    """Returns one event (1, L, 8) whose outgoing tokens hold the given (momentum direction, position direction),
+    pdgid 11."""
     set_layout(COND)
     f = torch.full((1, L, 8), float("nan"))
     f[..., 7] = 0.0
@@ -176,8 +182,8 @@ def _exit_event(tokens: list[tuple[list[float], list[float]]], L: int = 12) -> t
 
 
 def test_exit_momentum_is_mirrored_out_of_its_face() -> None:
-    """A particle leaving through a face moves away from it (Geant4: never otherwise). One the flow sends back into
-    its exit face would enter the next slab moving away from it -- the count model's out-of-distribution input."""
+    """A particle that leaves through a face moves outward (in Geant4 always). One that the flow sends back into its
+    exit face would enter the next slab moving away from it: an input the multiplicity model was not trained on."""
     from legofmt.legacy.generate import _exit_outward
     f = _exit_event([([0.6, 0.0, -0.8], [0.1, 0.2, 50.0]),    # +z face, moving -z: mirrored
                      ([0.6, 0.0, 0.8], [0.1, 0.2, 50.0]),     # +z face, moving +z: kept

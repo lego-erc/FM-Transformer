@@ -4,17 +4,18 @@
 tokens    [cond_scalars[0], E_dep, *cond_scalars[1:], incoming, outgoing_1, ..., outgoing_n, padding]
            `------------- prefix: n_prefix() -------'
 
-columns   prefix token   [value, 1, 1, 1, 1, 1, 1, 0]
+channels  prefix token   [value, 1, 1, 1, 1, 1, 1, 0]
           particle       [energy, momentum direction (3), position direction (3), pdgid]
 
-m         (B, L)   1 on the tokens the flow generates (E_dep, the outgoing particles), 0 on those it is given
+m         (B, L)   1 on the tokens the flow generates (E_dep, the outgoing particles), 0 on the others
 am        (B, L)   True on a real token, False on padding
 ```
 
 Where a token sits depends on ``cond_scalars``, so never index the sequence directly: use ``_F`` (the features),
 ``_M`` (a mask) and ``DataStruct`` (a batch). The layout is process-global module state set by ``set_layout``, so
 constructing a model or a loader mutates it. ``loss_mask`` builds ``m`` from ``am``, ``with_dirs`` replaces the
-directions of some tokens, ``vocab_index`` looks species ids up in a sorted vocabulary.
+directions of some tokens, ``vocab_index`` looks pdgids up in a sorted vocabulary, ``species_values`` reads a
+per-species table.
 """
 
 import torch
@@ -22,18 +23,19 @@ from torch import Tensor
 from torch.utils.data._utils.collate import default_collate_fn_map
 
 
-# The conditioning scalars, by their data_add keys; the default is the original (density, E_dep) prefix.
+# The conditioning scalars, by their ``per_event`` names in the dataset; the default gives the prefix [Density, E_dep].
 _COND_SCALARS: tuple[str, ...] = ("Density",)
 
-# Where a particle token's channels start: energy | momentum direction (3) | position direction (3) | pdgid (absent
-# from model_in); ``energy, mom, pos, pid = x.tensor_split(CHANNELS, dim=-1)``.
+# Where a token's channels split: energy | momentum direction (3) | position direction (3) | pdgid (absent from
+# ``model_in``): ``energy, mom, pos, pid = x.tensor_split(CHANNELS, dim=-1)``.
 CHANNELS = (1, 4, 7)
 
 
 def set_layout(cond_scalars) -> None:
-    """Sets the process-global slot layout.
+    """Sets the process-global token layout: the names of the conditioning scalars, in their order.
 
-    Called by resolve_*_config and DataPrep, so constructing a model or a loader re-points every _F accessor.
+    Resolving a config and constructing a ``DataPrep`` or a ``GenerateOut`` call it, so each of them re-points every
+    ``_F`` accessor.
     """
     global _COND_SCALARS
     _COND_SCALARS = tuple(cond_scalars)
@@ -50,9 +52,12 @@ def n_prefix() -> int:
 
 
 def cond_slot(name: str) -> int:
-    """Returns the token index of a conditioning scalar.
+    """Returns the token index of the conditioning scalar ``name``.
 
-    cond_scalars[0] is token 0, the rest are shifted by one because token 1 is the generated E_dep.
+    ``cond_scalars[0]`` is token 0; the others are shifted by one, because token 1 is E_dep.
+
+    Raises:
+        ValueError: ``name`` is not a conditioning scalar.
     """
     if name not in _COND_SCALARS:
         raise ValueError(f"{name!r} not in cond_scalars {_COND_SCALARS}")
@@ -64,7 +69,7 @@ class _F:
     """Named views into the features ``f`` (..., L, 8): writing through one writes ``f``.
 
     ```
-    view                  tokens                         columns                      shape
+    view                  tokens                         channels                     shape
     d                     cond_scalars[0] (token 0)      value                        (...)
     edep                  E_dep (token 1)                value                        (...)
     cond(name)            that conditioning scalar       value                        (...)
@@ -80,6 +85,8 @@ class _F:
     out_energy / out_pid  outgoing                       energy / pdgid               (..., n_out)
     out_mom / out_pos     outgoing                       momentum / position dir.     (..., n_out, 3)
     ```
+
+    ``n_out = L - n_prefix - 1`` here: every outgoing slot, padding included.
     """
 
     def __init__(self, f: Tensor) -> None:
@@ -93,7 +100,7 @@ class _F:
     def cond(self, name: str) -> Tensor: return self.full[..., cond_slot(name), 0]
 
     # Token groups: prefix (..., n_prefix, .), incoming (..., 1, .), outgoing (..., n_out, .); *_p with the pdgid
-    # column, *_cc the 7 columns the manifold holds
+    # channel, *_cc the 7 channels the manifold holds
     @property
     def non_p(self) -> Tensor: return self.full[..., :n_prefix(), :]
     @property
@@ -107,7 +114,7 @@ class _F:
     @property
     def out_cc(self) -> Tensor: return self.full[..., n_prefix() + 1:, 0:7]
 
-    # Columns of every token (..., L, .)
+    # Channels of every token (..., L, .)
     @property
     def model_in(self) -> Tensor: return self.full[..., 0:7]
     @property
@@ -119,7 +126,7 @@ class _F:
     @property
     def pos(self) -> Tensor: return self.full[..., 4:7]
 
-    # A particle's columns: the incoming particle (..., .) ...
+    # A particle's channels: the incoming particle (..., .) ...
     @property
     def in_energy(self) -> Tensor: return self.full[..., n_prefix(), 0:1]
     @property
@@ -151,11 +158,11 @@ class _M:
     @property
     def out_p(self) -> Tensor: return self.full[..., n_prefix() + 1:]
     @property
-    def fwd(self) -> Tensor: return self.full[..., n_prefix()] == 0   # of m: the incoming particle is given
+    def fwd(self) -> Tensor: return self.full[..., n_prefix()] == 0   # of ``m``: the incoming particle is given
 
 
 def loss_mask(am: Tensor, n_prefix: int) -> Tensor:
-    """Builds the loss mask ``m``: ``am`` minus the prefix and incoming tokens, plus the E_dep token (slot 1)."""
+    """Builds the loss mask ``m``: ``am`` without the prefix and incoming tokens, plus the E_dep token (token 1)."""
     m = am.long()
     m[..., :n_prefix + 1] = 0
     m[..., 1] = 1
@@ -163,11 +170,11 @@ def loss_mask(am: Tensor, n_prefix: int) -> Tensor:
 
 
 def with_dirs(x: Tensor, tokens: Tensor, mom: Tensor | None = None, pos: Tensor | None = None) -> Tensor:
-    """Returns the tokens ``x`` (..., L, 8) with the momentum and / or position directions of ``tokens`` replaced.
+    """Returns the tokens ``x`` with the momentum and / or position directions of ``tokens`` replaced.
 
     Args:
-        x:      the tokens.
-        tokens: (..., L), the tokens that take the new directions; the others keep theirs.
+        x:      (..., L, 8), the tokens.
+        tokens: (..., L) bool, True on the tokens that take the new directions; the others keep theirs.
         mom:    (..., L, 3), the new momentum directions, or None to keep them.
         pos:    (..., L, 3), the new position directions, or None to keep them.
     """
@@ -179,16 +186,16 @@ def with_dirs(x: Tensor, tokens: Tensor, mom: Tensor | None = None, pos: Tensor 
 def vocab_index(vocab: Tensor, ids: Tensor) -> tuple[Tensor, Tensor]:
     """Returns each id's index into the sorted ``vocab`` and whether the id is in it.
 
-    The index of an id that is not in ``vocab`` is its insertion point, held inside the vocabulary.
+    An id that is not in ``vocab`` gets its insertion point, or the last index if it lies past the end.
     """
     idx = torch.searchsorted(vocab, ids).clamp(max=len(vocab) - 1)
     return idx, vocab[idx] == ids
 
 
 def species_values(table: dict, pid: Tensor, like: Tensor) -> tuple[Tensor, Tensor]:
-    """Returns each pid's value from ``table`` (``{pdgid: value}``, 0 for a pid that is not in it) and whether it is.
+    """Returns each pid's value from ``table`` (``{pdgid: value}``) and whether the pid is in the table.
 
-    The values take ``like``'s dtype.
+    A pid that is not in the table gets 0. The values take ``like``'s dtype and device.
     """
     own = pid.unsqueeze(-1) == pid.new_tensor(list(table))   # (..., n_species), one-hot or all false
     return (own * like.new_tensor(list(table.values()))).sum(-1), own.any(-1)
@@ -197,12 +204,13 @@ def species_values(table: dict, pid: Tensor, like: Tensor) -> tuple[Tensor, Tens
 class DataStruct:
     """A batch of events: the features ``f``, the loss mask ``m`` and the attention mask ``am``.
 
-    Indexing, ``trim``, ``to`` and ``pin_memory`` apply to all of them and return a new ``DataStruct``.
+    ``f`` is an ``_F``, ``m`` and ``am`` are ``_M``: the tensor itself is ``.full``. Indexing, ``trim``, ``to`` and
+    ``pin_memory`` apply to all three and return a new ``DataStruct``.
     """
 
     def __init__(self, f: Tensor, m: Tensor, am: Tensor, edep_layers: Tensor | None = None) -> None:
         self.f, self.m, self.am = _F(f), _M(m), _M(am)
-        self.edep_layers = edep_layers  # optional (B, n_layers) per-layer E_dep; no model reads it
+        self.edep_layers = edep_layers  # (B, n_layers), the per-layer E_dep, or None; only an ``edep_ae`` flow reads it
 
     def __len__(self) -> int:
         return self.f.full.shape[0]
@@ -230,7 +238,7 @@ class DataStruct:
 
     @staticmethod
     def _collate(batch, *, collate_fn_map=None) -> "DataStruct":
-        """Stacks single events to a batch: torch's default collate for a ``DataStruct``."""
+        """Stacks single events to a batch; registered below as torch's default collate for a ``DataStruct``."""
         e = [s.edep_layers for s in batch]
         return DataStruct(
             torch.stack([s.f.full  for s in batch]),

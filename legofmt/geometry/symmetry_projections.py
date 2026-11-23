@@ -1,11 +1,12 @@
-"""``CubeSymmetry``: canonicalise directions onto a reference cube face.
+"""``CubeSymmetry``: rotates an event's directions into the frame of one canonical cube face (``canon_sym``).
 
-Six rotations indexed by the face the position points at. Applied before the
-flow and undone after it, and again in ``MultModel.proj_in``. ``g`` (0..7)
-additionally applies an element of the canonical face's stabiliser (the
-dihedral group on the in-face axes y, z): drawn per event it is a training
-augmentation, and at inference a random canonical frame, so the model's output
-distribution carries the exact in-face symmetry of the data.
+Six rotations, one per face, indexed by the face the incoming position points at; the canonical face is +x. The flow
+rotates a batch before it runs and back afterwards (``LEGOLtng._enter_frame`` / ``_leave_frame``); the multiplicity
+model rotates its input (``MultModel.proj_in``).
+
+``g`` (0..7) applies an element of the canonical face's stabiliser on top: the dihedral group on the in-face axes
+y, z. Sampled per event (``sym_aug``), it is an augmentation in training and a random canonical frame in generation,
+so the model's output distribution carries the exact in-face symmetry of the data.
 """
 
 import torch
@@ -40,7 +41,7 @@ class CubeSymmetry:
         self._cache: dict = {}
 
     def _mat(self, like, face, g):
-        """Returns each event's matrix: its face's rotation, then the stabiliser element ``g`` if given."""
+        """Returns each event's matrix (B, 3, 3): its face's rotation, then the stabiliser element ``g`` if given."""
         r = self._rot(like)[face]
         return r if g is None else self._rot(like, "_S")[g] @ r
 
@@ -51,7 +52,7 @@ class CubeSymmetry:
         return 2 * axis + neg.long()
 
     def canonicalize(self, dirs, face, g=None):
-        """Rotates ``dirs`` (B, ..., 3) into the canonical frame of each event's ``face`` (and by ``g``)."""
+        """Rotates ``dirs`` (B, ..., 3) into the canonical frame of each event's ``face``, then by ``g`` if given."""
         return torch.einsum("b...i,bij->b...j", dirs, self._mat(dirs, face, g).mT)
 
     def uncanonicalize(self, dirs, face, g=None):

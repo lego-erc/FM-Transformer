@@ -7,8 +7,9 @@ checkpoints still run unchanged:
     dim_in_out         a linear map into and out of the encoder (it has to equal ``h_dim``)
     grad_ckpt          gradient checkpointing of every encoder block
 
-``CFMTrafo_x`` derives from ``LegacyField``: its ``__init__`` ends with ``_init_legacy`` and its ``forward`` hands
-every call that needs one of these to ``_legacy_forward``. The methods read what ``CFMTrafo_x`` builds (``vf``,
+``CFMTrafo_x`` derives from ``LegacyField``: its ``__init__`` ends with ``_init_legacy``, and its ``forward`` hands
+a call to ``_legacy_forward`` when the field has ``time_cond: false`` or ``dim_in_out``, or the call's times come
+per token. ``grad_ckpt`` only wraps the encoder blocks. The methods read what ``CFMTrafo_x`` builds (``vf``,
 ``geom``, ``lat_in`` / ``lat_out``, ``_one_hot`` / ``_embed`` / ``_project_out`` / ``_time_emb``).
 """
 
@@ -21,9 +22,10 @@ from torch.utils.checkpoint import checkpoint
 
 
 def pin_per_token(t: Tensor, d: Tensor | None, mask: Tensor, attn_mask: Tensor) -> tuple[Tensor, Tensor | None]:
-    """Pins per-token times on the conditioning tokens: ``t = 1``, and ``d = 0`` (they are not transported).
+    """Pins per-token times on the conditioning tokens: ``t = 1`` and ``d = 0`` (they are not transported).
 
-    ``ProjectModel.forward`` hands a ``t`` or ``d`` that is not one value per event here.
+    ``ProjectModel._call_field`` hands a ``t`` or ``d`` that is not one value per event here. Returns ``(t, d)``,
+    each (B, L); a None ``d`` stays None.
     """
     t = torch.where(mask == 1, t.expand_as(attn_mask), 1.0)
     if d is not None:
@@ -32,10 +34,14 @@ def pin_per_token(t: Tensor, d: Tensor | None, mask: Tensor, attn_mask: Tensor) 
 
 
 class LegacyField(nn.Module):
-    """``CFMTrafo_x``'s base: the options above."""
+    """The base class of ``CFMTrafo_x``: the options the module docstring lists."""
 
     def _init_legacy(self, time_cond: bool, dim_in_out: int | None, grad_ckpt: bool) -> None:
-        """Applies the options to a field that ``CFMTrafo_x.__init__`` has built."""
+        """Applies the options to a field that ``CFMTrafo_x.__init__`` has built.
+
+        Raises:
+            ValueError: ``step_cond`` with ``time_cond: false``.
+        """
         self.time_cond    = time_cond
         self._legacy_opts = not time_cond or dim_in_out is not None
         if grad_ckpt:
@@ -48,7 +54,10 @@ class LegacyField(nn.Module):
             self.global_cond = nn.Parameter(torch.zeros(1, self.h_dim))
 
     def _needs_legacy(self, t: Tensor | None, d: Tensor | None) -> bool:
-        """Returns whether a call is not the recipe's: an option is set, or ``t`` / ``d`` come per token."""
+        """Returns whether a call needs ``_legacy_forward``.
+
+        It does with ``time_cond: false``, with ``dim_in_out``, and when ``t`` or ``d`` comes per token.
+        """
         return self._legacy_opts or t.shape[-1] != 1 or (d is not None and d.shape[-1] != 1)
 
     def _legacy_forward(
@@ -62,11 +71,11 @@ class LegacyField(nn.Module):
         d: Tensor | None = None,
         z: Tensor | None = None,
     ) -> Tensor:
-        """Predicts the velocity of every token, with every option: the field's forward before the recipe was split off.
+        """Predicts the velocity of every token, with any of the options.
 
-        ``t`` / ``d`` per token ``(B, L)`` are used as given. Per event ``(B or 1, 1)`` they condition the generated
-        (``mask == 1``) tokens, and the conditioning tokens get ``t = 1, d = 0``. With ``lat_dim`` the latent ``z``
-        (B, lat_dim) is one more generated token, prepended, and ``(v, v_z)`` is returned.
+        ``t`` / ``d`` per token (B, L) are used as given. Per event (B or 1, 1) they condition the generated
+        (``mask == 1``) tokens, and the conditioning tokens get ``t = 1, d = 0``. With ``time_cond: false`` every
+        token gets the one learned ``global_cond`` instead. Arguments and result as in ``CFMTrafo_x.forward``.
         """
         B, L = x.shape[:2]
         K = 0 if self.geom is None else self.geom.K
@@ -113,14 +122,14 @@ class LegacyField(nn.Module):
                     gen_any = (mask == 1).any(-1, keepdim=True)
                     pick = lambda a, fill: torch.where(
                         gen_any, a.masked_fill(mask != 1, -torch.inf).amax(-1, keepdim=True), fill)
-                    c_gen = self._time_emb(pick(t, 1.0), None if d is None else pick(d, 0.0))   # (B, 1, D)
+                    c_gen = self._time_emb(pick(t, 1.0), None if d is None else pick(d, 0.0))   # (B, 1, h_dim)
                 c_lat = c_gen.expand(B, 1, -1)
                 tok = tok + c_lat
                 cond = torch.cat((c_lat, cond.expand(B, -1, -1)), dim=1)
             embd = torch.cat((tok, embd), dim=1)
             attn_mask = torch.cat((attn_mask.new_ones(B, 1), attn_mask), dim=1)
 
-        # project_in / project_out are identities unless dim_in_out was set.
+        # project_in / project_out: identities unless dim_in_out is set
         embd = self.vf.emb_dropout(self.vf.project_in(embd))
         h = self.vf.project_out(self.vf.attn_layers(
             embd, mask=attn_mask, condition=cond if cond_attn is None else cond_attn))

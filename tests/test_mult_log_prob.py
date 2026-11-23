@@ -1,5 +1,6 @@
-"""MultModel.log_prob: log P(counts, pass-through) of a ``forward`` draw, differentiable in the conditioning input --
-the score-function term of the density design's gradient (a sampled count cannot be backpropagated through)."""
+"""Tests for ``MultModel.log_prob``: log P(counts, pass-through) of a sample of ``forward``, differentiable in the
+conditioning input. It is the score-function term of the density design's gradient, since a sampled count cannot be
+backpropagated through."""
 
 from __future__ import annotations
 
@@ -51,8 +52,8 @@ def test_log_prob_gradient_wrt_input() -> None:
 
 
 def test_log_prob_passthrough_term() -> None:
-    # fired: only the Bernoulli term (the counts are then fixed); not fired, covered species: counts + log(1 - p);
-    # species the head does not cover: counts alone
+    # a pass-through event: only the Bernoulli term log p (its counts are then fixed); a covered species that did not
+    # pass through: the count term + log(1 - p); a species the head does not cover: the count term alone
     m = _model(passthrough_head=True)
     in_tok, counts, idx = _batch(m)
     idx = torch.tensor([2, 2, 0, 3, 2, 0, 3, 2])           # 2112 (neutral, covered), 22 (covered), 2212 (charged)
@@ -69,7 +70,7 @@ def test_log_prob_passthrough_term() -> None:
 
 
 def test_log_prob_refuses_a_symmetry_augmented_model() -> None:
-    # sym_aug draws a fresh cube transform in every proj_in call: the counts would be scored under another one
+    # sym_aug samples a new cube symmetry in every proj_in call: the counts would be scored under another one
     m = _model()
     m.rc = replace(m.rc, sym_aug=True)
     with pytest.raises(NotImplementedError, match="sym_aug"):
@@ -77,7 +78,7 @@ def test_log_prob_refuses_a_symmetry_augmented_model() -> None:
 
 
 def test_training_loss_unchanged() -> None:
-    # recorded from training_step before it was refactored onto _teacher_logits
+    # reference losses, recorded before training_step was built on _teacher_logits
     for pt, expected in ((False, 1.3789219856), (True, 2.8463780880)):
         m = _model(passthrough_head=True) if pt else _model()
         m.train()

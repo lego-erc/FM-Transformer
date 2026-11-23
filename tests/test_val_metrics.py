@@ -1,5 +1,5 @@
-"""Validation metrics: MMD / W1 primitives, the event summary, and the logged key set (finite, and synced only where
-every rank emits it)."""
+"""Tests for the validation metrics: the MMD and W1 functions, the event summary, and the set of logged keys (finite
+values; a key is synced only where every rank emits it)."""
 
 import torch
 
@@ -84,7 +84,7 @@ def test_summary_identical_metrics_zero():
 
 
 class _StubLego:
-    """Minimal LEGOLtng surface used by ShowerValMetrics (solve = identity flow)."""
+    """The parts of ``LEGOLtng`` that ``ShowerValMetrics`` uses; its ``solve`` returns ``x_init`` unchanged."""
 
     device = "cpu"
 
@@ -144,20 +144,20 @@ def test_edep_by_primary_splits_the_guns():
 def test_edep_by_primary_skips_thin_and_single_particle_cells():
     edep = torch.rand(40)
     pdgid_in = torch.full((40,), 2112)
-    # 8 events with a secondary is under the 32-event floor -> no ratio key
+    # 8 events with n_out >= 2 are below the 32-event floor: no ratio key
     n_out = torch.cat([torch.full((32,), 1), torch.full((8,), 3)])
     out = edep_by_primary(edep, edep.clone(), pdgid_in, n_out)
     assert set(out) == {"val/w1_edep/n"}
 
 
 def test_population_dependent_keys_are_excluded_from_sync():
-    """Every key whose presence depends on the shard must match UNSYNCED_PREFIXES.
+    """Every key whose presence depends on a rank's shard of the events must match ``UNSYNCED_PREFIXES``.
 
-    validation_step logs with sync_dist for everything else, and a synced key that
-    one rank emits and another does not leaves the ranks issuing different numbers
-    of collectives -- NCCL then hangs at the sanity check and times out 30 min later.
+    ``validation_step`` logs every other key with ``sync_dist``. A synced key that one rank emits and another does not
+    leaves the ranks issuing different numbers of collectives: NCCL then hangs at the sanity check and times out after
+    30 min.
     """
-    both = edep_by_primary(                         # e- and p, both with a multi cell
+    both = edep_by_primary(                         # e- and p, both with events of n_out >= 2
         torch.rand(128), torch.rand(128),
         torch.cat([torch.full((64,), 11), torch.full((64,), 2212)]),
         torch.full((128,), 4),
@@ -172,12 +172,12 @@ def test_population_dependent_keys_are_excluded_from_sync():
 
 
 def test_overflow_sentinel_is_decoded_before_comparing(monkeypatch):
-    """A model that reproduces the truth exactly, writing its zero-valued energy and
-    E_dep cells as the -overflow_delta sentinel it was trained on, must score zero."""
+    """A model that reproduces the data exactly, but writes a zero outgoing energy and a zero E_dep as the
+    ``-overflow_delta`` it was trained on, must score zero."""
     B, L = 64, 6
     f = torch.zeros(B, L, 8)
     f[:, 0, 0] = 1.0
-    f[:, 1, 0] = torch.rand(B) * (torch.rand(B) > 0.5)  # E_dep with a zero atom
+    f[:, 1, 0] = torch.rand(B) * (torch.rand(B) > 0.5)  # E_dep with exact zeros
     f[:, 2:, 1:7] = torch.nn.functional.normalize(torch.randn(B, L - 2, 6), dim=-1)
     f[:, 3:, 0] = torch.rand(B, L - 3) * (torch.rand(B, L - 3) > 0.5)
     f[:, 3:, 7] = 22.0

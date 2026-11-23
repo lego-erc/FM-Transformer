@@ -1,7 +1,7 @@
-"""The packed dataset format: only the real tokens of each event plus where it starts.
+"""Tests for the packed dataset format: only the real tokens of each event, and where each event starts.
 
-``PackedData`` must give back exactly the padded tensors it was packed from -- every
-bit, padded tokens included -- for any set of events.
+``PackedData`` must give back exactly the padded tensors it was packed from, bit for bit and padding included, for
+any set of events.
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ def test_dict_round_trip(cond) -> None:
 
 
 def test_file_with_the_old_field_names_reads() -> None:
-    """Files packed before the token names store ``rows`` / ``pad_row`` / ``prefix_row``."""
+    """A legacy packed file names its fields ``rows`` / ``pad_row`` / ``prefix_row`` and must still read."""
     cond = CONDS[1]
     t = prepped_padded(cond, layers=True)
     old = {"rows": "tokens", "pad_row": "pad_token", "prefix_row": "prefix_token"}
@@ -113,7 +113,7 @@ def test_pack_rejects_unrepresentable(cond) -> None:
     t, n_prefix = prepped_padded(cond), len(cond) + 1
     f, m, am = t
     bad_am = am.clone()
-    bad_am[0, n_prefix + 1] = False                     # event 0 is full length: a gap before later tokens
+    bad_am[0, n_prefix + 1] = False                     # event 0 is at full length: a gap before its later tokens
     bad_m = m.clone()
     bad_m[0, 0] = 1
     pad = (~am).nonzero()[0]

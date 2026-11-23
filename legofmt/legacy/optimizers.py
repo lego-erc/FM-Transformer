@@ -13,14 +13,14 @@ def schedulefree_adamw(params, **kw):
 
 
 def default_schedulefree(params, mm_conf: dict):
-    """Constructs the count model's optimizer for a config without ``opt_conf``."""
+    """Constructs the multiplicity model's optimizer for a config without ``opt_conf``."""
     return schedulefree_adamw(params, lr=mm_conf.get("lr", 1e-3), betas=(0.95, 0.999),
                               weight_decay=mm_conf.get("weight_decay", 0.0),
                               warmup_steps=mm_conf.get("warmup_steps", 0))
 
 
 def opt_is_schedulefree(opt) -> bool:
-    """Returns whether ``opt`` needs the explicit train/eval switch schedule-free carries."""
+    """Returns whether ``opt`` is schedule-free: it has the ``train()`` / ``eval()`` switch."""
     return callable(getattr(opt, "train", None))
 
 
@@ -35,7 +35,7 @@ def opt_eval(opt) -> None:
 
 
 class ScheduleFreeSwitch:
-    """Mixin: puts a schedule-free ``self.opt`` in train / eval mode around Lightning's validation."""
+    """The mixin that puts a schedule-free ``self.opt`` in eval mode for Lightning's validation and back after."""
 
     def _opt_train(self) -> None:
         opt_train(self.opt)

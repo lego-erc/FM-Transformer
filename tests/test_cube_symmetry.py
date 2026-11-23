@@ -1,4 +1,4 @@
-"""CubeSymmetry with the in-face stabiliser: the 8 elements are orthogonal, fix the canonical +x axis,
+"""``CubeSymmetry`` with the in-face stabiliser: the 8 elements are orthogonal, fix the canonical +x axis,
 round-trip with the face rotation, keep the canonical face at +x, leave a normal-incidence gun at the
 face centre invariant, and symmetrise a y-asymmetric cloud."""
 import torch

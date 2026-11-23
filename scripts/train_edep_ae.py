@@ -1,10 +1,10 @@
-"""Train the per-layer E_dep autoencoder that a flow config's ``model_conf.edep_ae.path`` points at.
+"""Trains the per-layer E_dep autoencoder that a flow config's ``model_conf.edep_ae.path`` points at.
 
-It is fitted on that flow's own training split (``LEGOLtng.setup``: same filtering, ``val_conf`` split), so the
-flow's validation events stay unseen, and on the events with a deposit. Afterwards the latent standardisation
-(``z_mu``, ``z_sd``) and the per-layer draw ceiling (``log_e_max``) are fitted, and ``{"config", "state_dict"}``
-is written to the path. Defaults are the 2026-10-20 probe's (K = 16: the smallest K whose sampled Si layers and Si
-sum matched G4 to 1-2%; ~1 min on one H100).
+It is fitted on the events with a deposit in that flow's own training split (``LEGOLtng.setup``: same filtering,
+``val_conf`` split), so the flow's validation events stay unseen. Then the latents' standardisation (``z_mu``,
+``z_sd``) and each layer's cap on a sampled deposit (``log_e_max``, the largest in the data) are set from the
+training events, and ``{"config", "state_dict"}`` is written to the path. The default K = 16 is the smallest K whose
+sampled Si layers and Si sum matched Geant4 to 1-2%; the fit takes ~1 min on one H100.
 
     python scripts/train_edep_ae.py <flow config> [--K 16] [--steps 20000]
 """
@@ -60,7 +60,7 @@ lego.setup("fit")                               # no trainer attached: the base 
 
 
 def _layers(ds):
-    """The normalised per-layer E_dep of a loaded dataset, through the views on it."""
+    """Returns the per-layer E_dep of a loaded dataset on the layer scale, through the views on it."""
     return _layers(ds.ds)[ds.idx] if hasattr(ds, "idx") else ds.edep_layers
 
 

@@ -1,3 +1,11 @@
+"""Trains the flow (``LEGOLtng``) or the multiplicity model (``MultModel``) from a YAML config.
+
+    python scripts/train.py <config>
+
+Rank 0 saves ``{"state_dict", "config"}`` as ``<run.name>.pt``; a flow's config carries the fitted base head and the
+learned loss weights.
+"""
+
 import argparse
 import os
 import subprocess
@@ -18,7 +26,7 @@ if not cfg_path.is_file():
 cfg = yaml.safe_load(cfg_path.read_text())
 run, log_conf, config = cfg["run"], cfg["logging"], cfg["config"]
 
-if (ROOT / ".env").is_file():  # optional: LEGO_DATA_DIR / LEGO_CKPT_DIR / the comet key
+if (ROOT / ".env").is_file():  # optional: LEGO_DATA_DIR, LEGO_CKPT_DIR, the comet key; the environment wins
     for _l in (ROOT / ".env").read_text().splitlines():
         if "=" in _l and not _l.lstrip().startswith("#"):
             _k, _v = _l.split("=", 1)
@@ -43,16 +51,16 @@ torch.set_float32_matmul_precision(run["matmul_precision"])
 if run.get("compile"):
     import torch._dynamo
 
-    torch._dynamo.config.recompile_limit = 128   # a graph per (length bucket, plain or flow-map step); past it: eager
+    torch._dynamo.config.recompile_limit = 128   # a graph per (length bucket, plain or flow-map step); beyond it: eager
 
 epochs = run["epochs"]
 devices = run["devices"]
 nodes = run.get("nodes", 1)
 name = run["name"]
 
-# Coerce the YAML-native values into what the models expect.
+# the YAML values as the types the models expect
 config["dl_conf"]["dtype"] = d_dtype
-if "base_conf" in config:  # FM only; the mult config carries no base distribution
+if "base_conf" in config:  # the flow only: a multiplicity config has no base_conf
     config["base_conf"]["kappa"] = torch.tensor(config["base_conf"]["kappa"])
 if "adamw_betas" in config["opt_conf"]:
     config["opt_conf"]["adamw_betas"] = tuple(config["opt_conf"]["adamw_betas"])
@@ -63,7 +71,7 @@ config["dl_conf"]["lds_args"]["data"] = dpath_prefix + config["dl_conf"]["lds_ar
 if run.get("data_seed") is not None:  # the shuffle order, identical on every DDP rank
     config["dl_conf"]["seed"] = int(run["data_seed"])
 
-# placeholder for construction: configure_optimizers replaces it with the trainer's exact count
+# total_steps: a placeholder to construct the scheduler with; configure_optimizers sets the trainer's exact count
 scheduler = config["opt_conf"].get("scheduler")
 if scheduler is not None and "total_steps" not in scheduler:
     bs = config["dl_conf"]["bs"]
@@ -132,20 +140,20 @@ if resume_from:
     sd = {k.replace("_orig_mod.", ""): v for k, v in prev["state_dict"].items()}
     incompat = target.load_state_dict(sd, strict=False)
     assert not incompat.unexpected_keys, f"resume_from arch mismatch: {incompat}"
-    if is_ltng and hasattr(model, "base_head"):  # keep the trained-against head: setup skips a frozen one
+    if is_ltng and hasattr(model, "base_head"):  # keep the head it was trained with: setup does not refit a frozen head
         model.base_head.requires_grad_(False)
     prev_mc = migrate_loss_weight_keys(prev["config"]["model_conf"]) if "config" in prev else {}
     for k, v in prev_mc.get("loss_weights", {}).items():
         if hasattr(model, k):
             getattr(model, k).data.copy_(v)
 
-if compile_mode == "model":  # fm: the ProjectModel; mult: the count Decoder wrapper
+if compile_mode == "model":  # fm: the ProjectModel; mult: the trunk
     model.model = torch.compile(model.model, dynamic=False)
 
 if run.get("data_seed") is not None:
     torch.manual_seed(int(run["data_seed"]))
 # resume_ckpt: a Lightning checkpoint (optimizer, scheduler, epoch) to continue from. fit restores it only after
-# setup, so freeze the base head here: otherwise setup pretrains a new one that the restore then overwrites
+# setup, so freeze the base head here: otherwise setup pretrains a new one that the restore then overwrites.
 resume_ckpt = run.get("resume_ckpt")
 if resume_ckpt and hasattr(model, "base_head"):
     model.base_head.requires_grad_(False)
@@ -158,9 +166,8 @@ model.rc.config["dl_conf"]["data_path"] = None
 model.rc.config["additional"]["comet_exp_key"] = None
 if hasattr(model, "base_head"):
     model.rc.config["base_conf"]["base_head"] = {k: v.cpu() for k, v in model.base_head.state_dict().items()}
-# the learned loss weights live on the LightningModule, not in vf's state_dict:
-# keep them so resume_from does not restart every Kendall cell at weight 1.
-# Guarded: the mult model has neither the cells nor a model_conf to put them in.
+# The learned loss weights are parameters of the LightningModule, not of vf: save them in the config, so that
+# resume_from does not restart every loss cell at weight 1. The multiplicity model has none.
 if any(hasattr(model, k) for k in ("lv", "lv_flow")):
     model.rc.config["model_conf"]["loss_weights"] = {
         k: getattr(model, k).detach().cpu() for k in ("lv", "lv_flow") if hasattr(model, k)

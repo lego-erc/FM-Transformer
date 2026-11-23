@@ -4,13 +4,14 @@ checkpoints still run unchanged:
     scale_dist   ``trunc_norm`` (the default of a config without the key), ``uniform``, ``logit_norm``
     base_dist    ``iso`` (isotropic momentum and position directions), ``iso_pos`` (isotropic positions only)
     tanh_theta   off: a wrapped-normal polar angle; on without a shape exponent (configs without ``ang_shape``)
-    bs_frac      > 0: a share of the events drawn about the antipode
-    iso          the fully isotropic start of inverse-mask events (``mask_conf.p_forward`` < 1); ``x0_inverse_mask``
-                 is ``BaseDist.gen_base_wrapper`` for a batch that holds any
+    bs_frac      > 0: a share of the events sampled about the antipode
+    iso          the fully isotropic start of inverse-mask events (``mask_conf.p_forward < 1``);
+                 ``BaseDist.gen_base_wrapper`` hands a batch that holds any to ``x0_inverse_mask``
 
-``GenerateBase`` derives from ``LegacySampler``: its ``__call__`` hands every draw that is not the recipe's to the one
-here, and ``rd_scale`` / ``poles`` / ``iso_dirs`` / ``iso`` stay reachable on it (``lego_eval`` tests for ``iso_dirs``).
-The methods read the parameters ``GenerateBase`` holds (``kappa``, ``ang_pow``, ``sm_scale``, ``sm_pow``).
+``GenerateBase`` derives from ``LegacySampler``: its ``__call__`` hands every batch whose options are not the recipe's
+to the ``__call__`` here, and ``rd_scale`` / ``poles`` / ``iso_dirs`` / ``iso`` stay reachable on it (``lego_eval``
+tests for ``iso_dirs``). The methods read the parameters ``GenerateBase`` holds (``kappa``, ``ang_pow``,
+``sm_scale``, ``sm_pow``).
 """
 
 import torch
@@ -28,13 +29,31 @@ def sample_dirs(
     bs_frac: float = 0.0, tanh_theta: bool = False, ang_pow=None,
     rng=None, elem=None, stream: int = 0,
 ):
-    """Directions concentrated (kappa) around loc_cc, wrapped-normal or
-    tanh-normal theta; bs_frac sends the first round(bs_frac*B) events --
-    all their particles -- to the antipode. ``ang_pow`` raises the
-    tanh-normal theta to a power, so kappa sets the angular scale and
-    ang_pow the shape: one moment each, instead of one for both. ``rng``
-    (legofmt.rng.EventRNG) draws theta / phi from ``stream`` / ``stream + 1``
-    at the per-event element ids ``elem`` (shape ``n``)."""
+    """Samples unit directions concentrated around ``loc_cc``.
+
+    ```
+    theta = |wrap(2 z / kappa)|               the polar angle to ``loc_cc``: a wrapped normal
+    theta = pi |tanh(z / kappa)|              ``tanh_theta``
+    theta = pi |tanh(z / kappa)| ** ang_pow   ``tanh_theta`` with ``ang_pow`` (``Angles``): kappa sets the scale,
+                                              ``ang_pow`` the shape
+    ```
+
+    ``z ~ N(0, 1)``; the azimuth is uniform.
+
+    Args:
+        n:          the shape of the result without its last axis, (B, n_out).
+        loc_cc:     (B, 1, 3), each event's axis.
+        kappa:      the concentration, broadcast against ``n``.
+        bs_frac:    the first ``round(bs_frac * B)`` events are sampled about the antipode of their axis, with all
+            their slots.
+        tanh_theta: the tanh form of ``theta`` in place of the wrapped normal.
+        ang_pow:    the exponent of the tanh form; None: no exponent.
+        rng:        keyed noise (``legofmt.rng.EventRNG``): ``theta`` reads ``stream``, the azimuth ``stream + 1``,
+            at the element ids ``elem`` (shape ``n``). None: torch's noise.
+
+    Returns:
+        Unit vectors ``(*n, 3)``.
+    """
     normal = lambda: torch.randn(n, device=loc_cc.device) if rng is None else rng.normal(stream, elem).to(loc_cc)
     loc = _GEOM.to_sph(loc_cc).expand((*n, -1))
     if bs_frac > 0.0:
@@ -55,7 +74,10 @@ def sample_dirs(
 
 
 def sample_iso(n: tuple, mpct, device=None, rng=None, elem=None, stream: int = 0):
-    """mpct isotropic unit directions per event; ``rng`` as in ``sample_dirs``."""
+    """Samples ``mpct`` isotropic unit directions per element of shape ``n``; returns ``(*n, 3 * mpct)``.
+
+    Keyed (``rng``, ``elem`` as in ``sample_dirs``), the azimuth reads ``stream`` and the polar angle ``stream + 1``.
+    """
     ids = None if rng is None else elem[..., None] * mpct + torch.arange(mpct, device=elem.device)
     rand = lambda s: (torch.rand((*n, mpct), device=device) if rng is None
                       else rng.uniform(stream + s, ids).float().to(device))
@@ -67,8 +89,8 @@ def sample_iso(n: tuple, mpct, device=None, rng=None, elem=None, stream: int = 0
 def x0_inverse_mask(model, ds_t, rng):
     """Samples ``x_0`` for a batch with inverse-mask events, which generate the incoming particle from the outgoing set.
 
-    An inverse-mask event starts from the isotropic sample (``LegacySampler.iso``), drawn first; a forward event
-    from the head's prior, as in ``BaseDist.gen_base_wrapper``, which hands such a batch here.
+    An inverse-mask event starts from the isotropic sample (``LegacySampler.iso``), which is sampled first; a forward
+    event starts from the head's prior, as in ``BaseDist.gen_base_wrapper``, which hands such a batch here.
 
     Args:
         model: the ``LEGOLtng``.
@@ -78,7 +100,7 @@ def x0_inverse_mask(model, ds_t, rng):
     Returns:
         ``x_0`` (B, N, 7).
     """
-    data, m, fwd = ds_t.f.model_in, ds_t.m.full, ds_t.m.fwd   # fwd: the incoming slot conditions
+    data, m, fwd = ds_t.f.model_in, ds_t.m.full, ds_t.m.fwd   # fwd: the incoming particle is given
     x0 = model.gen_base.iso(m.shape, data.device, rng=rng)
     if fwd.any():
         x0 = torch.where(fwd.view(-1, 1, 1), model._draw_prior(ds_t, rng), x0)
@@ -86,7 +108,7 @@ def x0_inverse_mask(model, ds_t, rng):
 
 
 class LegacySampler:
-    """The sampler's options and every draw but the recipe's."""
+    """The sampler's options, and the sampling for every option but the recipe's."""
 
     def __init__(self, base_conf: dict):
         self.base_dist = base_conf.get("base_dist", "poles")
@@ -98,15 +120,15 @@ class LegacySampler:
             raise ValueError(f"base_dist must be 'poles', 'iso', or 'iso_pos', got {self.base_dist!r}")
 
     def is_recipe(self) -> bool:
-        """Returns whether the options are the recipe's, the draw ``GenerateBase.__call__`` spells out."""
+        """Returns whether the options are the recipe's: the sampling ``GenerateBase.__call__`` spells out."""
         return (self.scale_dist == "sm_norm" and self.base_dist == "poles" and bool(self.tanh_theta)
                 and self.bs_frac == 0 and self.ang_pow is not None)
 
     def __call__(self, ds_t, rng=None):
         """Samples ``x_0`` for a batch with any option but the recipe's.
 
-        Joins the data's prefix and incoming token with a draw per outgoing slot (``poles`` / ``iso_dirs``), then
-        writes ``z ~ N(0, 1)`` on the E_dep cell. Arguments and result as in ``GenerateBase.__call__``.
+        Joins the data's prefix tokens and incoming token with a sample per outgoing slot (``poles`` / ``iso_dirs``),
+        then writes ``z ~ N(0, 1)`` on the E_dep token. Arguments and result as in ``GenerateBase.__call__``.
         """
         f, shape = ds_t.f, ds_t.f.out_pid.shape
         elem = None if rng is None else R.species_rank_ids(f.out_pid.long())
@@ -119,7 +141,26 @@ class LegacySampler:
         return x0
 
     def rd_scale(self, shape, e_in, rng=None, elem=None):
-        """Energy prior for the outgoing slots per scale_dist; returns (B, n_out, 1)."""
+        """Samples the outgoing slots' energy channel ``e_in * u`` as ``scale_dist`` says.
+
+        ```
+        trunc_norm   u = 1 + z,   z ~ N(0, 1) truncated to [-1, 0]
+        uniform      u ~ U(0, 1)
+        sm_norm      u = Energy(sm_scale, sm_pow).sample(z)
+        logit_norm   u = sigmoid(z)
+        ```
+
+        Args:
+            shape: (B, n_out).
+            e_in:  one factor per event, B values.
+            rng:   keyed noise (``legofmt.rng.EventRNG``) at the element ids ``elem``; None: torch's noise.
+
+        Returns:
+            (B, n_out, 1).
+
+        Raises:
+            ValueError: an unknown ``scale_dist``.
+        """
         u = None if rng is None else rng.uniform(R.BASE_E, elem)[..., None]   # float64 until the end
         normal = lambda: torch.randn((*shape, 1), device=e_in.device) if u is None else torch.special.ndtri(u)
         if self.scale_dist == "trunc_norm":
@@ -139,6 +180,14 @@ class LegacySampler:
         return e_in.view(-1, 1, 1) * u.to(e_in)
 
     def poles(self, shape, incoming_rt, iso_pos=False, rng=None, elem=None, **kwargs):
+        """Samples the outgoing slots about the incoming particle (``base_dist: poles`` / ``iso_pos``).
+
+        The energy channel is ``rd_scale``'s; the momentum directions concentrate around the incoming momentum, the
+        position directions around the incoming position (``iso_pos``: isotropic). ``bs_frac`` acts on the positions.
+
+        ``shape`` is (B, n_out), ``incoming_rt`` the incoming token (B, 1, 7); ``rng`` and ``elem`` as in
+        ``sample_dirs``. Returns (B, 1 + n_out, 7): the incoming token, then the samples.
+        """
         p_cc = F.normalize(incoming_rt[..., 1:4], dim=-1)
         loc_cc = incoming_rt[..., -3:]
         e_sc = self.rd_scale(shape, torch.ones_like(incoming_rt[..., 0:1]), rng=rng, elem=elem)
@@ -154,8 +203,10 @@ class LegacySampler:
         return torch.cat((incoming_rt, base), dim=1)
 
     def iso_dirs(self, shape, incoming_rt, rng=None, elem=None, **kwargs):
-        # naive base: isotropic momentum/position directions; energy scale from
-        # rd_scale (per scale_dist), E_dep token from __call__.
+        """Samples the outgoing slots with isotropic momentum and position directions (``base_dist: iso``).
+
+        The energy channel is ``rd_scale``'s. Arguments and result as in ``poles``.
+        """
         e_sc = self.rd_scale(shape, torch.ones_like(incoming_rt[..., 0:1]), rng=rng, elem=elem)
         p_ = sample_iso(shape, 1, device=incoming_rt.device, rng=rng, elem=elem, stream=R.BASE_MOM)
         x  = sample_iso(shape, 1, device=incoming_rt.device, rng=rng, elem=elem, stream=R.BASE_POS)
@@ -164,8 +215,11 @@ class LegacySampler:
 
     @torch.no_grad()
     def iso(self, shape, device, rng=None):
-        """Fully isotropic x_0 for inverse-mask events, on all tokens; unrelated
-        to base_dist='iso', which routes to iso_dirs."""
+        """Samples the start of inverse-mask events on every token, (*shape, 7).
+
+        The energy channel is uniform on (0, 1), the momentum and position directions are isotropic. Not
+        ``base_dist: iso``, which is ``iso_dirs``.
+        """
         elem = None if rng is None else torch.arange(shape[1], device=device).expand(shape)
         e = (torch.rand((*shape, 1), device=device) if rng is None
              else rng.uniform(R.ISO_E, elem)[..., None].float().to(device))

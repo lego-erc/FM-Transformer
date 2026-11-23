@@ -1,9 +1,9 @@
-"""``model_args.cond_pool``: the cond scalars reach the field as one token instead of one each.
+"""``model_args.cond_pool``: the conditioning scalars reach the field as one token instead of one token each.
 
-A set encoder over (which scalar, standardised value) pairs: ``rho(sum_k phi([z_k, onehot_k]))``. The scalars' own
-tokens leave the sequence the encoder runs, 3 of an Ar cube event's 18 real tokens on average. In the A/B of
-20.10.2026 this form matched the per-scalar tokens in loss and in interpolation between trained densities; Fourier
-features of the value did not.
+The token is a set encoder over (which scalar, standardised value) pairs: ``rho(sum_k phi([z_k, onehot_k]))``. The
+scalars' own tokens leave the sequence the encoder runs, which makes it 3 tokens shorter (an Ar cube event has 18
+real tokens on average). In an A/B this form matched one token per scalar in loss and in interpolation between
+trained densities; Fourier features of the value did not.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ N_PREFIX = 5        # Density, E_dep, Z, A, Size
 def _model(**model_args) -> LEGOLtng:
     torch.manual_seed(0)
     model = LEGOLtng(_head_config(True, {"cond_pool": True, "dropout": 0.0, "ntypes": N_PREFIX + 2, **model_args}))
-    with torch.no_grad():   # the read-out is not zero-initialised, but a scale the tests can see helps
+    with torch.no_grad():   # centred on ``_head_batch``'s scalars: standardised values of order 1, as after ``setup``
         model.model.vf.cond_pool.mu.copy_(torch.tensor([3.0, 18.0, 40.0, 100.0]))
     return model.eval()
 
@@ -86,7 +86,7 @@ def test_the_scale_is_the_datas_and_is_saved_with_the_field() -> None:
     values = torch.tensor([[1.0, 18.0, 40.0, 100.0], [3.0, 29.0, 63.5, 100.0], [5.0, 18.0, 40.0, 100.0]])
     pool.standardise_by(values)
     assert torch.allclose(pool.mu, values.mean(0)) and torch.allclose(pool.sd[:3], values.std(0)[:3])
-    assert pool.sd[3] == 1.0   # a scalar the dataset holds fixed (one cube size): its own unit, not a division by zero
+    assert pool.sd[3] == 1.0   # a scalar the dataset holds fixed (one cube size) keeps sd 1: no division by zero
     assert {"cond_pool.mu", "cond_pool.sd"} <= set(_model().model.vf.state_dict())
     assert not any(k.startswith("cond_pool") for k in LEGOLtng(_head_config(True)).model.vf.state_dict())
 

@@ -1,11 +1,11 @@
-"""model_args.geom_encoder: K learned tokens in the flow's h_dim that summarise a layered stack.
+"""Tests for ``model_args.geom_encoder``: K learned tokens in the field's ``h_dim`` that summarise a layered stack.
 
-A small bidirectional transformer over one token per layer ([thickness mm, density g/cm3, Z, A], beam side first,
-plus radiation / interaction lengths and Fourier features of the cumulative depth) prepends K summary tokens to the
-flow's sequence. They are conditioning tokens (t = 1, d = 0), never transported and dropped before the output
-projection. With ``hide_scalars`` the composite Density / Z / A / Size tokens stay in the data (the base head and
-the count model read them) but are masked out of the flow's attention, so the stack reaches the flow only through
-the tokens.
+A small bidirectional transformer reads one token per layer (``[thickness mm, density g/cm3, Z, A]``, beam side
+first, plus its thickness in radiation and interaction lengths and Fourier features of its cumulative depth) and
+prepends K summary tokens to the field's sequence. They are conditioning tokens (``t = 1, d = 0``): never
+transported, and dropped before the read-out. With ``hide_scalars`` (the default) the composite ``Density`` / ``Z``
+/ ``A`` / ``Size`` tokens stay in the data, where the base head and the multiplicity model read them, but are masked
+out of the field's attention: the stack reaches the field only through the K tokens.
 """
 
 from __future__ import annotations
@@ -37,8 +37,10 @@ def _model(geom=GEOM, seed=0) -> LEGOLtng:
 
 
 def _wake(m: LEGOLtng) -> None:
-    """The encoder's output layer is zero-init (the tokens start as plain conditioning tokens); give it weights so
-    a test can see what the tokens carry."""
+    """Gives the encoder's read-out ``out`` random weights.
+
+    ``out`` starts at zero, so a fresh model's tokens are zero and a test could not see what they carry.
+    """
     torch.manual_seed(1)
     torch.nn.init.normal_(m.model.vf.geom.out.weight, std=0.5)
 
@@ -62,7 +64,7 @@ def test_bad_layers_raise() -> None:
 def test_tokens_have_the_flow_width_and_see_the_layer_order() -> None:
     enc = GeomEncoder([W, SI] * 3, h_dim=16, tokens=4, dim=16, depth=1, heads=2)
     assert enc().shape == (1, 4, 16)
-    assert enc().abs().max() == 0                       # zero-init read-out: tokens start empty
+    assert enc().abs().max() == 0                       # ``out`` starts at zero, and so do the tokens
     torch.nn.init.normal_(enc.out.weight)
     rev = GeomEncoder([SI, W] * 3, h_dim=16, tokens=4, dim=16, depth=1, heads=2)
     rev.load_state_dict(enc.state_dict())
@@ -95,14 +97,15 @@ def test_hidden_scalar_tokens_do_not_reach_the_generated_tokens(hide: bool) -> N
 def test_tokens_change_the_field() -> None:
     m = _model()
     ds = _fake_batch()
-    v0 = _velocity(m, ds)                               # zero tokens
+    v0 = _velocity(m, ds)                               # the tokens are still zero
     _wake(m)
     assert not torch.allclose(v0, _velocity(m, ds))
 
 
 def test_packed_and_per_token_conditions_agree() -> None:
-    """Per-event t uses the per-event (B, 3, D) adaptive-norm condition; its generated-token selector must skip the K
-    prefix tokens. A per-token t equal to it (conditioning tokens at t = 1) takes the per-token path."""
+    """A per-event ``t`` takes the per-event ``(B, 3, D)`` adaptive-norm condition, whose selector of the generated
+    tokens must skip the K geometry tokens. The velocity must equal that of the same ``t`` given per token
+    (conditioning tokens at ``t = 1``), which takes the per-token (legacy) path."""
     m = _model()
     _wake(m)
     ds = _fake_batch()

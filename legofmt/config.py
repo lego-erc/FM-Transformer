@@ -1,11 +1,14 @@
-"""Config resolution: raw YAML, or a checkpoint dict, -> a ``Resolved*Config``.
+"""Config resolution: a config dict (the YAML's), or a checkpoint dict, -> a ``Resolved*Config``.
 
-The two ``Resolved*Config`` classes are the table of what a config resolves to: a field with a default is a config key
-carried as it is, the default the value it takes when absent; every other field is derived, its comment naming the
-source. Then come the resolvers, which read the dataset's meta.json (fresh training) or the checkpoint, build the
-manifold and stamp the x-transformers version into every config; the checks a config must pass are at the bottom.
-Both entry points deep-copy the dict they are handed, but ``set_layout`` is global state. Support for older artefacts,
-old config keys among them, lives in ``legofmt.compat``.
+The two ``Resolved*Config`` classes are the table of what a config resolves to. A field with a default is a config key
+carried as it is, and the default is the value an absent key takes; every other field is derived, and its comment
+names the source. Each table is followed by its resolvers, which read the dataset's meta.json (fresh training) or the
+checkpoint, build the manifold and write the installed x-transformers version into the config. The checks a config
+must pass are at the bottom.
+
+Both entry points (``resolve_legoltng_config``, ``resolve_mult_config``) work on a deep copy of the dict they are
+handed. They also call ``set_layout``, which sets the token layout for the whole process. Older checkpoints and config
+keys are adapted in ``legofmt.compat``.
 """
 
 from __future__ import annotations
@@ -50,14 +53,14 @@ class ResolvedLEGOConfig:
     edep_cell: bool = False
     edep_whiten: bool = False                  # the E_dep token in units of the base head's per-event prior;
                                                # off: legacy.edep_token
-    edep_whiten_max_sig: float | None = None   # legacy.edep_token: cap on that unit (logit) for a finer MeV grid
-    edep_whiten_feed: bool = False             # legacy.edep_token: each event's (mu, unit) on the E_dep token's
-                                               # direction factors
-    dir_zoom: float | None = None              # theta_s of the outgoing-direction polar zoom (rad); None = off
+    edep_whiten_max_sig: float | None = None   # legacy.edep_token: caps that unit [logit], for a finer MeV grid
+    edep_whiten_feed: bool = False             # legacy.edep_token: writes each event's (mu, log unit) onto the E_dep
+                                               # token's direction and position channels
+    dir_zoom: float | None = None              # theta_s of the outgoing directions' polar zoom [rad]; None: off
     dir_zoom_mix: float = 0.0                  # linear share of that zoom; 0 = pure log
     dir_zoom_nucleons_max: int | None = None   # events with more outgoing nucleons (nuclear interactions) are
                                                # not zoomed
-    max_loss_weight: float = -6.0              # floors lv, so weight_bound = e^-max_loss_weight
+    max_loss_weight: float = -6.0              # the floor of lv: a loss cell's weight exp(-lv) <= exp(-max_loss_weight)
     overflow_delta: float = 0.0
     canon_sym: bool = False
     sym_aug: bool = False
@@ -71,25 +74,27 @@ class ResolvedLEGOConfig:
     manifold: ProductManifold          # build_manifold(model_conf.manifold)
     model_args: dict[str, Any]         # model_conf.model_args, completed by the resolvers
     cond_scalars: tuple[str, ...]      # model_conf.cond_scalars (default ("Density",)); fresh: else meta.json
-    n_prefix: int                      # len(cond_scalars) + 1: the generated E_dep's slot
-    max_loss_weight_flow: float        # model_conf key, default max_loss_weight: the flow-map's own cell
-    max_loss_weight_edep: float        # model_conf key, default max_loss_weight
+    n_prefix: int                      # len(cond_scalars) + 1 (the E_dep token): the number of prefix tokens
+    max_loss_weight_flow: float        # model_conf key, default max_loss_weight: the floor of the flow-map term's lv
+    max_loss_weight_edep: float        # model_conf key, default max_loss_weight: the floor of the E_dep cell's lv
     edep_whiten_global: tuple[float, float] | None  # model_conf key; legacy.edep_token: (c, s), one map
-                                                    # y = (logit u - c) / s for all
+                                                    # y = (logit u - c) / s for every event
     mask_conf: dict                    # model_conf key, default {}
-    inverse_events: bool               # mask_conf.p_forward < 1: some events generate the incoming particle (legacy)
+    inverse_events: bool               # mask_conf.p_forward < 1 (0.5 when a mask_conf leaves it out): some events
+                                       # generate the incoming particle (legacy)
     max_energy: float                  # model_conf.max_energy; fresh: else meta.json
     cutoff_mev: float                  # dl_conf.lds_args.cutoff_mev; fresh: meta.json first
     amp_dtype: torch.dtype | None      # additional.precision: bf16* -> bfloat16, 16* -> float16, else None
     len_buckets: tuple[int, ...] | None      # dl_conf.len_buckets: training runs each batch / piece at its bucket
                                              # length
-    len_mode: str                            # dl_conf key, default "split" (| "group")
-    len_split: int                           # dl_conf key, default 8
-    len_max_tokens: int | None               # dl_conf key
+    len_mode: str                            # dl_conf key: "split" (default) or "group"
+    len_split: int                           # dl_conf key, default 8: the pieces a split-mode batch is cut into
+    len_max_tokens: int | None               # dl_conf key: a group-mode batch of bucket length b holds
+                                             # len_max_tokens // b events
     reflow_kwargs: dict                # model_conf key, default {}
     edep_ae: dict | None               # model_conf.edep_ae, loaded: {"config", "state_dict"} of the frozen per-layer
                                        # E_dep autoencoder
-    n_lat: int                         # its latent width K, flown as one extra token of the field (0 = off)
+    n_lat: int                         # its latent width K; the flow carries the latent as one extra token (0: off)
     dl_conf: dict
     opt_conf: dict
     odeint_conf: dict                  # default {}
@@ -110,23 +115,24 @@ def _resolve_fresh(config: dict) -> ResolvedLEGOConfig:
     meta = _read_meta(config)
     pdgids = torch.tensor(meta["particles"], dtype=torch.int64).sort().values.contiguous()
 
-    model_conf["max_energy"] = model_conf.get("max_energy", meta.get("max_energy"))   # the config's first
-    lds_args["cutoff_mev"] = meta.get("cutoff_mev", lds_args.get("cutoff_mev"))       # the file's first
-    model_args["npdgids"] = pdgids.shape[0] + 1                                       # + the padding's
+    model_conf["max_energy"] = model_conf.get("max_energy", meta.get("max_energy"))   # the config's, else meta.json's
+    lds_args["cutoff_mev"] = meta.get("cutoff_mev", lds_args.get("cutoff_mev"))       # meta.json's, else the config's
+    model_args["npdgids"] = pdgids.shape[0] + 1                                       # + 1: index 0 is padding
     model_args.setdefault("max_seq_l", meta["ntokens"])
     model_conf.setdefault("cond_scalars", tuple(meta.get("cond_scalars", ("Density",))))
     if "energy_kin" in meta:
         model_conf.setdefault("energy_kin", bool(meta["energy_kin"]))
     if "cuboid_dim" in meta:
         model_conf.setdefault("cuboid_dim", meta["cuboid_dim"])
-    if "edep_excess_max_mev" in meta:   # per incoming pdgid, the data's largest E_dep - E_in: the E_dep cap's margin
+    # per incoming pdgid, the data's largest E_dep - E_in [MeV]: the cap on E_dep is E_in plus this excess
+    if "edep_excess_max_mev" in meta:
         model_conf.setdefault("edep_excess_mev",
                               {int(float(p)): float(m) for p, m in meta["edep_excess_max_mev"].items()})
     else:
-        edep_excess_from_data(config)   # a dataset older than the key
+        edep_excess_from_data(config)   # a dataset whose meta.json lacks the key
     model_args.setdefault("ntypes", len(model_conf["cond_scalars"]) + 3)
-    # ``pdgids`` lives at model_conf scope (one level above model_args) so
-    # it is preserved by the manual torch.save round-trip in scripts/train.py.
+    # In model_conf, not in model_args (the field's constructor arguments): ``pdgids`` is saved with the config, and
+    # ``_resolve_from_checkpoint`` reads it back.
     model_conf["pdgids"] = pdgids
     return _build_resolved(config, meta["ntokens"], pdgids, state_dict=None)
 
@@ -148,7 +154,7 @@ def _build_resolved(config: dict, max_seq_l: int, pdgids: torch.Tensor, state_di
     migrate_loss_weight_keys(model_conf)
     c = {f.name: model_conf.get(f.name, f.default) for f in fields(ResolvedLEGOConfig) if f.default is not MISSING}
     cond_scalars = tuple(model_conf.get("cond_scalars", ("Density",)))
-    n_prefix = len(cond_scalars) + 1  # + edep slot (generated)
+    n_prefix = len(cond_scalars) + 1  # + the E_dep token
     set_layout(cond_scalars)
     _expand_geom_encoder(model_args.get("geom_encoder"), n_prefix)
     if model_args.get("cond_pool"):
@@ -157,7 +163,7 @@ def _build_resolved(config: dict, max_seq_l: int, pdgids: torch.Tensor, state_di
     _check_lego(config, c, cond_scalars, len_buckets, state_dict)
     edep_ae = _edep_ae_spec(model_conf)
     if edep_ae is not None:
-        model_args.setdefault("lat_dim", edep_ae["config"]["K"])   # the field's latent token (CFMTrafo_x)
+        model_args.setdefault("lat_dim", edep_ae["config"]["K"])   # the width of the field's latent token (CFMTrafo_x)
 
     mask_conf, whiten_global = model_conf.get("mask_conf"), model_conf.get("edep_whiten_global")
     return ResolvedLEGOConfig(
@@ -203,7 +209,7 @@ class ResolvedMultConfig:
     h_dim: int = 512
     n_layers: int = 6
     n_heads: int = 8
-    dropout: float = 0.1   # layer_dropout is deliberately not plumbed through: stochastic depth breaks DDP's reducer
+    dropout: float = 0.1   # layer_dropout is not offered: stochastic depth breaks DDP's reducer
     use_abs_pos_emb: bool = True
     post_emb_norm: bool = True
     canon_sym: bool = False
@@ -216,7 +222,8 @@ class ResolvedMultConfig:
     n_ptypes_in: int                   # len(ptypes_in)
     ptypes: torch.Tensor               # mm_conf.ptypes; fresh: else meta.json particles, sorted
     ptypes_in: torch.Tensor            # mm_conf.ptypes_in; fresh: else meta.json particles_in, sorted
-    in_dim: int                        # len(cond_scalars) + 7
+    in_dim: int                        # len(cond_scalars) + 7: the incoming particle's energy, momentum (3) and
+                                       # position (3)
     pos_scale: torch.Tensor            # mm_conf.pos_scale (default 50.0) as float32: half-width(s) d of
                                        # GeomTrafos.to_cuboid, 0-dim (a cube) or per axis (3,)
     model_args: dict[str, Any]         # mm_conf key, default {}
@@ -226,7 +233,7 @@ class ResolvedMultConfig:
     val_conf: dict                     # default {}
     config: dict                       # the whole config, as resolved
     state_dict: dict | None            # the checkpoint's; None: fresh training
-    data: Any                          # the dataset (MultLoader), when resolving read it for its largest count
+    data: Any                          # the MultLoader, when resolving read the dataset for max_count; else None
     inv_model_args: dict[str, Any]     # mm_conf key, default model_args
     inv_h_dim: int                     # mm_conf key, default h_dim
     inv_n_layers: int                  # mm_conf key, default n_layers
@@ -254,7 +261,7 @@ def _resolve_fresh_mult(config: dict) -> ResolvedMultConfig:
     config["additional"]["x_transformers_version"] = str(XT_VERSION)
     if "max_energy" in meta:  # MultLoader's DataPrep needs it for norm_e
         mm_conf.setdefault("max_energy", meta["max_energy"])
-    lds_conf["cutoff_mev"] = meta.get("cutoff_mev", lds_conf.get("cutoff_mev"))  # as the flow: the file's cut wins
+    lds_conf["cutoff_mev"] = meta.get("cutoff_mev", lds_conf.get("cutoff_mev"))  # as the flow: the file's cutoff wins
     mm_conf.setdefault("cond_scalars", tuple(meta.get("cond_scalars", ("Density",))))
     _check_mult(mm_conf, dl_conf, meta)
     set_layout(tuple(mm_conf["cond_scalars"]))  # before MultLoader, which reads layout-dependent accessors
@@ -277,7 +284,8 @@ def _resolve_from_checkpoint_mult(config: dict, state_dict: dict) -> ResolvedMul
     additional = config.setdefault("additional", {})
     model_args = mm_conf.get("model_args", {})
     inv_model_args = mm_conf.get("inv_model_args", model_args)
-    for args in {id(d): d for d in (model_args, inv_model_args)}.values():  # may be one dict
+    # the two may be one dict, whose scale is cubed once
+    for args in {id(d): d for d in (model_args, inv_model_args)}.values():
         qk_norm_scale_compat(args, additional)
     additional["x_transformers_version"] = str(XT_VERSION)
 
@@ -338,8 +346,9 @@ def build_manifold(spec: str | list) -> ProductManifold:
 def resolve_len_buckets(spec, max_seq_l: int) -> tuple[int, ...] | None:
     """Returns the ascending bucket lengths a ``len_buckets`` spec names, ``max_seq_l`` the last; None: no buckets.
 
-    ``"auto"``: four per octave from 8 on (8, 10, 12, 14, 16, 20, ...). Padded to these, 7 % of the tokens a training
-    step runs are padding (Ar cube, 16M events); to powers of two it is 29 %, to ``max_seq_l`` 85 %.
+    A list is taken as given, without its lengths of ``max_seq_l`` or more. ``"auto"`` is four lengths per octave
+    from 8 on (8, 10, 12, 14, 16, 20, ...): padded to these, 7 % of the tokens a training step runs are padding (Ar
+    cube, 16M events); padded to powers of two it is 29 %, to ``max_seq_l`` 85 %.
     """
     if spec is None:
         return None
@@ -355,7 +364,9 @@ def _unpack(full_config: dict) -> tuple[dict, dict | None]:
 
 
 def _read_meta(config: dict) -> dict:
-    """Reads the dataset directory's meta.json, and stamps it and the x-transformers version into ``additional``.
+    """Reads the dataset directory's meta.json, and writes it and the x-transformers version into ``additional``.
+
+    Also defaults ``dl_conf.data_path`` to the directory's ``data_prepped.pt``.
 
     Raises:
         ValueError: ``dl_conf.lds_args.data`` is a ``.pt`` file, not a directory.
@@ -371,6 +382,7 @@ def _read_meta(config: dict) -> dict:
 
 
 def amp_dtype(precision) -> "torch.dtype | None":
+    """Returns the autocast dtype of a Lightning ``precision`` (``bf16*``, ``16*``) or a torch dtype; None: fp32."""
     if isinstance(precision, torch.dtype):
         return None if precision is torch.float32 else precision
     head = str(precision).split(",")[0].strip().lower()
@@ -382,7 +394,10 @@ def amp_dtype(precision) -> "torch.dtype | None":
 
 
 def _expand_geom_encoder(geom: dict | None, n_prefix: int) -> None:
-    """Expands ``model_args.geom_encoder`` in place: layers repeated, ``hide_scalars`` on by default, ``n_prefix``."""
+    """Completes ``model_args.geom_encoder`` in place.
+
+    ``layers`` is repeated ``repeat`` times, ``hide_scalars`` defaults to true, and ``n_prefix`` is set.
+    """
     if geom is None:
         return
     geom["layers"] = [[float(v) for v in row] for row in geom.get("layers") or []] * int(geom.pop("repeat", 1))
@@ -403,14 +418,18 @@ def _edep_ae_spec(model_conf: dict) -> dict | None:
     return spec
 
 
-# base_conf flags a base_head_lik config must set: tanh_theta is the angular distribution its likelihood assumes,
-# the others name what that head always does. And the conditioning scalars its inputs are built from.
+# The base_conf flags a ``base_head_lik`` config must set: ``tanh_theta`` is the angular distribution its likelihood
+# assumes, the others name what that head always does. Below them, the conditioning scalars the head's inputs are
+# built from.
 _LIK_FLAGS = ("tanh_theta", "base_head_nout", "ang_shape", "ang_nout", "ang_species")
 _BASE_HEAD_SCALARS = ("Z", "A", "Size")
 
 
 def _check_lego(config: dict, c: dict, cond_scalars: tuple, len_buckets, state_dict: dict | None) -> None:
     """Raises at the first rule a flow config breaks.
+
+    ``c`` holds the ``model_conf`` keys the resolved config carries, with their defaults; ``state_dict`` is None for
+    fresh training.
 
     Raises:
         KeyError:   fresh training without ``max_energy`` or ``cutoff_mev`` in meta.json or the config.
@@ -431,7 +450,7 @@ def _check_lego(config: dict, c: dict, cond_scalars: tuple, len_buckets, state_d
         if not layers or any(len(r) != 4 or min(r) <= 0 for r in layers):
             raise ValueError("model_args.geom_encoder.layers must be rows of positive [thickness mm, density, Z, A].")
 
-    if not state_dict and c["one_step_euler_fac"] > 0:  # loading weights never trains
+    if not state_dict and c["one_step_euler_fac"] > 0:  # rules of the flow-map loss; a loaded checkpoint is not trained
         if not model_args.get("step_cond", False):
             raise ValueError("one_step_euler_fac > 0 requires model_args.step_cond=True; without it the network never "
                              "sees the step size and the loss collapses to a curvature penalty on the velocity field.")

@@ -1,5 +1,5 @@
-"""Packing prepped padded tensors into a ``PackedData`` (``legofmt.data.load.packed``): the step that writes a
-``data_packed.pt``.
+"""Packing prepped padded tensors into a ``PackedData`` (``legofmt.data.load.packed``): the step before a
+``data_packed.pt`` is written.
 
     pack     padded ``(f, m, am[, edep_layers])`` -> PackedData, refusing what ``unpack`` would not give back
     concat   PackedData parts -> one, as packing their padded tensors in one go would
@@ -24,9 +24,9 @@ def pack(f: Tensor, m: Tensor, am: Tensor, n_prefix: int, edep_layers: Tensor | 
     prefix[i]        = f[i, :n_prefix, 0]
     tokens           = f[i, n_prefix:tot[i]] of every event i, back to back         tot[i] = am[i].sum()
     offsets[i + 1]   = offsets[i] + tot[i] - n_prefix                                 offsets[0] = 0
-    pad_e0[i]        = f[i, -1, 0] if event i is padded, else NaN
+    pad_e0[i]        = f[i, -1, 0] if event i has padding, else NaN
     prefix_token     = f[0, 0],                    channel 0 NaN
-    pad_token        = the first padded token,     channel 0 NaN
+    pad_token        = the first padding token,    channel 0 NaN
     ```
 
     Args:
@@ -34,12 +34,13 @@ def pack(f: Tensor, m: Tensor, am: Tensor, n_prefix: int, edep_layers: Tensor | 
         m:           (N, L) int64, the loss mask.
         am:          (N, L) bool, the attention mask.
         n_prefix:    the number of prefix tokens.
-        edep_layers: (N, n_layers), the per-layer E_dep, carried along.
+        edep_layers: (N, n_layers), the per-layer E_dep, carried along; None: the dataset has none.
 
     Raises:
         TypeError:  a tensor has another dtype.
-        ValueError: ``am`` is not one block from token 0, ``m`` does not follow from ``am``, or the prefix /
-            padded tokens are not one template outside channel 0.
+        ValueError: ``am`` is not one block of at least ``n_prefix + 1`` tokens from token 0, ``m`` does not follow
+            from ``am``, the prefix or the padding tokens are not one template outside channel 0, or an event's
+            padding tokens differ in channel 0.
     """
     _check_packable(f, m, am, n_prefix)
     P, tot = n_prefix, am.sum(1)
@@ -80,23 +81,23 @@ def concat(parts: list[PackedData]) -> PackedData:
 # ---- plumbing --------------------------------------------------------------------------------------------------------
 
 def _templates(f: Tensor, tot: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-    """Returns ``(prefix_token, pad_token, pad_e0)``, the values the prefix and padded tokens follow from.
+    """Returns ``(prefix_token, pad_token, pad_e0)``, the values the prefix and padding tokens follow from.
 
-    A template token has channel 0 NaN, and is all NaN where there is no such token (no event, no padded event).
+    A template token has channel 0 NaN, and is all NaN where there is no such token (no event, no event with padding).
     """
     N, L, _ = f.shape
     has_pad = tot < L
-    first_pad = f[has_pad, tot[has_pad]]   # each padded event's first padded token
+    first_pad = f[has_pad, tot[has_pad]]   # the first padding token of each event that has padding
     prefix_token = f[0, 0].clone() if N else _NAN_TOKEN.clone()
     prefix_token[0] = float("nan")
     pad_token = first_pad[0].clone() if len(first_pad) else _NAN_TOKEN.clone()
     pad_token[0] = float("nan")
-    pad_e0 = torch.where(has_pad, f[:, -1, 0], float("nan"))   # the last token is padded if any is
+    pad_e0 = torch.where(has_pad, f[:, -1, 0], float("nan"))   # the last token is padding if any is
     return prefix_token, pad_token, pad_e0
 
 
 def _check_packable(f: Tensor, m: Tensor, am: Tensor, n_prefix: int) -> None:
-    """Raises unless ``unpack`` gives the padded tensors back bit for bit: the checks of ``pack``, its Raises."""
+    """Raises unless ``unpack`` gives the padded tensors back bit for bit: the errors that ``pack`` lists."""
     if f.dtype != torch.float32 or m.dtype != torch.int64 or am.dtype != torch.bool:
         raise TypeError(f"expected f float32, m int64, am bool; got {f.dtype}, {m.dtype}, {am.dtype}")
     L, P = f.shape[1], n_prefix
@@ -115,7 +116,13 @@ def _check_packable(f: Tensor, m: Tensor, am: Tensor, n_prefix: int) -> None:
 
 
 def _merge_tokens(tokens: list[Tensor], name: str) -> Tensor:
-    """Returns the one known template token of several parts; all-NaN means unknown (a part with no such token)."""
+    """Returns the template token the parts share; all NaN if no part has such a token.
+
+    A part without such a token holds it all NaN and does not count.
+
+    Raises:
+        ValueError: two parts know different templates.
+    """
     known = [r for r in tokens if not torch.isnan(r).all()]
     for r in known[1:]:
         if not torch.equal(r[1:], known[0][1:]):

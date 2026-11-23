@@ -1,8 +1,7 @@
-"""Length buckets: running a batch at its own sequence length instead of ``max_seq_l``.
+"""Tests for the length buckets: a batch runs at its own sequence length instead of ``max_seq_l``.
 
-The flow has no positional embedding and masks padded slots out of attention and
-the loss, so slicing the padding off a batch must not change any real token's
-output.
+The field has no positional embedding and masks padding out of the attention and the loss, so cutting the padding off
+a batch must not change the output of any real token.
 """
 
 from __future__ import annotations
@@ -38,10 +37,11 @@ def _muon_cosine() -> dict:
 
 
 def _ragged_batch(n_out=N_OUT, edep_generated: bool = False, L: int = L_MAX) -> DataStruct:
-    """``_fake_batch`` at ``L_MAX`` with event i keeping only ``n_out[i]`` outgoing
-    particles: compacted to the front, the rest padding (``m = 0``, ``am = False``).
-    Padding tokens hold finite on-manifold filler and pdgid 0, like ``DataPrep``'s
-    ``nan_to_num(1)`` tokens; zeros would project to NaN, and NaN * 0 survives a mask."""
+    """Returns ``_fake_batch`` at length ``L`` in which event i keeps only its first ``n_out[i]`` outgoing particles.
+
+    The outgoing tokens after them are padding (``m = 0``, ``am = False``). Padding holds finite on-manifold filler
+    and pdgid 0, like ``DataPrep``'s ``nan_to_num(1)`` tokens: zeros would project to NaN, and NaN * 0 survives a mask.
+    """
     ds = _fake_batch(B=len(n_out), L=L, edep_generated=edep_generated)
     f, m, am = ds.f.full.clone(), ds.m.full.clone(), ds.am.full.clone()
     for i, n in enumerate(n_out):
@@ -61,8 +61,8 @@ def _model(cfg=None) -> LEGOLtng:
 
 
 def test_velocity_is_unchanged_by_trimming_the_padding() -> None:
-    """The smoke test behind the whole design: the vector field of every real token
-    is the same whether the batch runs at L_MAX or sliced to its longest event."""
+    """What the length buckets rest on: the field's velocity on every real token is the same whether the batch runs
+    at ``L_MAX`` or cut to its longest event."""
     model = _model()
     ds = _ragged_batch()
     x = model.gen_base_wrapper(ds)
@@ -115,15 +115,18 @@ def test_bad_len_keys_raise(dl, match) -> None:
 # ---------------------------------------------------------------- split pieces
 
 def _by_length(ds: DataStruct) -> DataStruct:
-    """The batch in length order: a batch's event order is arbitrary, and a split step
-    sorts it before drawing, so the unsplit reference must see the same order."""
+    """Returns the batch in length order.
+
+    A split step sorts its batch by length before it samples anything, so the unsplit reference must see the events
+    in the same order.
+    """
     return ds[ds.am.full.sum(1).sort(stable=True).indices]
 
 
 @pytest.mark.parametrize("n_out, width, pieces", [
     (N_OUT, 8, [(slice(0, 3), 6), (slice(3, 6), 8)]),       # lengths 4,5,8,6,4,5 -> 4,4,5 | 5,6,8
     ((1, 2, 1, 2), 6, [(slice(0, 2), 4), (slice(2, 4), 6)]),  # longest 5: the batch is trimmed to bucket 6
-    ((1, 2, 1), 6, [(slice(0, 3), 6)]),                       # a short final batch (< 2 x len_split): whole, unsorted
+    ((1, 2, 1), 6, [(slice(0, 3), 6)]),                       # a final batch len_split does not divide: whole, unsorted
 ], ids=["sorted_equal_pieces", "trimmed_to_longest_bucket", "short_final_batch_whole"])
 def test_split_sorts_and_cuts_equal_pieces_at_their_buckets(n_out, width, pieces) -> None:
     model = _model(_config(dl={"len_buckets": [4, 6], "len_split": 2}))
@@ -171,7 +174,7 @@ def test_group_sampler_batches_come_from_one_bucket_each_event_at_most_once() ->
     lengths = torch.randint(4, 9, (103,), generator=torch.Generator().manual_seed(0))
     buckets = (4, 6, 8)
     sampler = LengthBucketBatchSampler(lengths, buckets, bs=4, seed=0)
-    batches = list(sampler)                    # lists of indices, as torch's BatchSampler yields
+    batches = list(sampler)                    # lists of event indices, as torch's BatchSampler yields them
     assert len(batches) == len(sampler)
     seen = torch.tensor([i for b in batches for i in b])
     assert seen.unique().numel() == seen.numel()
@@ -183,8 +186,8 @@ def test_group_sampler_batches_come_from_one_bucket_each_event_at_most_once() ->
 
 
 def test_group_sampler_order_is_set_by_the_epoch() -> None:
-    """DistributedSampler semantics: the order is a function of (seed, epoch), so every rank
-    builds the same list and a resumed run replays it; Lightning calls set_epoch each epoch."""
+    """As for a ``DistributedSampler``, the order is a function of (seed, epoch): every rank builds the same list, and
+    a resumed run replays it. Lightning calls ``set_epoch`` every epoch."""
     lengths = torch.randint(4, 9, (200,), generator=torch.Generator().manual_seed(0))
     sampler = LengthBucketBatchSampler(lengths, (4, 6, 8), bs=4, seed=0)
     sampler.set_epoch(0)
@@ -216,8 +219,8 @@ def test_group_sampler_shards_ranks_with_one_bucket_per_step() -> None:
 
 
 def test_group_sampler_is_already_distributed_for_lightning() -> None:
-    """Lightning wraps any sampler that is not a DistributedSampler in its own wrapper,
-    which would reshuffle the batches across ranks and undo the per-step bucket match."""
+    """Lightning wraps any sampler that is not a ``DistributedSampler`` in its own wrapper, which would reshuffle the
+    batches across the ranks: the ranks would no longer hold one bucket per step."""
     assert isinstance(LengthBucketBatchSampler(torch.full((8,), 4), (4, 8), bs=4), DistributedSampler)
 
 
@@ -266,7 +269,8 @@ def test_cheapest_groups_minimise_tokens_plus_a_cost_per_solve() -> None:
     ({"len_buckets": [8]}, (1, 2, 13), {8, 16}),        # a list is taken as given
 ], ids=["default", "off", "worth_a_solve", "not_worth_a_solve", "list"])
 def test_generation_buckets_by_length_unless_switched_off(monkeypatch, odeint, n_out, lengths) -> None:
-    """``odeint_conf.len_buckets`` absent means ``auto``: unbucketed, 85 % of what the field runs is padding."""
+    """Without ``odeint_conf.len_buckets`` generation uses ``auto``: unbucketed, 85 % of the tokens the field runs are
+    padding."""
     import legofmt.cfm.solvers as solvers
     monkeypatch.setattr(solvers, "SOLVE_COST", 32, raising=False)
     cfg = _tiny_config({"max_seq_l": 16, "ntypes": 16, "step_cond": False})
@@ -279,8 +283,9 @@ def test_generation_buckets_by_length_unless_switched_off(monkeypatch, odeint, n
 
 
 def test_generation_buckets_set_after_construction_take_effect() -> None:
-    """lego_eval's per-model `odeint` override writes into rc.odeint_conf after the model is built; a `len_buckets`
-    there must bucket generation too (a slab chain pads every call to max_seq_l = 134 for ~7 real tokens)."""
+    """lego_eval's per-model ``odeint`` override writes into ``rc.odeint_conf`` after the model is built; a
+    ``len_buckets`` set there must bucket generation too (a slab chain pads every call to ``max_seq_l`` = 134 for ~7
+    real tokens)."""
     model = _model(_config(odeint={"method": "euler", "step_size": 0.25}))
     model.rc.odeint_conf["len_buckets"] = [4, 6]
     seen = set()
@@ -290,8 +295,9 @@ def test_generation_buckets_set_after_construction_take_effect() -> None:
 
 
 def test_compile_limit_counts_buckets_set_after_construction(monkeypatch) -> None:
-    """In a static compile every (length bucket, row bucket) pair is its own graph; past dynamo's recompile_limit the
-    solve silently runs eager. The limit must be raised for buckets that came from lego_eval's odeint override as well."""
+    """In a static compile every pair (length bucket, ``compile_buckets`` batch size) is its own graph; past dynamo's
+    ``recompile_limit`` the solve silently runs eager. The limit must also be raised for buckets that lego_eval's
+    ``odeint`` override set after construction."""
     static = dict(fwd_compile=True, compile_dynamic=False, compile_buckets=[2, 4, 8])
     model = _model(_config(odeint={"method": "euler", "step_size": 0.25}))
     model.rc.odeint_conf.update(len_buckets=[4, 6], **static)
@@ -299,7 +305,7 @@ def test_compile_limit_counts_buckets_set_after_construction(monkeypatch) -> Non
     monkeypatch.setattr(torch._dynamo.config, "recompile_limit", 8)
     model(_ragged_batch())
     assert torch._dynamo.config.recompile_limit >= 3 * 3 + 8
-    other = _model(_config(odeint={"method": "euler", "step_size": 0.25}))     # a second plate model shares the frame
+    other = _model(_config(odeint={"method": "euler", "step_size": 0.25}))     # a second model adds to the same limit
     other.rc.odeint_conf.update(len_buckets=[4], **static)
     other(_ragged_batch())
     assert torch._dynamo.config.recompile_limit >= 3 * 3 + 2 * 3 + 8
@@ -309,7 +315,7 @@ def test_compile_limit_counts_buckets_set_after_construction(monkeypatch) -> Non
     ([10, 10, 3, 1], 4, [0, 1, 3, 3]),      # the longest bucket takes the one below it
     ([1, 10, 10], 4, [1, 1, 2]),            # the shortest has none below: it joins the one above
     ([2, 0, 5, 1, 0], 4, [3, 1, 3, 3, 4]),  # a group is named after its longest bucket in use
-    ([1, 1, 1], 4, [2, 2, 2]),              # too few events for any bucket: one batch pool
+    ([1, 1, 1], 4, [2, 2, 2]),              # too few events for any bucket: all in one group
     ([3, 0, 1], 0, [0, 1, 2]),              # nothing needed: buckets as given
 ], ids=["long_end", "short_end", "empty", "all_sparse", "off"])
 def test_merge_sparse_fills_every_bucket_in_use(counts, need, to) -> None:
@@ -321,7 +327,8 @@ def test_merge_sparse_fills_every_bucket_in_use(counts, need, to) -> None:
 
 
 def test_group_sampler_merges_buckets_too_sparse_for_min_batches() -> None:
-    """Finer buckets leave the longest events short of a batch: skipped, they would never be trained on."""
+    """A bucket with fewer than ``min_batches`` batches is merged into a longer one. With fine buckets the few longest
+    events do not fill a batch of their own; skipped, they would never be trained on."""
     lengths = torch.tensor([4] * 16 + [6] * 9 + [8] * 3)
     sampler = LengthBucketBatchSampler(lengths, (4, 6, 8), bs=4, seed=0, min_batches=2)
     batches = list(sampler)
@@ -342,7 +349,8 @@ def test_auto_buckets_are_fitted_to_the_dataset(spec, counts) -> None:
 
 
 def test_group_sampler_lists_one_batch_at_a_time() -> None:
-    """An epoch listed up front is 16M Python ints for the Ar cube, every epoch."""
+    """The sampler yields an epoch's batches one at a time: listed up front, an epoch is 16M Python ints for the Ar
+    cube."""
     import inspect
     sampler = LengthBucketBatchSampler(torch.tensor([4] * 8 + [8] * 8), (4, 8), bs=4, seed=0)
     assert inspect.isgenerator(iter(sampler))
@@ -359,8 +367,8 @@ def test_group_sampler_skips_a_bucket_smaller_than_a_batch() -> None:
 
 
 def test_group_sampler_sizes_batches_by_token_budget() -> None:
-    """With max_tokens every bucket's batch is max_tokens // length events, on every rank
-    alike: fewer for long buckets (8: 16 // 8 = 2), more than bs for short ones (4: 4 > bs 2)."""
+    """With ``max_tokens`` a bucket's batch holds ``max_tokens // length`` events, on every rank alike: fewer for a
+    long bucket (8: 16 // 8 = 2), more than ``bs`` for a short one (4: 16 // 4 = 4 > ``bs`` 2)."""
     lengths = torch.randint(4, 9, (403,), generator=torch.Generator().manual_seed(0))
     buckets, bs, world = (4, 8), 2, 2
     samplers = [LengthBucketBatchSampler(lengths, buckets, bs=bs, seed=0, rank=r, world_size=world, max_tokens=16)
@@ -379,8 +387,8 @@ def test_group_sampler_sizes_batches_by_token_budget() -> None:
 
 
 def test_transfer_hook_trims_the_batch_to_its_bucket() -> None:
-    """The batch crosses to the GPU at its bucket's width, not max_seq_l: events of length 4
-    under buckets (4, 8) ship 4 slots, identical to the first 4 of the padded batch."""
+    """The batch crosses to the GPU at its bucket's length, not at ``max_seq_l``: events of length 4 under the buckets
+    (4, 8) ship 4 tokens, identical to the first 4 of the padded batch."""
     model = _model(_config(dl={"len_buckets": [4, 8], "len_mode": "group"}))
     ds = _ragged_batch(n_out=(1, 1))
     out = model.on_before_batch_transfer(ds, 0)
@@ -391,8 +399,8 @@ def test_transfer_hook_trims_the_batch_to_its_bucket() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="pinned host memory needs a GPU")
 def test_pinned_batch_is_contiguous_and_unchanged() -> None:
-    """pin_memory lets DataLoader(pin_memory=True) pin DataStruct batches. A trimmed (strided) batch
-    comes back contiguous: a strided pinned source would be copied through pageable memory."""
+    """``DataStruct.pin_memory`` lets ``DataLoader(pin_memory=True)`` pin a batch. A trimmed (strided) batch comes back
+    contiguous: a strided pinned source would be copied through pageable memory."""
     ds = _ragged_batch().trim(5)
     ds.edep_layers = torch.rand(len(ds), 3)
     p = ds.pin_memory()
@@ -405,9 +413,9 @@ def test_pinned_batch_is_contiguous_and_unchanged() -> None:
                                 {"len_buckets": "auto", "len_mode": "split", "len_split": 2}],
                          ids=["group", "off", "split"])
 def test_schedule_spans_the_real_step_count_in_every_mode(dl) -> None:
-    """configure_optimizers rebuilds the schedule over Lightning's step estimate, with the warmup applied once to
-    the base LR: group mode's step count is not dataset_size / bs, and in every mode run.dataset_size is hand-written
-    (it must be the post-filter count), so a schedule shorter than the run would walk the cosine LR back up."""
+    """``configure_optimizers`` rebuilds the schedule over Lightning's step estimate and applies the warmup to the base
+    LR once. Group mode's step count is not ``dataset_size / bs``, and ``run.dataset_size`` is hand-written in every
+    mode (it must be the post-filter count); a schedule shorter than the run would walk the cosine LR back up."""
     cfg = _config(dl=dl)
     cfg["config"]["opt_conf"] = _muon_cosine()
     model = LEGOLtng(cfg)
@@ -434,11 +442,11 @@ def test_config_resolves_len_max_tokens() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="host-device syncs only exist with a GPU")
 def test_training_step_has_no_host_device_sync() -> None:
-    """Every sync makes the CPU wait for the GPU, so Python, launches and data loading never
-    overlap GPU work. A group-mode step (OT coupling, learned loss weights, flow map) has none
-    once Lightning's on_before_batch_transfer has seen the batch on the CPU. The vector field is
-    a stand-in: x-transformers' eager einx ops sync on every call but compile to constants under
-    the torch.compile that training uses, so they would only hide this file's own regressions."""
+    """Every sync makes the CPU wait for the GPU, so Python, kernel launches and data loading never overlap GPU work.
+    A group-mode step (OT coupling, learned loss weights, flow-map term) has none once Lightning's
+    ``on_before_batch_transfer`` has seen the batch on the CPU. The field is a stand-in: x-transformers' eager einx
+    ops sync on every call but compile to constants under the ``torch.compile`` that training uses, so they would
+    only hide the regressions this test is for."""
     pytest.importorskip("torch_linear_assignment")
 
     class _VF(torch.nn.Module):

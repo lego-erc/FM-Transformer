@@ -1,10 +1,8 @@
 """Optimizer construction, and ``BatchedMuon``.
 
-``BatchedMuon`` reimplements ``pytorch_optimizer.Muon``'s update with
-``torch._foreach`` ops and one Newton-Schulz call per group of equal-shape
-matrices; both models' steps are kernel-launch-bound, so the library version's
-per-matrix Python loop dominated the step. The recipe is ``muon`` with the
-``warmup_cosine`` schedule; schedule-free AdamW is :mod:`legofmt.legacy.optimizers`.
+Both models' training steps are bound by kernel launches; ``BatchedMuon`` is ``pytorch_optimizer.Muon``'s update with
+~5x fewer of them. The recipe is ``muon`` with the ``warmup_cosine`` schedule; schedule-free AdamW is
+:mod:`legofmt.legacy.optimizers`.
 """
 
 from collections import defaultdict
@@ -28,13 +26,14 @@ def muon_lr_ratio(rows: int, cols: int, adjusted: bool) -> float:
 
 
 class BatchedMuon(torch.optim.Optimizer):
-    """``pytorch_optimizer.Muon``'s update (Nesterov momentum -> Newton-Schulz
-    orthogonalisation for >=2-D weights, AdamW for the rest, decoupled weight
-    decay) with the per-parameter Python loop replaced by ``torch._foreach`` ops
-    and one Newton-Schulz call per group of equal-shape matrices. Same update up
-    to bf16 rounding in the batched Newton-Schulz, ~5x fewer kernel launches
-    (flow 18 -> 4 ms, mult 16 -> 3 ms per step; both training steps are
-    launch-bound). Closeness check: tests/test_batched_muon.py."""
+    """``pytorch_optimizer.Muon`` with its per-parameter Python loop batched.
+
+    The update is the library's: Nesterov momentum and a Newton-Schulz orthogonalisation for the >=2-D weights, AdamW
+    for the rest, and decoupled weight decay. The loop over parameters is replaced by ``torch._foreach`` ops and one
+    Newton-Schulz call per group of equal-shape matrices: ~5x fewer kernel launches (flow 18 -> 4 ms, multiplicity
+    model 16 -> 3 ms per step; both training steps are bound by kernel launches). The result equals the library's up
+    to bf16 rounding in the batched Newton-Schulz (``tests/test_batched_muon.py``).
+    """
 
     def __init__(
         self, params, lr=1e-3, momentum=0.95, nesterov=True, ns_steps=5,
@@ -50,11 +49,11 @@ class BatchedMuon(torch.optim.Optimizer):
                 g.setdefault(k, v)
             g["step"] = 0
         super().__init__(params, {})
-        self._shape_groups = {}  # id(group) -> [(param indices, lr ratio)], shapes are fixed
+        self._shape_groups = {}  # (group, its parameters with a gradient) -> [(indices, lr ratio)]: shapes are fixed
 
     @torch.no_grad()
     def step(self, closure=None):
-        """Applies one step: the weight decay, then Muon to the >=2-D weights and AdamW to the rest.
+        """Applies one step: the weight decay, then Muon to the ``use_muon`` groups and AdamW to the others.
 
         ```
         p *= 1 - lr wd      weight_decouple; else g += wd p
@@ -78,7 +77,7 @@ class BatchedMuon(torch.optim.Optimizer):
         return loss
 
     def _muon_update(self, group, ps, grads, lr) -> None:
-        """Updates >=2-D weights with Muon.
+        """Updates a ``use_muon`` group's weights (>=2-D) with Muon.
 
         ```
         buf  = mu buf + (1 - mu) g
@@ -86,7 +85,7 @@ class BatchedMuon(torch.optim.Optimizer):
         p   -= lr ratio NS(upd)                NS: Newton-Schulz orthogonalisation of upd as a (rows, cols) matrix
         ```
 
-        ``mu`` is ``momentum``, ``ratio`` is ``muon_lr_ratio``. One NS call takes each group of equal-shape matrices.
+        ``mu`` is ``momentum``, ``ratio`` is ``muon_lr_ratio``. Each group of equal-shape matrices takes one NS call.
         """
         mu   = group["momentum"]
         bufs = self._state(ps, "momentum_buffer")
@@ -97,13 +96,15 @@ class BatchedMuon(torch.optim.Optimizer):
             torch._foreach_add_([ps[i] for i in idx], ns, alpha=-lr * ratio)            # p
 
     def _adamw_update(self, group, ps, grads, lr) -> None:
-        """Updates 1-D params (gates, biases, scales) with plain AdamW.
+        """Updates the parameters below 2-D (gates, biases, scales) with AdamW.
 
         ```
         m   = b1 m + (1 - b1) g
-        v   = b2 v + (1 - b2) g^2
-        p  -= lr sqrt(1 - b2^t) / (1 - b1^t) m / (sqrt(v) + eps)
+        v   = b2 v + (1 - b2) g**2
+        p  -= lr sqrt(1 - b2**t) / (1 - b1**t) m / (sqrt(v) + eps)
         ```
+
+        ``(b1, b2)`` is ``betas``, ``t`` the group's step count.
         """
         b1, b2 = group["betas"]
         t = group["step"]
@@ -134,12 +135,12 @@ class BatchedMuon(torch.optim.Optimizer):
 
         ``(rows, cols)`` is a weight flattened to ``(dim0, -1)``, as pytorch_optimizer's ``get_adjusted_lr`` does.
         """
-        # keyed on the live parameter set, not the group: the index is into `ps`,
-        # which drops parameters without gradients, so a freeze after the first
-        # step (a pretrained head) would otherwise index past the end
+        # keyed on the parameters with a gradient, not on the group alone: the indices point into ``ps``, which
+        # leaves out parameters without a gradient, so freezing some after the first step (a pretrained head) would
+        # otherwise index past the end
         key = (id(group), tuple(id(p) for p in ps))
         if key not in self._shape_groups:
-            by_shape = defaultdict(list)  # >2-D weights flatten to (dim0, -1), as in pytorch_optimizer
+            by_shape = defaultdict(list)
             for i, p in enumerate(ps):
                 by_shape[(p.shape[0], p[0].numel())].append(i)
             self._shape_groups[key] = [
@@ -149,9 +150,9 @@ class BatchedMuon(torch.optim.Optimizer):
 
 
 def muon_factory(params, **kw):
-    """Constructs Muon for ``ndim >= 2`` weights and AdamW for the rest.
+    """Constructs a ``BatchedMuon``: Muon for the weights with ``dim() >= 2``, AdamW for the rest.
 
-    1-D gates and log-variances must not be orthogonalised, which would discard their magnitude.
+    1-D gates and log-variances must not be orthogonalised: that would discard their magnitude.
     """
     ps = list(params)
     return BatchedMuon([
@@ -161,7 +162,7 @@ def muon_factory(params, **kw):
 
 
 def warmup_cosine(opt, total_steps, warmup_frac=0.05, eta_min=1e-6):
-    """Constructs a linear warmup over ``warmup_frac``, then a cosine to ``eta_min``.
+    """Constructs a linear warmup over ``warmup_frac`` of ``total_steps``, then a cosine to ``eta_min``.
 
     ``total_steps`` must be an upper bound on the real step count: past ``T_max`` the cosine rises back toward the peak
     LR.
@@ -178,7 +179,11 @@ SCHEDULERS = {"warmup_cosine": warmup_cosine}
 
 
 def build_optimizer(params, opt_conf):
-    """Returns (optimizer, lr_scheduler_dict | None) ready for Lightning."""
+    """Returns ``(optimizer, lr_scheduler)``: the schedule as Lightning's ``{"scheduler", "interval"}`` dict, or None.
+
+    ``opt_conf`` holds ``opt`` (a name in ``OPTIMIZERS``, or a factory), the optimizer's arguments, and optionally
+    ``scheduler``: ``cls`` (a name in ``SCHEDULERS``, or a factory), ``interval`` (default ``step``) and its arguments.
+    """
     cfg = {**opt_conf}
     sc = cfg.pop("scheduler", None)
     opt = _get(OPTIMIZERS, cfg.pop("opt"))(params, **cfg)

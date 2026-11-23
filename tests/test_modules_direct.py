@@ -1,6 +1,6 @@
-"""Training-side behaviour of the tiny in-memory flow models: :class:`legofmt.legacy.reflow.LEGOLtngDirect`
-(imported here as ``LEGOLtng``) and the velocity ``LEGOLtngVelocity`` -- reflow, the step-conditioned flow map,
-overflow_delta and the learned loss weights."""
+"""Tests for the training side of tiny in-memory flows: :class:`legofmt.legacy.reflow.LEGOLtngDirect` (imported here
+as ``LEGOLtng``) and :class:`legofmt.main.modules.LEGOLtng` (here ``LEGOLtngVelocity``). They cover reflow, the flow
+map (``step_cond``), ``overflow_delta`` and the learned loss weights."""
 
 from __future__ import annotations
 
@@ -21,18 +21,18 @@ def _has_nonzero_grad(params) -> bool:
 
 
 def _fit(model, train: bool = True):
-    """The model as Lightning hands it to a step: ``on_fit_start`` done, in train or eval mode."""
+    """Returns the model as Lightning hands it to a step: after ``on_fit_start``, in train or eval mode."""
     model.on_fit_start()
     return model.train(train)
 
 
 def _step_cond_config(**model_conf) -> dict:
-    """A step-conditioned field with the flow-map term on (one_step_euler_fac 1, 4 sections)."""
+    """Returns the config of a flow-map field (``step_cond``) with the flow-map term on: factor 1, 4 sections."""
     return _tiny_config({"step_cond": True}, **{"one_step_euler_fac": 1.0, "one_step_euler_sections": 4, **model_conf})
 
 
 def _twins(cfg: dict, train: bool):
-    """A plain tiny velocity model and one built from ``cfg``, with the same weights."""
+    """Returns a plain tiny flow and one built from ``cfg``, both with the same weights."""
     plain, other = LEGOLtngVelocity(_tiny_config()), LEGOLtngVelocity(cfg)
     other.model.load_state_dict(plain.model.state_dict())
     return _fit(plain, train), _fit(other, train)
@@ -41,7 +41,8 @@ def _twins(cfg: dict, train: bool):
 @pytest.mark.parametrize("cls, cfg", [(LEGOLtng, _tiny_config), (LEGOLtngVelocity, _tiny_config),
                                       (LEGOLtngVelocity, _step_cond_config)], ids=["direct", "velocity", "flow_map"])
 def test_training_step_gives_every_param_a_grad(cls, cfg) -> None:
-    """A finite scalar loss whose backward reaches every parameter (DDP with find_unused_parameters=False)."""
+    """The loss is a finite scalar and its backward reaches every parameter: DDP with
+    ``find_unused_parameters=False`` raises on a parameter without a gradient."""
     model = _fit(cls(cfg()))
     loss = model._step(_fake_batch(), 0)
     assert loss.dim() == 0 and torch.isfinite(loss), f"bad loss: {loss}"
@@ -63,7 +64,7 @@ def test_forward_shapes_and_sphere_projection() -> None:
 
 
 def _save_velocity_teacher(tmp_path) -> str:
-    """Random-init velocity teacher saved to disk; reflow only needs ``solve`` to be callable."""
+    """Saves a randomly initialised teacher flow and returns its path; reflow only needs its ``solve`` to run."""
     cfg = _tiny_config()["config"]
     teacher = LEGOLtngVelocity({"state_dict": {}, "config": cfg})
     path = tmp_path / "velocity_teacher.pt"
@@ -93,7 +94,7 @@ def test_reflow_missing_path_warns_and_disables(tmp_path) -> None:
 
 
 def test_solve_chunked_matches_full() -> None:
-    """``split_size`` must yield bit-identical output, including for partial last chunks."""
+    """``split_size`` must not change the solve's output, also when the last chunk is a partial one."""
     model = _fit(LEGOLtng(_tiny_config()), train=False)
     ds = _fake_batch(B=12)
     base = model.gen_base_wrapper(ds)
@@ -104,7 +105,7 @@ def test_solve_chunked_matches_full() -> None:
 
 
 def test_forward_honors_return_base() -> None:
-    """``odeint_conf['return_base']`` short-circuits the model call."""
+    """With ``odeint_conf.return_base``, ``forward`` returns the base itself instead of a solve from it."""
     model = _fit(LEGOLtng(_tiny_config()), train=False)
     ds = _fake_batch(B=4)
     object.__setattr__(model.rc, "odeint_conf", {"return_base": True})
@@ -115,10 +116,9 @@ def test_forward_honors_return_base() -> None:
 
 
 def test_reflow_teacher_isolated_from_submodule_registry(tmp_path) -> None:
-    """The teacher must not be a registered submodule, otherwise Lightning's
-    ``parent.train()`` flips ``teacher.model.training`` and invalidates the
-    teacher's ``torch.compile`` training-mode guard on every train/eval
-    transition (and DDP needlessly broadcasts its frozen weights)."""
+    """The teacher must not be a registered submodule: Lightning's ``parent.train()`` would flip
+    ``teacher.model.training`` and invalidate the teacher's ``torch.compile`` training-mode guard on every train/eval
+    transition, and DDP would broadcast its frozen weights."""
     model = LEGOLtng(_tiny_config(reflow_path=_save_velocity_teacher(tmp_path)))
     teacher = model.reflow_teacher
     assert teacher is not None
@@ -138,17 +138,16 @@ def _vf_call(model, ds, **kw):
 
 
 def _open_gate(model, v: float = 1.0):
-    """step_gain is zero-init, so d has no effect until it is opened."""
+    """Sets ``step_gain`` to ``v``; at its initial 0, ``d`` has no effect on the field."""
     with torch.no_grad():
         model.model.vf.step_gain.fill_(v)
     return model
 
 
 def test_step_cond_gain_is_zero_init_and_1d() -> None:
-    """At init every d must reproduce the velocity slice: that is what stops an
-    untrained step-conditioned slice from being arbitrarily wrong (it was, see
-    the euler-vs-midpoint failure). 1-D so muon_factory routes it to AdamW --
-    Newton-Schulz would discard the magnitude of a gate."""
+    """At initialisation the field must give the instantaneous velocity for every ``d``: otherwise an untrained flow
+    map is arbitrarily wrong at ``d > 0``. ``step_gain`` is 1-D so that ``muon_factory`` routes it to AdamW:
+    Newton-Schulz would discard the magnitude of a gain."""
     model = _fit(LEGOLtngVelocity(_step_cond_config()), train=False)
     ds = _fake_batch()
     assert model.model.vf.step_gain.ndim == 1
@@ -161,8 +160,8 @@ def test_step_cond_gain_is_zero_init_and_1d() -> None:
 
 
 def test_step_cond_zero_is_the_velocity_slice() -> None:
-    """With the gate open, d=0 must still reproduce the unconditioned field
-    exactly -- that is what makes a velocity checkpoint a valid warm start."""
+    """With a non-zero ``step_gain``, ``d = 0`` must still reproduce the field without ``d`` exactly: that makes a
+    checkpoint trained without the flow map a valid warm start."""
     model = _fit(_open_gate(LEGOLtngVelocity(_step_cond_config())), train=False)
     ds = _fake_batch()
     torch.manual_seed(0); out_none = _vf_call(model, ds, t=torch.tensor(0.3))
@@ -173,9 +172,9 @@ def test_step_cond_zero_is_the_velocity_slice() -> None:
 
 
 def test_step_cond_distinguishes_t_from_d() -> None:
-    """Regression for 96344ee: emb_t(t) + emb_d(d) built on one frequency bank
-    with the same sin/cos interleave is exactly symmetric under swapping t and
-    d, so the model cannot tell (t=0.2, d=0.8) from (t=0.8, d=0.2)."""
+    """The embeddings of ``t`` and ``d`` must differ in form: built on one frequency bank with the same sin/cos
+    interleave, their sum is symmetric under swapping ``t`` and ``d``, and the field cannot tell (t=0.2, d=0.8) from
+    (t=0.8, d=0.2)."""
     model = _fit(_open_gate(LEGOLtngVelocity(_step_cond_config())), train=False)
     ds = _fake_batch()
     a = _vf_call(model, ds, t=torch.tensor(0.2), d=torch.tensor(0.8))
@@ -184,11 +183,10 @@ def test_step_cond_distinguishes_t_from_d() -> None:
 
 
 def test_step_emb_is_smooth_in_d() -> None:
-    """The property that actually matters and that I originally failed to check:
-    nearby d must have SIMILAR embeddings, or the net cannot interpolate between
-    the dyadic steps the loss trains and every d becomes an unrelated task. The
-    old 8-octave bank scored 0.35 here. Also require ||emb_d|| -> 0 as d -> 0,
-    since the average velocity over a vanishing interval is the instantaneous one."""
+    """Nearby ``d`` must have similar embeddings, or the field cannot interpolate between the dyadic steps the loss
+    trains and every ``d`` is an unrelated task (an 8-octave frequency bank has cosine similarity 0.35 here). The
+    embedding must also vanish as ``d -> 0``: the average velocity over a vanishing interval is the instantaneous
+    one."""
     vf = LEGOLtngVelocity(_step_cond_config()).model.vf
     emb = lambda d: (torch.tensor([[float(d)]]) * vf.freqs_d).sin()[0]
     cs = torch.nn.functional.cosine_similarity
@@ -197,16 +195,15 @@ def test_step_emb_is_smooth_in_d() -> None:
         assert sim > 0.9, f"emb_d not smooth at d={d0}: cos={sim:.3f}"
     # still separable across octaves, otherwise d carries no information
     assert cs(emb(0.5), emb(0.25), dim=0) < 0.9, "octaves not distinguishable"
-    # and it decays toward the velocity slice
+    # and it decays towards d = 0, the instantaneous velocity
     assert emb(2 ** -7).norm() < 0.4 * emb(0.5).norm()
     assert emb(0.0).norm() == 0.0
 
 
 def test_flow_map_ladder_is_anchored_at_zero() -> None:
-    """The bug behind the euler failure: predictions cover d in
-    {2**0 .. 2**-(sections-1)} but the teacher queries d=step/2, which falls one
-    octave below for the smallest step. That bottom rung was supervised by
-    nothing, so the whole bootstrap stood on an arbitrary function."""
+    """The predictions cover ``d`` in {2**0, ..., 2**-(sections - 1)}, but the teacher asks for ``d / 2``, which for
+    the smallest step is one octave below them and supervised by nothing. The smallest step's teacher must therefore
+    use ``d = 0``, the instantaneous velocity: otherwise the whole ladder stands on an arbitrary function."""
     from legofmt.cfm.flow_map import one_step_euler_loss
 
     sections = 4
@@ -242,37 +239,36 @@ def test_one_step_euler_requires_step_cond() -> None:
 
 
 def test_trained_checkpoint_without_step_cond_loads() -> None:
-    """The guard is a training requirement: 2026-06 checkpoints (rp_fm_v*) carry a non-zero
-    one_step_euler_fac without step_cond and must still load for inference."""
+    """The ``step_cond`` check is a requirement of training only: the ``rp_fm_v*`` checkpoints carry a non-zero
+    ``one_step_euler_fac`` without ``step_cond`` and must still load for inference."""
     cfg = _tiny_config(one_step_euler_fac=1.0)
     cfg["state_dict"] = LEGOLtngVelocity(_tiny_config()).model.vf.state_dict()
     LEGOLtngVelocity(cfg)
 
 
 def test_one_step_euler_every_gates_the_term() -> None:
-    """With every=2 an odd global_step must skip the term entirely."""
+    """With ``one_step_euler_every`` 2, an odd ``global_step`` skips the flow-map term and its three field calls."""
     model = _fit(LEGOLtngVelocity(_step_cond_config(one_step_euler_every=2)))
     seen = []
     orig = model.model.vf.forward
     model.model.vf.forward = lambda *a, _o=orig, **k: (seen.append(1), _o(*a, **k))[1]
 
     torch.manual_seed(0); model._step(_fake_batch(), 0)
-    on = len(seen)                      # global_step 0: CFM + s1 + s2 + s_pred
+    on = len(seen)                      # global_step 0: the velocity loss, two teacher half steps, the prediction
     seen.clear()
     with patch.object(LEGOLtngVelocity, "global_step", 1):
         torch.manual_seed(0); model._step(_fake_batch(), 0)
-    off = len(seen)                     # global_step 1: CFM only
+    off = len(seen)                     # global_step 1: the velocity loss only
     assert on == 4 and off == 1, f"expected 4 forwards on, 1 off; got {on}, {off}"
 
 
 @pytest.mark.parametrize("learned_loss_weights", [False, True], ids=["step_gain", "lv_flow"])
 @pytest.mark.parametrize("gs", [0, 1])
 def test_every_param_gets_grad_even_when_flow_map_is_gated_off(gs, learned_loss_weights) -> None:
-    """step_gain is only reachable when d is not None, and the flow-map loss is
-    the only caller that passes d. With one_step_euler_every > 1 the term is
-    skipped on some steps, so step_gain would leave the graph and plain `ddp`
-    (find_unused_parameters=False) raises. d=None must mean d=0, not skip.
-    Same DDP trap for lv_flow: the barrier term must apply every step."""
+    """``step_gain`` is in the graph only when the field is given a ``d``. With ``one_step_euler_every`` > 1 the
+    flow-map term is skipped on some steps, so the velocity loss must pass ``d = 0`` itself: otherwise ``step_gain``
+    has no gradient on those steps and plain ``ddp`` (``find_unused_parameters=False``) raises. The same holds for
+    ``lv_flow``: its ``fac * lv_flow`` term must be in the loss on every step."""
     cfg = _step_cond_config(one_step_euler_every=2, **({"learned_loss_weights": True} if learned_loss_weights else {}))
     model = _fit(LEGOLtngVelocity(cfg))
     with patch.object(LEGOLtngVelocity, "global_step", gs):
@@ -282,11 +278,10 @@ def test_every_param_gets_grad_even_when_flow_map_is_gated_off(gs, learned_loss_
 
 
 def test_cond_init_scale_and_zero_biases() -> None:
-    """The three source-indexed weights are summed then divided by 3, so each
-    needs std sqrt(3)*Xavier for the effective map to be a proper in_dim->h_dim
-    Xavier. xavier_normal_ on the 4-D tensors derived fan from dims 0/1 and came
-    out 17x low, while the biases got Xavier-sized RANDOM noise that dominated
-    the signal from x (~4x). Biases belong at zero."""
+    """The embedding is the mean of three maps, indexed by the token's mask, type and pdgid, so each weight needs std
+    sqrt(3) x Xavier for the mean to be a Xavier map from ``in_dim`` to ``h_dim`` (``xavier_normal_`` on the 4-D
+    tensors takes its fan from dims 0 and 1 and comes out 17x too low). The biases start at zero: Xavier-sized random
+    biases are ~4x the signal from ``x``."""
     vf = LEGOLtngVelocity(_tiny_config()).model.vf
     h, ind = vf.h_dim, vf.in_dim
     target = (2.0 / (ind + h)) ** 0.5
@@ -300,8 +295,8 @@ def test_cond_init_scale_and_zero_biases() -> None:
 
 
 def test_flow_map_under_learned_loss_weights() -> None:
-    """The flow-map loss is ~1/2000 of the CFM loss at its raw scale, so it must
-    be normalised by its own log-variance rather than a hand-set factor."""
+    """Unweighted, the flow-map loss is ~1/2000 of the velocity loss, so it is normalised by a log-variance of its
+    own (``lv_flow``) rather than by a hand-set factor."""
     model = LEGOLtngVelocity(_step_cond_config(learned_loss_weights=True))
     assert hasattr(model, "lv_flow") and model.lv_flow.ndim == 1
     ids = {id(p) for gr in model.opt.param_groups for p in gr["params"]}
@@ -309,7 +304,7 @@ def test_flow_map_under_learned_loss_weights() -> None:
     _fit(model)._step(_fake_batch(), 0).backward()
     assert model.lv_flow.grad is not None and float(model.lv_flow.grad.abs()) > 0
 
-    # exp(lv_flow) must track E[L_flow]: drive it with a constant flow-map loss
+    # exp(lv_flow) must track E[L_fm]: drive it with a constant flow-map loss
     const = 0.05
     with patch("legofmt.main.train_step.one_step_euler_loss", lambda *a, **k: torch.tensor(const)):
         opt = torch.optim.Adam([model.lv_flow], lr=0.1)
@@ -322,7 +317,7 @@ def test_flow_map_under_learned_loss_weights() -> None:
 
 
 def _overflow_batch(B: int = 64) -> DataStruct:
-    """Half the outgoing slots sit on the boundary peak (stored e == 0)."""
+    """Returns a batch in which the first half of the events has every outgoing energy at exactly 0."""
     ds = _fake_batch(B=B)
     ds.f.full[: B // 2, 3:, 0] = 0.0
     ds.f.full[B // 2:, 3:, 0] = 0.5
@@ -355,8 +350,8 @@ def test_overflow_target_shift_is_value_scoped() -> None:
 
 
 def test_overflow_leaves_the_base_untouched() -> None:
-    """overflow_delta must not perturb the base distribution: gen_base_wrapper
-    output has to be identical with the shift on and off."""
+    """``overflow_delta`` must not change the base: ``gen_base_wrapper`` returns the same ``x_0`` with the shift on
+    and off."""
     plain, ov = _twins(_tiny_config(overflow_delta=0.08), train=False)
     ds = _overflow_batch(B=128)
     torch.manual_seed(0); b_plain = plain.gen_base_wrapper(ds)
@@ -366,7 +361,7 @@ def test_overflow_leaves_the_base_untouched() -> None:
 
 
 def test_overflow_negative_energy_decodes_to_the_peak() -> None:
-    """to_mev clamps, so any overshoot below 0 lands exactly on the peak."""
+    """``to_mev`` clamps: a generated energy below 0 decodes exactly like an energy of 0."""
     from legofmt.geometry.energy_proj import EnergyProjections
 
     pen = EnergyProjections(cutoff_mev=10.0, max_energy=300.0)
@@ -388,10 +383,9 @@ def test_step_cond_euler_step_budgets_differ() -> None:
 
 
 def test_step_cond_loads_legacy_state_dict() -> None:
-    """Loading an older checkpoint must leave step_gain at 0, which makes the
-    model ignore d entirely -- so a checkpoint trained against the old wide bank
-    degrades to its (good) velocity field rather than to a broken flow map.
-    freqs_d is non-persistent, so it never travels in or out of a state_dict."""
+    """A checkpoint without ``step_gain`` leaves it at 0, where the field ignores ``d``: the checkpoint keeps its
+    velocity field instead of gaining a broken flow map. ``freqs_d`` is a non-persistent buffer: it is in no
+    ``state_dict``, and one saved by an old checkpoint is not loaded."""
     plain = LEGOLtngVelocity(_tiny_config())
     sd = plain.model.vf.state_dict()
     model = LEGOLtngVelocity(_step_cond_config())
@@ -406,7 +400,7 @@ def test_step_cond_loads_legacy_state_dict() -> None:
     assert torch.equal(model.model.vf.freqs_d, bank)
     assert float(model.model.vf.step_gain.detach().abs().sum()) == 0.0
 
-    # an OLD step_cond ckpt carried freqs_d as a persistent buffer: tolerated
+    # an old step_cond checkpoint holds freqs_d as a persistent buffer: an unexpected key, not loaded
     stale = {**sd, "freqs_d": torch.zeros_like(bank)}
     res = model.model.vf.load_state_dict(stale, strict=False)
     assert res.unexpected_keys == ["freqs_d"], res.unexpected_keys
@@ -414,9 +408,9 @@ def test_step_cond_loads_legacy_state_dict() -> None:
 
 
 def test_uncert_zero_init_matches_unweighted() -> None:
-    """lv=0 -> weight exp(0)=1 and a zero barrier, so switching the knob on
-    cannot change where training starts. Not bit-exact: the weighted branch
-    multiplies before reducing, which reorders the float32 summation."""
+    """At ``lv = 0`` every weight is exp(0) = 1 and the ``+ lv`` term is 0, so ``learned_loss_weights`` cannot change
+    where training starts. Not bit-exact: the weighted branch multiplies before it reduces, which reorders the
+    float32 sum."""
     plain, unc = _twins(_tiny_config(learned_loss_weights=True), train=True)
     ds = _fake_batch()
     torch.manual_seed(0); l_plain = plain._step(ds, 0)
@@ -426,8 +420,8 @@ def test_uncert_zero_init_matches_unweighted() -> None:
 
 
 def test_uncert_param_is_1d_so_muon_skips_it() -> None:
-    """muon_factory routes ndim>=2 to Muon, whose Newton-Schulz step discards
-    magnitude -- fatal for a log-variance. Keep lv 1-D."""
+    """``muon_factory`` routes ``ndim >= 2`` to Muon, whose Newton-Schulz step discards the magnitude: fatal for a
+    log-variance, so ``lv`` stays 1-D."""
     from legofmt.optimizers import muon_factory
 
     model = LEGOLtngVelocity(_tiny_config(learned_loss_weights=True))
@@ -442,8 +436,7 @@ def test_uncert_param_is_1d_so_muon_skips_it() -> None:
 
 
 def test_uncert_lv_receives_grad_and_tracks_loss_scale() -> None:
-    """The barrier fixes exp(lv) -> E[L], so a block with a larger loss must
-    end up with a larger fitted variance."""
+    """The ``+ lv`` term drives ``exp(lv)`` to E[L], so a loss cell with a larger loss ends at a larger variance."""
     model = _fit(LEGOLtngVelocity(_tiny_config(learned_loss_weights=True)))
     ds = _fake_batch(B=8)
     opt = torch.optim.Adam([model.lv], lr=0.2)
@@ -451,23 +444,23 @@ def test_uncert_lv_receives_grad_and_tracks_loss_scale() -> None:
     for _ in range(150):
         opt.zero_grad()
         sq = torch.zeros(8, 5, 7)
-        sq[..., 0:1] = 4.0      # energy block: large loss
-        sq[..., 1:4] = 1.0      # dir block:    medium
-        sq[..., 4:7] = 0.25     # pos block:    small
+        sq[..., 0:1] = 4.0      # energy cell:    large loss
+        sq[..., 1:4] = 1.0      # direction cell: medium
+        sq[..., 4:7] = 0.25     # position cell:  small
         loss, _ = model.reduce_loss(sq, ds)
         loss.backward()
         opt.step()
         scales = model.lv.detach().exp()
     assert model.lv.grad is not None and model.lv.grad.abs().sum() > 0
     assert scales[0] > scales[1] > scales[2], f"variances not ordered: {scales}"
-    # exp(lv) should land on the per-block mean squared error itself
+    # exp(lv) lands on each cell's mean squared error
     assert torch.allclose(scales, torch.tensor([4.0, 1.0, 0.25]), rtol=0.1), scales
 
 
 def test_uncert_floor_caps_the_weight() -> None:
-    """A near-zero loss would send w=exp(-lv) to infinity; max_loss_weight bounds it.
-    The floor is applied to the parameter in place, so a cell that overshot keeps a
-    live gradient instead of latching below it (clamp() has none there)."""
+    """A near-zero loss would send the weight ``exp(-lv)`` to infinity; ``max_loss_weight`` is the floor of ``lv``
+    that bounds it. The floor is applied to the parameter in place, so a cell below it keeps its gradient instead of
+    staying stuck there (a ``clamp`` in the graph has zero gradient below the floor)."""
     model = _fit(LEGOLtngVelocity(_tiny_config(learned_loss_weights=True, max_loss_weight=-2.0)))
     with torch.no_grad():
         model.lv.fill_(-20.0)
@@ -478,16 +471,16 @@ def test_uncert_floor_caps_the_weight() -> None:
 
 
 def test_uncert_runs_on_the_time_independent_path() -> None:
-    """The weights are per-channel now, so the t-less LEGOLtngDirect path, which
-    the per-t-bin table used to reject, is supported."""
+    """The loss weights are per loss cell, not per ``t`` bin, so ``LEGOLtngDirect``, which has no ``t``, trains with
+    them."""
     model = _fit(LEGOLtng(_tiny_config(learned_loss_weights=True)))     # LEGOLtng here is LEGOLtngDirect
     model._step(_fake_batch(), 0).backward()
     assert model.lv.grad is not None and model.lv.grad.abs().sum() > 0
 
 
 def test_max_loss_weight_flow_is_its_own_floor() -> None:
-    """A Kendall cell settles at lv = log(L), and one_step_euler runs three decades
-    below the velocity losses, so max_loss_weight_flow floors that cell separately."""
+    """A learned loss weight settles at ``lv = log(L)``, and the flow-map loss runs three decades below the velocity
+    cells, so ``max_loss_weight_flow`` gives ``lv_flow`` a floor of its own."""
     m = LEGOLtngVelocity(_tiny_config({"step_cond": True}, learned_loss_weights=True, one_step_euler_fac=1.0,
                                       max_loss_weight_flow=-10.0))
     assert m.rc.max_loss_weight == -6.0 and m.rc.max_loss_weight_flow == -10.0
@@ -501,9 +494,9 @@ def test_max_loss_weight_flow_is_its_own_floor() -> None:
 
 
 def test_legacy_loss_weight_keys_migrate() -> None:
-    """A pre-2026-09 checkpoint carries uncert_* keys and a bins*3 lv table. The keys
-    are rewritten and the table collapses onto the three per-channel cells through the
-    mean of its variances, because a converged cell sits at lv = log(L)."""
+    """A legacy checkpoint carries ``uncert_*`` keys and an ``lv`` table of (t bins, 3 cells). The keys are renamed,
+    and the table is reduced to the three loss cells through the mean of its variances, because a converged cell
+    sits at ``lv = log(L)``."""
     from legofmt.config import migrate_loss_weight_keys
 
     mc = {"uncert_weighting": True, "uncert_min": -4.0, "uncert_min_flow": -9.0,
@@ -517,6 +510,7 @@ def test_legacy_loss_weight_keys_migrate() -> None:
 
 
 def test_legacy_config_resolves_and_builds() -> None:
-    """End to end: the old key alone still switches the weighting on, with a 3-cell lv."""
+    """End to end: the legacy key ``uncert_weighting`` alone still switches the learned loss weights on, with a
+    3-cell ``lv``."""
     model = LEGOLtngVelocity(_tiny_config(uncert_weighting=True, uncert_bins=16))
     assert model.rc.learned_loss_weights and model.lv.numel() == 3

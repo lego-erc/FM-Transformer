@@ -1,14 +1,13 @@
-"""The vector field on the manifold: ``ProjectModel`` wraps the field (:class:`~legofmt.cfm.cfm_trafo_x.CFMTrafo_x`)
-between two projections.
+"""The field on the manifold: ``ProjectModel`` wraps ``CFMTrafo_x`` (``cfm_trafo_x.py``) between two projections.
 
 ```
 x_p = proj_M(x)                  the state, onto the manifold
 v   = proj_T(x_p, field(x_p))    the field's output, onto the tangent space at x_p
 ```
 
-on every attended token; padding passes through both as it is. The field sees ``x_p`` detached unless
-``no_detach``: the path's ``x_t`` carries no graph in training, a solve that is differentiated (density design) and
-``log_likelihood`` set the flag.
+Both act on every attended token; padding passes through both as it is. The field sees ``x_p`` detached unless
+``no_detach`` is set. In training the path's ``x_t`` carries no graph anyway; a solve, which may be differentiated
+(density design), and ``log_likelihood`` set the flag (``solvers._field_sees_graph``).
 
 ``LEGOLtng`` assigns the wrapper as ``self.model``, which is where the state_dict keys ``model.vf.*`` come from.
 """
@@ -40,23 +39,23 @@ class ProjectModel(nn.Module):
         d: Tensor | None = None,
         z: Tensor | None = None,
     ) -> Tensor:
-        """Evaluates the field at ``x`` projected onto the manifold; the velocity comes back in its tangent space.
+        """Evaluates the field at ``proj_M(x)`` and projects its velocity onto the tangent space there.
 
         Args:
             x:         (B, L, in_dim), the state.
-            t:         the time: a scalar, or one per event (B, 1).
+            t:         the time: a scalar, or one per event (B, 1). Legacy: one per token (B, L).
             mask:      (B, L), 1 on generated tokens.
             attn_mask: (B, L) bool, False on padding.
-            types:     (1, L), each position's type.
+            types:     (1, L), each position's type index.
             pdgids:    (B, L, 1), each token's species index.
             d:         the step size, shaped like ``t``; None: 0, the instantaneous velocity. Read only by a field
                 with ``step_cond``.
-            z:         (B, K), the field's latent (``model_args.lat_dim``); Euclidean, not projected.
+            z:         (B, lat_dim), the event's latent (``model_args.lat_dim``); Euclidean, not projected.
 
         Returns:
-            ``v`` (B, L, in_dim); with ``z`` ``(v, v_z)``.
+            ``v`` (B, L, in_dim); with ``z`` the pair ``(v, v_z)``, ``v_z`` (B, lat_dim) the latent's velocity.
         """
-        x_p, x_seen = self._prep_x(x, attn_mask)                   # proj_M(x), and what the network sees
+        x_p, x_seen = self._prep_x(x, attn_mask)                   # proj_M(x), and what the field sees
         v, v_z      = self._call_field(x_seen, t, d, z, mask, attn_mask, types, pdgids)
         v           = torch.where(attn_mask.unsqueeze(-1), self.manifold.proju(x_p, v), v)   # proj_T; padding as is
         return v if z is None else (v, v_z)
@@ -66,8 +65,10 @@ class ProjectModel(nn.Module):
     def _prep_x(self, x: Tensor, attn_mask: Tensor) -> tuple[Tensor, Tensor]:
         """Projects ``x`` onto the manifold.
 
-        The network sees the projected value on every ``attn_mask`` slot (off-manifold conditioning filler never reaches
-        it), detached unless ``no_detach``. Returns ``(x_proj, x_att)``: the projection, and what the network sees.
+        Returns:
+            ``(x_proj, x_att)``: the projection, and what the field sees. That is the projection on every attended
+            token, so a conditioning token's filler values off the manifold never reach the field, and ``x`` on
+            padding; detached unless ``no_detach``.
         """
         x_proj = self.manifold.projx(x)
         x_att  = torch.where(attn_mask.unsqueeze(-1), x_proj, x)
@@ -79,7 +80,8 @@ class ProjectModel(nn.Module):
                     types: Tensor, pdgids: Tensor | None) -> tuple[Tensor, Tensor | None]:
         """Calls the field with one ``(t, d)`` per event; returns ``(v, v_z)``, ``v_z`` None without a latent.
 
-        ``t`` and ``d`` become 2-D; ``d`` reaches only a ``step_cond`` field (None: 0, the instantaneous velocity).
+        ``t`` and ``d`` are made 2-D. ``d`` reaches only a ``step_cond`` field, where None becomes 0, the
+        instantaneous velocity.
         """
         t = torch.atleast_2d(t)
         if getattr(self.vf, "step_cond", False):

@@ -1,6 +1,6 @@
-"""Particle-physics flow-matching shower generator.
+"""Flow-matching generator of events: one incoming particle in a cuboid of material, its outgoing particles and E_dep.
 
-Two checkpointed models compose at inference time: ``multiplicity.MultModel``
-sizes the output, ``main.LEGOLtng`` flows the base distribution to particles,
-and ``main.generate.GenerateOut`` glues them together.
+Two trained models generate an event. The multiplicity model (``multiplicity.model.MultModel``) samples the number of
+outgoing particles of each species, the flow (``main.modules.LEGOLtng``) generates their tokens and the E_dep token,
+and ``main.generate.GenerateOut`` runs the two in sequence.
 """

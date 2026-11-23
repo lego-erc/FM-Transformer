@@ -1,8 +1,8 @@
-"""base_conf.ang_shape: a second angular parameter on the base distribution.
+"""``base_conf.ang_shape``: a second angular parameter of the base distribution (the legacy moment head).
 
-Without it the tanh-normal theta has one knob (kappa), so the moment loss can
-match the mean opening angle or its spread, never both. With it the head emits
-an exponent as well, and _base_moment_loss matches the first two moments.
+Without it the tanh-normal theta has one parameter (kappa), so the moment loss can
+match the mean opening angle or its spread, never both. With it the head predicts
+an exponent as well, and ``_base_moment_loss`` matches the first two moments.
 """
 
 from __future__ import annotations
@@ -72,8 +72,8 @@ def test_head_width_and_defaults(ang_shape) -> None:
 
 
 def test_two_moments_are_matchable_only_with_the_extra_parameter() -> None:
-    """Fit (kappa) and (kappa, pow) to a target the one-knob family cannot hold,
-    by the same two-moment objective _base_moment_loss uses."""
+    """Fits (kappa) and (kappa, pow) to a target that kappa alone cannot match,
+    by the two-moment objective ``_base_moment_loss`` uses."""
     torch.manual_seed(0)
     tgt = _theta(3.0, 0.45, seed=7)
     m1_t, m2_t = tgt.mean(), tgt.square().mean()

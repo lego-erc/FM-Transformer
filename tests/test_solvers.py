@@ -1,8 +1,8 @@
-"""The hand-unrolled solvers transport only ``mask == 1`` slots and stay on the manifold.
+"""The hand-unrolled solvers move only the generated tokens (``mask == 1``) and stay on the manifold.
 
-Conditioning and pad tokens must come back bit-identical to ``x_init`` (a solver once
-moved them), and the sphere factors must stay unit: ``rk4`` used to run through
-flow_matching's Euclidean ``ODESolver``, which let them drift off the sphere.
+Conditioning tokens must come back bit-identical to ``x_init`` and padding must hold the incoming token's values.
+The sphere factors must keep unit norm: through flow_matching's Euclidean ``ODESolver``, ``rk4`` lets them drift off
+the sphere.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ def test_solver_keeps_conditioning_tokens_and_the_manifold(method: str) -> None:
     with torch.no_grad():  # a fast field, so drift off the sphere would be visible
         m.model.vf.cond_w_pdgids[:, 1].mul_(50.0)
     ds = _fake_batch(B=8)
-    ds.am.full[1, -1] = False; ds.m.full[1, -1] = 0  # one pad slot, masked like real padding
+    ds.am.full[1, -1] = False; ds.m.full[1, -1] = 0  # one padding slot, masked like real padding
     x0 = m.gen_base_wrapper(ds)
     out = m.solve(ds, x_init=x0, method=method, step_size=0.25)
 

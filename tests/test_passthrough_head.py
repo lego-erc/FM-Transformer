@@ -1,8 +1,7 @@
-"""mm_conf.passthrough_head: a Bernoulli "this particle did not interact" token.
+"""Tests for ``mm_conf.passthrough_head``: a Bernoulli token that says "this particle did not interact".
 
-E_dep == 0 and "nothing happened" are the same event in the data (measured
-100% coincident), and only neutral primaries ever do it, so the head is masked
-to the neutral incoming species.
+In the data an event has ``E_dep == 0`` exactly when its incoming particle leaves unchanged (100 % coincident), and
+only neutral incoming particles do so, so the head is masked to the neutral incoming species.
 """
 
 from __future__ import annotations
@@ -61,7 +60,7 @@ def test_a_fired_event_emits_exactly_the_incoming_particle() -> None:
 
 
 def test_skipping_nothing_reproduces_the_plain_decode() -> None:
-    """The head must not perturb events that do not fire."""
+    """The head must not change the counts of an event whose pass-through flag is not set."""
     m = _model(passthrough_head=True)
     in_tok, idx = _inputs(m, 2)
     torch.manual_seed(5)
@@ -105,8 +104,8 @@ def test_training_step_without_the_head_ignores_a_fourth_element() -> None:
 
 
 def test_head_is_nonlinear_in_the_conditioning() -> None:
-    """A bare Linear would compose with proj_in into one affine map, which
-    cannot bend from 86% pass-through at low density to 24% at high."""
+    """A bare ``Linear`` would compose with ``proj_in`` into one affine map, which cannot bend from 86 % pass-through
+    at low density to 24 % at high density."""
     m = _model(passthrough_head=True)
     x = torch.zeros(7, m.rc.in_dim)
     x[:, 0] = torch.linspace(1.0, 10.0, 7)
@@ -130,15 +129,16 @@ def _count_batch(m, n=64, seed=3):
 
 
 def _trunk(m, in_tok, counts, idx):
-    """Training's teacher-forced decoder pass, written out: (in_embd, decoder output)."""
+    """Returns ``(in_embd, out)``, the incoming embedding and the trunk's outputs of training's teacher-forced pass."""
     in_embd = m.proj_in(in_tok) + m.embd_pp_(idx)
     seq = torch.cat((in_embd.unsqueeze(1), m.embd_in_(counts[:, : m.rc.max_seq_len - 1] + m._in_offsets)), dim=1)
     return in_embd, m.model(seq, mask=None, condition=in_embd)
 
 
 def test_count_loss_ignores_passthrough_rows() -> None:
-    """The decoder must model P(counts | interacted): rewriting the targets of
-    the rows the token owns may not move the loss, or their singles stack."""
+    """The counts are modelled as P(counts | interacted): changing the count targets of the events the pass-through
+    token owns must not move the loss. Trained on them, the trunk would also produce their single outgoing particle,
+    on top of the token."""
     m = _model(passthrough_head=True)
     m.trainer = None
     in_tok, counts, idx = _count_batch(m)
@@ -198,8 +198,8 @@ def test_deep_head_is_residual_and_configurable() -> None:
 
 
 def test_trunk_head_sampling_matches_training_slot0() -> None:
-    """Slot 0 of the causal decoder sees only in_embd, so the sampler's
-    one-token pass must equal training's out_f[:, 0] whatever the counts."""
+    """The trunk is causal, so its first output sees only the incoming embedding: the sampler's one-token pass must
+    equal training's first output (``out[:, 0]`` of ``_teacher_logits``), whatever the counts."""
     m = _model(passthrough_head=True, passthrough_on="trunk").eval()
     in_tok, counts, idx = _count_batch(m, n=16)
     with torch.no_grad():
@@ -210,13 +210,13 @@ def test_trunk_head_sampling_matches_training_slot0() -> None:
 
 
 def test_trunk_head_trains_the_trunk_and_in_embd_head_does_not() -> None:
-    """With every row a pass-through the count loss carries zero weight, so any
-    gradient reaching the decoder comes from the pass-through BCE alone."""
+    """With every event a pass-through, the count loss has zero weight: any gradient that reaches the trunk comes
+    from the pass-through BCE alone."""
     def trunk_grad(**mm):
         m = _model(passthrough_head=True, **mm)
         m.trainer = None
         in_tok, counts, _ = _count_batch(m, n=16)
-        idx = torch.full((16,), 2, dtype=torch.long)  # neutron, allowed
+        idx = torch.full((16,), 2, dtype=torch.long)  # neutron: the head covers it
         m.training_step((in_tok, counts, idx, torch.ones(16)), 0).backward()
         return max(float(p.grad.abs().max()) for p in m.model.parameters()
                    if p.grad is not None)

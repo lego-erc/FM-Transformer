@@ -1,4 +1,4 @@
-"""x-transformers upgrade guards: qk-norm scale back-compat and fp32 attention."""
+"""Tests for the x-transformers version guards: the qk-norm scale of older checkpoints, and fp32 attention."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ def test_mult_checkpoint_shared_model_args_cubed_once():
                "max_out_particles": 3, "cond_scalars": ("Density",)}
     c = {"state_dict": {}, "config": {"mm_conf": mm_conf, "dl_conf": {}}}
     rc = resolve_mult_config(c)
-    assert rc.model_args["attn_qk_norm_scale"] == 1000        # inv_model_args aliases model_args
+    assert rc.model_args["attn_qk_norm_scale"] == 1000        # inv_model_args is the same dict
     assert rc.inv_model_args["attn_qk_norm_scale"] == 1000
 
 

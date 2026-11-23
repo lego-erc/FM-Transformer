@@ -1,10 +1,10 @@
-"""model_conf.edep_ae: per-layer E_dep through ONE latent token carrying the K latents of a frozen autoencoder.
+"""``model_conf.edep_ae``: the E_dep layers through one latent token that carries the K latents of a frozen autoencoder.
 
-The K standardised latents are an event-level Euclidean state ``z`` of shape (B, K), flown jointly with the particle
-state: the vector field embeds it as one extra token (``Linear(K -> h_dim)``) in the same attention and reads its
-velocity out of that token (``Linear(h_dim -> K)``, zero-init). The particle sequence keeps its layout and its
-length; the AE's factorised stochastic decoder turns the generated latents into the per-layer vector, rescaled to the
-event's total E_dep.
+The K standardised latents are a per-event Euclidean state ``z`` (B, K), integrated together with the tokens. The
+field embeds ``z`` as one extra token (``lat_in``, ``Linear(K -> h_dim)``) in the same attention and reads its
+velocity out of that token (``lat_out``, ``Linear(h_dim -> K)``, zero-initialised). The event's token sequence keeps
+its layout and its length. The autoencoder's factorised stochastic decoder turns the generated latents into the
+deposits per layer, rescaled to the event's total E_dep.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ def _batch() -> DataStruct:
 
 
 def _wake(m: LEGOLtng) -> None:
-    """The latent read-out is zero-init (an untrained token moves nothing); give it weights so a test can see it."""
+    """Gives the latent's zero-initialised read-out random weights, so that a test sees the latent token's velocity."""
     torch.manual_seed(1)
     torch.nn.init.normal_(m.model.vf.lat_out.weight, std=0.5)
 
@@ -101,13 +101,13 @@ def test_latent_token_and_particles_see_each_other() -> None:
     x2[:, 3, 0] += 0.3
     _, vz2 = m.model(x2, torch.tensor(0.3), z=z, **_vf_kwargs(m, ds))
     gen = ds.m.full == 1
-    assert not torch.allclose(v[gen], v2[gen])          # particles attend to the latent token
+    assert not torch.allclose(v[gen], v2[gen])          # the generated tokens attend to the latent token
     assert not torch.allclose(vz, vz2)                  # and it attends to them
 
 
 def test_packed_and_per_token_conditions_agree() -> None:
-    """Per-event t takes the per-event (B, 3, D) adaptive-norm condition, whose selector must mark the latent token as
-    generated; a per-token t equal to it (conditioning tokens at t = 1) takes the per-token path."""
+    """A per-event ``t`` takes the per-event (B, 3, D) adaptive-norm condition, whose selector must mark the latent
+    token as generated. The same times given per token (conditioning tokens at t = 1) take the per-token path."""
     m = _model()
     _wake(m)
     ds = _batch()
@@ -189,8 +189,8 @@ def test_checkpoint_carries_the_autoencoder_and_the_token(tmp_path) -> None:
 
 
 def test_a_checkpoint_without_the_latent_token_is_refused() -> None:
-    """The vf loads with strict=False, so the 16-token prototype (no lat_in / lat_out) would silently generate with a
-    zero latent read-out."""
+    """The field loads with ``strict=False``: a checkpoint of the 16-token prototype (no ``lat_in`` / ``lat_out``)
+    would generate, silently, with a zero latent read-out."""
     m = LEGOLtng(_config())
     sd = {k: v for k, v in m.model.vf.state_dict().items() if not k.startswith("lat_")}
     with pytest.raises(ValueError, match="lat_in"):
@@ -254,8 +254,9 @@ def _with_geometry() -> LEGOLtng:
 
 
 def test_latent_token_with_the_geometry_encoder() -> None:
-    """Both prepend tokens: [latent, geometry x K, sequence]. The per-event selector marks the latent generated and the
-    geometry tokens conditioning, so it must agree with the per-token path; both feed the field."""
+    """Both options prepend tokens: [latent, geometry tokens, the event's tokens]. The per-event selector marks the
+    latent token generated and the geometry tokens conditioning, so the per-event and the per-token path must agree.
+    A training step reaches both read-ins, and a solve runs."""
     m = _with_geometry()
     m.eval()
     ds = _batch()
@@ -275,7 +276,10 @@ def test_latent_token_with_the_geometry_encoder() -> None:
 
 
 def _whitened(train: bool = False) -> LEGOLtng:
-    """model_conf.edep_whiten (needs the base head) together with the latent token: both live in solve / _step."""
+    """Returns a model with ``model_conf.edep_whiten`` (it needs the base head) and the latent token.
+
+    Both act in ``solve`` and in ``_step``.
+    """
     # ntypes = len(cond_scalars) + 3; _tiny_config's 4 fits one scalar
     cfg = _head_config(True, {"ntypes": 7}, edep_whiten=True, edep_ae=_ae_spec())
     torch.manual_seed(0)
@@ -292,8 +296,9 @@ def _whitened_batch(B: int = 8) -> DataStruct:
 
 
 def test_whitened_solve_returns_u_scale_tokens_and_latents() -> None:
-    # a field pushing the whitened E_dep cell by +1 (one prior sigma) keeps u inside the channel once solve undoes the
-    # whitening -- after splitting the latent tokens off, which must not reach the E_dep token or the layout
+    # A field that pushes the whitened E_dep token by +1 (one sigma of the prior): once solve undoes the whitening,
+    # the deposit lies inside (0, e_dep_max). The latent is split off first: it must not reach the E_dep token or the
+    # layout.
     m = _whitened()
     ds = _whitened_batch()
 
@@ -310,7 +315,7 @@ def test_whitened_solve_returns_u_scale_tokens_and_latents() -> None:
 
 
 def test_a_step_evaluates_the_head_once() -> None:
-    """The draw of the base sets every prior parameter; whitening the target's E_dep reads its mu and sigma there."""
+    """Sampling the base sets every parameter of the prior; whitening the target's E_dep reads its mu and sig there."""
     m, ds, calls = _whitened(train=True), _whitened_batch(), []
     m.base_head.register_forward_hook(lambda *a: calls.append(1))
     m._step(ds, 0)

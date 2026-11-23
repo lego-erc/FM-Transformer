@@ -1,4 +1,4 @@
-"""Cartesian <-> spherical conversion, rotation, the polar zoom, the box map and the chord through the box.
+"""Cartesian <-> spherical conversion, rotation, the polar zoom, the map onto the cuboid and the chord through it.
 
 ```
 cartesian   x = sin(theta) cos(phi),   y = sin(theta) sin(phi),   z = cos(theta)
@@ -8,13 +8,14 @@ rotated     about x by alpha   z' = sin(theta) sin(phi) sin(alpha) + cos(theta) 
                                y' = sin(theta) sin(phi) cos(alpha) - cos(theta) sin(alpha),   x' = x
             then about z by beta                                                             phi' = atan2(y', x') + beta
 
-on_cuboid   x / |x|_inf * d                        onto the surface of the cuboid with half-widths d
+on_cuboid   x / |x|_inf * d                        onto the surface of the cuboid with half-edges d
 
 zoom        theta' = mix theta + (1 - mix) pi log1p(theta / theta_s) / log1p(pi / theta_s)
 ```
 
-The formulas take one tensor per component; ``GeomTrafos`` applies them to packed ``(..., 2)`` / ``(..., 3)`` channels,
-and ``to_cuboid`` only to the position half of a ``(mom, pos)`` 6-vector (momentum passes through).
+The formulas take one tensor per component. ``GeomTrafos`` applies them to components stacked on the last dimension,
+``(..., 2)`` / ``(..., 3)``, and ``to_cuboid`` only to the position half of a ``(mom, pos)`` 6-vector (the momentum
+passes through).
 """
 
 import torch
@@ -53,13 +54,13 @@ def rotated(theta, phi, alpha, beta):
 
 
 def on_cuboid(x, d):
-    """Scales the directions ``x`` onto the surface of the cuboid with half-widths ``d``: ``x / |x|_inf * d``."""
+    """Scales the directions ``x`` onto the surface of the cuboid with half-edges ``d``: ``x / |x|_inf * d``."""
     norm = torch.abs(x).amax(-1, keepdim=True).clamp(min=1e-8)   # |x|_inf, held at 1e-8 or above
     return x / norm * d
 
 
 def zoom_angle(theta, theta_s, mix):
-    """Zooms the polar angle ``theta``: magnifies the angles below ~theta_s, keeps 0 and pi.
+    """Zooms the polar angle ``theta``: magnifies the angles below ~``theta_s``, keeps 0 and pi.
 
     ```
     theta' = mix theta + (1 - mix) log1p(theta / theta_s) / k,   k = log1p(pi / theta_s) / pi
@@ -73,23 +74,28 @@ def zoom_angle(theta, theta_s, mix):
 
 
 def unzoom_angle(theta_z, theta_s, mix):
-    """Inverts ``zoom_angle``: in closed form for mix = 0, by Newton from there otherwise.
+    """Inverts ``zoom_angle``: in closed form for mix = 0, otherwise by 40 Newton steps that start from the closed form.
 
     ```
     theta = theta_s expm1(k theta_z)                                                    mix = 0
-    theta = theta - (zoom_angle(theta) - theta_z) / (mix + (1 - mix) / (k (theta_s + theta)))    40 Newton steps
+    theta = theta - (zoom_angle(theta) - theta_z) / (mix + (1 - mix) / (k (theta_s + theta)))    one Newton step
     ```
     """
     k     = torch.log1p(_float64(torch.pi / theta_s)) / torch.pi
     theta = theta_s * torch.expm1(theta_z * k)
-    for _ in range(40 if mix else 0):   # increasing and concave: from the first step on, monotone from below
+    # zoom_angle is increasing and concave, so after the first step the iterates rise monotonically to the root
+    for _ in range(40 if mix else 0):
         f     = zoom_angle(theta, theta_s, mix) - theta_z
         theta = (theta - f / (mix + (1 - mix) / (k * (theta_s + theta)))).clamp(0.0, torch.pi)
     return theta
 
 
 def polar_about(v, u):
-    """Splits the unit vectors ``v`` about the unit axes ``u``: the polar angle, v's part perp to u and its length."""
+    """Splits the unit vectors ``v`` about the unit axes ``u``.
+
+    Returns ``(theta, perp, sin)``: the polar angle (..., 1), the part of ``v`` perpendicular to ``u`` (..., 3), and
+    that part's length ``sin(theta)`` (..., 1).
+    """
     cos   = (v * u).sum(-1, keepdim=True).clamp(-1.0, 1.0)
     perp  = v - cos * u
     sin   = perp.norm(dim=-1, keepdim=True)
@@ -107,14 +113,11 @@ def from_polar_about(theta, u, perp, sin):
 
 def zoom_polar(v: torch.Tensor, u: torch.Tensor, theta_s: float, inverse: bool = False,
                mix: float = 0.0) -> torch.Tensor:
-    """Remaps the polar angle of unit vectors ``v`` about unit axes ``u``, keeping the azimuth.
+    """Zooms the polar angle of the unit vectors ``v`` about the unit axes ``u`` and keeps the azimuth.
 
-    ```
-    theta' = mix * theta + (1 - mix) * pi * log1p(theta / theta_s) / log1p(pi / theta_s)
-    ```
-
-    A bijection of the sphere that magnifies deflections below ~theta_s; ``mix`` keeps the large angles from being
-    squeezed. ``inverse`` undoes it (by Newton for mix > 0). ``v`` on +-u is left as is.
+    ``zoom_angle`` on the polar angle; ``inverse``: ``unzoom_angle``. A bijection of the sphere that magnifies the
+    deflections below ~``theta_s``; ``mix > 0`` keeps the large angles from being squeezed. A ``v`` on ``+-u`` is
+    returned as it is.
     """
     theta, perp, sin = polar_about(v, u)
     theta = unzoom_angle(theta, theta_s, mix) if inverse else zoom_angle(theta, theta_s, mix)
@@ -123,10 +126,10 @@ def zoom_polar(v: torch.Tensor, u: torch.Tensor, theta_s: float, inverse: bool =
 
 
 def cuboid_chord(u: torch.Tensor, pos: torch.Tensor, d: torch.Tensor) -> torch.Tensor:
-    """Computes the length of the line along ``u`` through a cuboid, in longest-edge lengths.
+    """Computes the length of the line along ``u`` through a cuboid, in units of its longest edge.
 
-    ``d`` are the half-edges with the longest one 1, ``pos`` the stored direction of a point on the surface, dir(x / d).
-    Returns ``(..., 1)``.
+    ``u`` (..., 3) is the line's unit direction. ``d`` (3,) are the half-edges, the longest one 1. ``pos`` (..., 3) is
+    the direction the tokens store for a point ``x`` on the surface, ``normalize(x / d)``. Returns ``(..., 1)``.
 
     ```
     line       x(s) = p + s u
@@ -165,10 +168,11 @@ class GeomTrafos:
         return _per_group(spherical, cc, 3, unit=True)
 
     def to_cuboid(self, p_and_x, d=1.0):
-        """Maps the position direction of ``p_and_x`` (..., 6) onto the surface of the cuboid with half-widths ``d``.
+        """Maps the position direction of ``p_and_x`` (..., 6) onto the surface of the cuboid with half-edges ``d``.
 
-        ``on_cuboid`` on the position; ``d`` is a scalar (a cube) or per-axis half-widths; for the box's half-edges it
-        inverts DataPrep's stored direction of x / cuboid_dim. The momentum passes through.
+        ``on_cuboid`` on the position half; the momentum half passes through. ``d`` is a scalar (a cube) or the
+        per-axis half-edges. With the cuboid's own half-edges it inverts the direction ``DataPrep`` stores,
+        ``normalize(x / cuboid_dim)``.
         """
         return on_position(p_and_x, lambda p, x: on_cuboid(x, d))
 
@@ -196,10 +200,11 @@ def on_position(p_and_x, new_position):
 
 
 def _per_group(formula, packed, n, unit=False):
-    """Applies ``formula`` to each trailing group of ``n`` channels of ``packed``, one tensor per channel.
+    """Applies ``formula`` to each trailing group of ``n`` components of ``packed``, one tensor per component.
 
-    The formula's results are packed the same way: ``(..., k n) -> (..., k m)``. ``unit`` normalises each group first.
-    The components are views of ``packed`` (CPU's atan2 picks its kernel by the input's strides).
+    The formula's ``m`` results per group are stacked the same way: ``(..., k n) -> (..., k m)``. ``unit`` normalises
+    each group first. The components are handed over as views of ``packed``, not as copies: CPU's atan2 picks its
+    kernel by the input's strides, so a contiguous copy can change the last bits of the result.
     """
     one    = packed.shape[-1] == n
     groups = packed if one else packed.unflatten(-1, (-1, n))
@@ -210,7 +215,7 @@ def _per_group(formula, packed, n, unit=False):
 
 
 def _against_axis(theta, phi, axis_sph):
-    """Packs ``(theta, phi)`` as (..., 2), and spreads the axis' spherical angles over theta's shape, each (..., 1)."""
+    """Stacks ``(theta, phi)`` to (..., 2) and expands the axis' spherical angles to theta's shape, each (..., 1)."""
     axis_theta, axis_phi = axis_sph.expand((*theta.shape, -1)).split(1, dim=-1)
     return torch.stack((theta, phi), dim=-1), axis_theta, axis_phi
 

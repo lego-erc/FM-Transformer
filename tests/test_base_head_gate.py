@@ -1,9 +1,9 @@
-"""The base_head construction gate.
+"""When ``LEGOLtng`` gets a ``base_head`` (the legacy moment head, ``legacy/base_nn.py``).
 
-``base_head_params`` reads the Z/A/Size conditioning scalars, so a head is only
-buildable when the dataset carries them. The gate must not crash a model that
-never asked for one, must fail loudly for a model that did, and must rebuild a
-head that a previous run pretrained and saved.
+``base_head_params`` reads the Z/A/Size conditioning scalars, so a head can only
+be built when the dataset carries them. Without them, a model that only has the
+``base_pretrain_batches`` default gets no head, and a model with a saved
+``base_conf.base_head`` raises. A saved head is rebuilt and frozen.
 """
 
 from __future__ import annotations
@@ -33,8 +33,8 @@ def _saved_head() -> dict:
 
 
 def test_default_pretrain_does_not_force_the_scalars() -> None:
-    # base_pretrain_batches defaults to 300, i.e. nobody asked for a head; a
-    # ("Density",) dataset must still build and generate.
+    # base_pretrain_batches at its default (300) is not an explicit ask for a head:
+    # a ("Density",) model is built without one.
     model = LEGOLtng(_config(("Density",)))
     assert not hasattr(model, "base_head")
 
@@ -49,16 +49,15 @@ def test_built_when_requested_and_feedable() -> None:
 
 
 def test_no_head_when_nothing_asks() -> None:
-    # base_dist_loss used to build one on its own; with co-training gone the only
-    # asks left are base_pretrain_batches and a saved head.
+    # only base_pretrain_batches > 0 or a saved head asks for one
     assert not hasattr(LEGOLtng(_config(base_pretrain_batches=0)), "base_head")
 
 
 def test_saved_head_is_rebuilt_and_always_frozen() -> None:
-    # continuing from a pretrained head: dropping it would silently revert the base
-    # distribution to the static base_conf sm_scale/kappa. It comes back frozen even
-    # when a pre-2026-09 config says base_head_frozen: False, because the flow never
-    # trains the head -- an unfrozen one would sit in the optimizer with no gradient.
+    # Continuing from a pretrained head: dropping it would silently revert the base
+    # distribution to the constants base_conf.sm_scale / kappa. The head is frozen
+    # whatever base_head_frozen says: the flow never trains the head, so an unfrozen
+    # one would sit in the optimizer without a gradient.
     hs = _saved_head()
     model = LEGOLtng(_config(base_pretrain_batches=0, base_head=hs, base_head_frozen=False))
     assert hasattr(model, "base_head")
@@ -71,7 +70,7 @@ def test_base_head_hidden_sets_the_layer_widths() -> None:
     # 1 GeV proton survivors), so the hidden layers are configurable
     head = LEGOLtng(_config(base_head_hidden=[32, 8])).base_head
     assert [m.out_features for m in head if isinstance(m, torch.nn.Linear)] == [32, 8, 4]
-    assert not head[-1].weight.any()   # zero-init output layer, priors in the bias
+    assert not head[-1].weight.any()   # a fresh head: zero output weights, the starting values in the bias
 
 
 def test_saved_deep_head_is_reloaded_frozen() -> None:

@@ -1,11 +1,14 @@
-"""model_conf.edep_margin: the E_dep TOKEN encoded as the log-odds of the deposited fraction of a per-species cap.
+"""``model_conf.edep_margin``: the E_dep token as the log-odds of the deposited fraction of a cap per incoming species.
 
-    E_cap = E_in + margin(species),  f = E_dep / E_cap,  z = log E_dep - log(E_cap - E_dep)
-    u = (z - z_lo) / (z_hi - z_lo),  z_lo = log(eps / E_cap),  z_hi = log(E_cap / eps_missing)
+```
+cap = e_in + margin(species)        z    = logit(edep / cap) = log(edep) - log(cap - edep)
+u   = (z - z_lo) / (z_hi - z_lo)    z_lo = log(e_min / cap),   z_hi = log(cap / 1e-3 MeV),   e_min = edep_log_min
+```
 
-Small deposits keep the old log scale (z ~ log f); near the cap the channel resolves the MISSING energy, so a
-contained shower's narrow peak below E_in becomes wide, and E_dep = E_cap is the channel's edge u = 1. The per-layer
-tensor keeps the old elementwise scale. Off by default: every other model is unchanged.
+This is the margin scale (``DataPrep.norm_edep_margin``). A small deposit keeps a log scale (z ~ log(edep / cap)).
+Near the cap the scale resolves the missing energy ``cap - edep``, so a contained shower's narrow peak below ``e_in``
+becomes wide, and ``edep = cap`` is the edge ``u = 1``. The E_dep layers keep the layer scale
+(``norm_edep_layer``), and so does the token of a model without the key.
 """
 
 from __future__ import annotations
@@ -34,8 +37,9 @@ def gen(tmp_path) -> GenerateOut:
 
 
 def test_margin_species_keeps_the_log_token_for_the_others() -> None:
-    """edep_margin_species [11, -11, 22]: e-/e+/gamma tokens take the margin token, every other species the log
-    token -- the margin token resolves a contained EM shower near E_in but its prior misplaces a hadron's deposit."""
+    """``edep_margin_species`` [11, -11, 22]: the token of an incoming e-/e+/gamma is on the margin scale, that of
+    every other species on the layer scale. The margin scale resolves a contained EM shower near E_in, but its prior
+    misplaces a hadron's deposit."""
     some, every, none = _prep(edep_margin_species=[11, -11, 22]), _prep(), _prep(margin=False)
     e_in, E = torch.full((4,), 1000.0), torch.tensor([980.0, 980.0, 225.0, 225.0])
     pid = torch.tensor([11.0, 22.0, 2212.0, 2112.0])
@@ -63,13 +67,13 @@ def test_zero_is_zero_and_the_cap_is_the_edge() -> None:
     dp = _prep()
     e_in, pid = torch.tensor([1000.0, 1000.0, 1000.0]), torch.tensor([11.0, 11.0, 11.0])
     u = dp.norm_edep_margin(torch.tensor([0.0, 1000.0, 1300.0]), e_in, pid)
-    assert u[0] == 0 and u[1] == 1 and u[2] == 1                     # zero stays the sentinel's 0; >= cap -> edge
+    assert u[0] == 0 and u[1] == 1 and u[2] == 1                     # no deposit stays 0; >= cap -> the edge u = 1
     E = dp.denorm_edep_margin(torch.tensor([-0.1, 1.0, 1.7]), e_in, pid)
     assert E[0] == 0 and (E[1:] <= 1000.0).all() and (E[1:] > 999.99).all()
 
 
 def test_the_contained_peak_is_wide_in_the_new_channel() -> None:
-    """The 1 GeV e- peak (0.96 - 0.995 E_in) is ~0.0013 wide on the old log token and should span > 0.05 here."""
+    """The 1 GeV e- peak (0.96 - 0.995 E_in) is ~0.0013 wide on the layer scale and spans > 0.05 on the margin scale."""
     new, old = _prep(), _prep(margin=False)
     e_in, pid = torch.tensor([1000.0, 1000.0]), torch.tensor([11.0, 11.0])
     E = torch.tensor([960.0, 995.0])
@@ -105,8 +109,8 @@ def test_without_the_margin_the_token_is_the_old_scale() -> None:
 
 @pytest.mark.parametrize("margin", [True, False])
 def test_norm_e_encodes_the_token_from_the_raw_incoming_energy(margin: bool) -> None:
-    """Loading a post-energy-split file: the incoming token holds E_in in MeV and the E_dep token MeV; norm_e must
-    encode the token with E_in BEFORE it rewrites the incoming energy as its scalar. Layers keep the old scale."""
+    """A stored file holds the incoming energy and the E_dep token in MeV. ``norm_e`` must encode the token with E_in
+    before it rewrites the incoming energy on the model scale. The E_dep layers take the layer scale."""
     dp = _prep(margin)
     ds = _fake_batch()
     f = ds.f.full.clone()
@@ -122,8 +126,8 @@ def test_norm_e_encodes_the_token_from_the_raw_incoming_energy(margin: bool) -> 
 
 @torch.no_grad()
 def test_generate_out_keeps_the_margin_token_and_skips_the_mev_clamp(gen, monkeypatch) -> None:
-    """A margin token is bounded by the cap by construction: GenerateOut must not apply the old MeV clamp
-    (which works on the old scale and would rewrite u), and the token decodes to <= E_cap."""
+    """A margin token is bounded by its cap by construction. ``GenerateOut`` must not apply the MeV clamp,
+    which works on the layer scale and would rewrite ``u``; the token decodes to <= the cap."""
     gen.dp.edep_margin = True
     monkeypatch.setattr(gen.model, "forward", _fill_edep(1.0))
     sols, _, _ = gen(_gun_cond(22, batch=64))
@@ -136,8 +140,9 @@ def test_generate_out_keeps_the_margin_token_and_skips_the_mev_clamp(gen, monkey
 
 @torch.no_grad()
 def test_g4_api_hands_out_the_log_scale_token(gen, monkeypatch) -> None:
-    """Callers of gen_model_w_g4_args (lego-eval) decode its E_dep with the checkpoint's edep_log_min, i.e. as the
-    log token: a margin model re-encodes its token on that scale there, or every MeV they report is wrong."""
+    """Callers of ``gen_model_w_g4_args`` (lego-eval) decode its E_dep with the checkpoint's ``edep_log_min``, i.e. on
+    the layer scale. A margin model re-encodes its token on that scale there; otherwise every MeV they report is
+    wrong."""
     gen.dp.edep_margin = True
     e_in, pid, E = 150.0, 22, 140.0
     u = float(gen.dp.norm_edep_margin(torch.tensor([E]), torch.tensor([e_in]), torch.tensor([float(pid)])))
@@ -155,8 +160,8 @@ def test_g4_api_hands_out_the_log_scale_token(gen, monkeypatch) -> None:
 @torch.no_grad()
 @pytest.mark.parametrize("pid, clamped", [(22, False), (2212, True)])
 def test_the_mev_clamp_applies_to_the_log_token_species_only(gen, monkeypatch, pid, clamped) -> None:
-    """With edep_margin_species [11, -11, 22] a photon's margin token is capped by construction and left alone, while a
-    proton's log token is still clamped at E_in (+ its HAND_SET_EXCESS_MEV, 0 for protons)."""
+    """With ``edep_margin_species`` [11, -11, 22] a photon's margin token is capped by construction and left alone,
+    while a proton's layer-scale token is still clamped at E_in (+ its ``HAND_SET_EXCESS_MEV``, 0 for protons)."""
     gen.dp.edep_margin, gen.dp.edep_margin_species = True, [11, -11, 22]
     monkeypatch.setattr(gen.model, "forward", _fill_edep(1.0))
     sols, _, _ = gen(_gun_cond(pid, batch=64))
@@ -171,11 +176,12 @@ def test_the_mev_clamp_applies_to_the_log_token_species_only(gen, monkeypatch, p
 
 # --- data-driven margin: model_conf.edep_excess_mev ---------------------------------------------------------------
 # Per incoming species, the largest E_dep - E_in [MeV] in the training data (meta.json edep_excess_max_mev, written by
-# gen_data.py; for an older dataset computed from data_prepped.pt at fresh training). It replaces the hand-set
-# HAND_SET_MARGIN_MEV / HAND_SET_EXCESS_MEV; checkpoints without it keep the constants.
+# gen_data.py; for a dataset whose meta.json lacks the key, computed from data_prepped.pt when a fresh training
+# starts). It takes the place of the hand-set HAND_SET_MARGIN_MEV / HAND_SET_EXCESS_MEV; a checkpoint without it keeps
+# those constants.
 
 def _raw_file(e_in, pid, edep) -> torch.Tensor:
-    """A stored (pre-norm_e) tensor: incoming kinetic energy and E_dep in MeV."""
+    """Returns the tokens of a stored file (before ``norm_e``): the incoming kinetic energy and E_dep in MeV."""
     f = _fake_batch(B=len(e_in)).f.full.clone()
     _F(f).in_cc[..., 0, 0] = torch.tensor(e_in)
     _F(f).in_p[..., 0, -1] = torch.tensor(pid)
@@ -190,8 +196,8 @@ def test_edep_excess_max_is_the_largest_deposit_above_e_in_per_species() -> None
 
 
 def test_the_cap_is_e_in_plus_the_data_excess() -> None:
-    """A neutron deposit 2 MeV above E_in is the edge when the data's largest excess is 2 MeV; the hand-set 10 MeV
-    margin left it inside the channel."""
+    """A neutron deposit 2 MeV above E_in is the edge ``u = 1`` when the data's largest excess is 2 MeV; under the
+    hand-set 10 MeV margin it lies below the edge."""
     dp, const = _prep(edep_excess_mev={2112: 2.0, 211: 150.0}), _prep()
     e_in, pid = torch.tensor([500.0, 500.0]), torch.tensor([2112.0, 211.0])
     E = torch.tensor([502.0, 640.0])
@@ -201,8 +207,7 @@ def test_the_cap_is_e_in_plus_the_data_excess() -> None:
 
 
 def test_the_old_key_names_still_select_the_margin_token() -> None:
-    """``edep_wall`` / ``edep_wall_species`` were the keys' names until 11.2026; older configs and checkpoints carry
-    them."""
+    """Old configs and checkpoints name the keys ``edep_wall`` / ``edep_wall_species``."""
     conf = _tiny_config(edep_log_min=1e-6, edep_wall=True, edep_wall_species=[11], max_energy=2000.0)["config"]
     old = DataPrep(conf)
     assert old.edep_margin and old.edep_margin_species == [11]
@@ -223,7 +228,7 @@ def test_fresh_training_takes_the_excess_from_meta_or_the_data(tmp_path) -> None
     _prep()
     f = _raw_file([100.0, 300.0], [2112.0, 22.0], [104.5, 250.0])
     torch.save((f, torch.ones(f.shape[:2]), torch.ones(f.shape[:2], dtype=torch.bool)), tmp_path / "data_prepped.pt")
-    (tmp_path / "meta.json").write_text(json.dumps(meta))             # a dataset from before gen_data wrote the key
+    (tmp_path / "meta.json").write_text(json.dumps(meta))             # a dataset whose meta.json lacks the key
     assert resolve_legoltng_config(cfg).config["model_conf"]["edep_excess_mev"] == {2112: 4.5, 22: 0.0}
     meta["edep_excess_max_mev"] = {"11": 0.0, "22": 0.0, "2212": 0.001}   # json keys are strings
     (tmp_path / "meta.json").write_text(json.dumps(meta))
@@ -233,7 +238,7 @@ def test_fresh_training_takes_the_excess_from_meta_or_the_data(tmp_path) -> None
 
 @torch.no_grad()
 def test_the_mev_clamp_uses_the_data_excess(gen, monkeypatch) -> None:
-    """A log-token proton is clamped at E_in + its data excess (30 MeV here), not at the hand-set E_in + 0."""
+    """A proton's layer-scale token is clamped at E_in + its data excess (30 MeV here), not at the hand-set E_in + 0."""
     gen.dp.edep_excess_mev = {2212: 30.0}
     monkeypatch.setattr(gen.model, "forward", _fill_edep(1.0))
     sols, _, _ = gen(_gun_cond(2212, batch=64))

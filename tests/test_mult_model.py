@@ -1,4 +1,5 @@
-"""MultModel: schedule-free train mode across validation, and warnings for missing checkpoint keys."""
+"""Tests for ``MultModel``: the schedule-free optimizer's train mode across validation, and the warning for missing
+checkpoint keys."""
 
 from __future__ import annotations
 
@@ -20,8 +21,8 @@ def _in(B: int = 4):
 
 
 def test_schedule_free_is_back_in_train_mode_after_validation() -> None:
-    """forward() switches the optimizer to eval; without the validation hooks the
-    next optimizer step raised 'Optimizer was not in train mode' at step 0."""
+    """``forward`` switches the schedule-free optimizer to eval mode, and the validation hooks must switch it back:
+    otherwise the next optimizer step raises 'Optimizer was not in train mode'."""
     cfg = _mult_config()  # opt: schedulefree
     m = MultModel({"state_dict": {}, "config": cfg})
     m._trainer = SimpleNamespace(model=m)

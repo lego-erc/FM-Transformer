@@ -1,4 +1,4 @@
-"""Training-step paths the recipe no longer takes, kept so older configs and checkpoints still run unchanged:
+"""Training-step paths that are not the recipe's, kept so that older configs and checkpoints still run unchanged:
 
     inverse events   ``mask_conf.p_forward < 1``: per event a coin flip generates the incoming particle from the
                      outgoing set instead (``_sample_mask``)
@@ -6,8 +6,9 @@
     reflow           a frozen teacher's transport of the base replaces the data target: ``reflow_path`` from step 0,
                      ``reflow_start_epoch > 0`` the student's end-of-epoch snapshot from that epoch on
 
-``LegacyTrainStep`` follows ``TrainStep`` in ``LEGOLtng``'s bases; ``TrainStep._step`` dispatches to it in one line
-each. ``LEGOLtngDirect`` (``legacy/reflow.py``) reuses ``_sample_mask`` and ``_teacher_transport``.
+``LegacyTrainStep`` follows ``TrainStep`` in ``LEGOLtng``'s bases; ``TrainStep`` reaches each path in one line
+(``_flow_frame``, ``_sample_t``, ``_step``). ``LEGOLtngDirect`` (``legacy/reflow.py``) reuses ``_sample_mask`` and
+``_teacher_transport``.
 """
 
 import torch
@@ -21,23 +22,30 @@ class LegacyTrainStep:
 
     @torch.no_grad()
     def _sample_mask(self, ds_t: DataStruct) -> Tensor:
-        """Samples each event's mask: the data mask or its inverse, a coin flip with ``mask_conf.p_forward``.
+        """Samples each event's mask (B, L): the data's with probability ``mask_conf.p_forward``, else its inverse.
 
-        The inverse generates the incoming from the outgoing set; scalar tokens stay conditioning.
+        The inverse mask generates the incoming particle from the outgoing set and E_dep; the conditioning scalar
+        tokens stay conditioning tokens. Without ``mask_conf`` every event keeps the data's mask.
         """
         if not self.rc.mask_conf:
             return ds_t.m.full
         fwd = ds_t.m.full
         inv = (fwd == 0) & (ds_t.am.full == 1)
-        inv[:, :self.rc.n_prefix] = 0  # all conditioning scalars stay conditioning
+        inv[:, :self.rc.n_prefix] = 0  # the conditioning scalar tokens stay conditioning tokens
         pick = torch.rand(fwd.shape[0], device=fwd.device) < self.rc.mask_conf.get("p_forward", 0.5)
         return torch.where(pick.unsqueeze(-1), fwd, inv)
 
     def _sample_t_options(self, ds_t: DataStruct) -> Tensor:
-        """Samples the training-time ``t`` per event.
+        """Samples each event's time ``t`` (B,) for a ``t_dist`` or ``t_dist_shift`` that is not the recipe's.
 
-        Logit-normal (``sm_norm``) or SD3 mode sampling (``sd3``; scale 0 is uniform); ``t_dist_shift`` applies ``t **
-        (1/shift)``.
+        ```
+        sm_norm   t = sigmoid(t_dist_scale z),   z ~ N(0, 1)      (logit-normal)
+        sd3       t = sd3_time(u, t_dist_scale),   u ~ U(0, 1)    (``main/train_step.py``)
+        shift     t = t ** (1 / t_dist_shift)                     applied to either
+        ```
+
+        Raises:
+            ValueError: an unknown ``t_dist``.
         """
         if self.rc.t_dist == "sm_norm":
             t = torch.sigmoid(self.rc.t_dist_scale * torch.randn_like(ds_t.f.d))
@@ -53,7 +61,11 @@ class LegacyTrainStep:
     # ---- reflow -------------------------------------------------------------------------------------------------
 
     def _init_reflow(self) -> None:
-        """Loads the ``reflow_path`` teacher, or sets none; not a submodule, so outside state_dict and DDP."""
+        """Sets ``reflow_teacher`` to the ``reflow_path`` teacher, or to None without a path.
+
+        It is set past ``nn.Module``'s registration: the teacher is no submodule, so it is in no state dict and DDP
+        does not see it.
+        """
         teacher = None
         if self.rc.reflow_path is not None:
             from legofmt.legacy.reflow import _build_reflow_teacher  # avoids import cycle
@@ -77,10 +89,10 @@ class LegacyTrainStep:
 
     @torch.no_grad()
     def _teacher_transport(self, ds_t: DataStruct, base: Tensor, **solve_kwargs) -> Tensor:
-        """Returns the reflow teacher's transport of ``base`` on the generated slots, the data elsewhere.
+        """Returns the reflow teacher's transport of ``base`` on the generated tokens, the data elsewhere.
 
-        The E_dep token is generated but its direction columns are the (1,1,1) filler; transporting them gave that token
-        an off-manifold target.
+        The prefix tokens keep the data in every channel but the energy: the E_dep token is generated, but its
+        direction channels hold the (1, 1, 1) filler, and their transport would be an off-manifold target.
         """
         tgt = self.reflow_teacher.solve(ds_t, x_init=base, **solve_kwargs)
         tgt = torch.where((ds_t.m.full == 1).unsqueeze(-1), tgt, ds_t.f.model_in)
@@ -89,7 +101,10 @@ class LegacyTrainStep:
 
     @torch.no_grad()
     def _reflow_coupling(self, ds_t: DataStruct, base: Tensor) -> DataStruct:
-        """Replaces the batch's target by the teacher's transport of ``base`` on the steps reflow fires."""
+        """Replaces the batch's target by the teacher's transport of ``base`` on the steps reflow fires.
+
+        Reflow fires on every ``reflow_every``-th training step of a model that has a teacher.
+        """
         if self.reflow_teacher is None or not self.training or self.global_step % self.rc.reflow_every != 0:
             return ds_t
         tgt = self._teacher_transport(ds_t, base, **self.rc.reflow_kwargs)

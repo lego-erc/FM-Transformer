@@ -1,8 +1,13 @@
-"""``base_conf.base_head_lik``: one head produces every base parameter, fitted by likelihood.
+"""``base_conf.base_head_lik``: one head predicts every parameter of the base, fitted by likelihood.
 
-Energy ``u = 1 - tanh(sm |z|^q)`` per outgoing slot (out-set zeroed pass); E_dep logit-normal ``(mu, sig)`` and angles
-``theta / pi = tanh(|z| / kappa)^pw`` (full pass). Loss: per-unit mean NLLs over continuum slots, outgoing slots,
-deposit events.
+```
+energy   u = 1 - tanh(sm |z|**q)              per outgoing slot; (sm, q) are predicted with the outgoing set zeroed
+angles   theta / pi = tanh(|z| / kappa)**pw   per outgoing slot; (kappa, pw) see the outgoing set
+E_dep    logit-normal (mu, sig)               per event; (mu, sig) see the outgoing set
+```
+
+The loss is three mean NLLs: energy over the continuum slots (``u > 0``), angles over the outgoing slots, E_dep over
+the events with a deposit.
 """
 
 from __future__ import annotations
@@ -32,7 +37,7 @@ def _config(**base_conf) -> dict:
 
 
 def _shaken(model: LEGOLtng, seed: int = 0) -> LEGOLtng:
-    """Random readouts too: a fresh head's zero-init readouts would hide any input dependence."""
+    """Adds noise to every parameter of the base head: a fresh head's zero readouts would hide any input dependence."""
     g = torch.Generator().manual_seed(seed)
     with torch.no_grad():
         for p in model.base_head.parameters():
@@ -41,7 +46,7 @@ def _shaken(model: LEGOLtng, seed: int = 0) -> LEGOLtng:
 
 
 def _batch(n_out: torch.Tensor, edep: torch.Tensor | None = None) -> DataStruct:
-    """``_head_batch`` with the pad slot holding what prep writes there: direction (1, 1, 1)/sqrt3, energy 0."""
+    """Returns ``_head_batch`` with what prep writes on a padding slot: direction (1, 1, 1)/sqrt3, energy 0."""
     ds = _head_batch(torch.full(n_out.shape, 0.1) if edep is None else edep, n_out)
     pad = n_out == 1
     ds.f.full[pad, 7, 0] = 0.0
@@ -56,7 +61,7 @@ def _phi(x: torch.Tensor) -> torch.Tensor:
 # ------------------------------------------------------------------ densities
 @pytest.mark.parametrize("s, q", [(0.5, 1.0), (1.7, 0.4), (0.2, 2.5)])
 def test_energy_density_is_the_derivative_of_the_sampler_cdf(s, q) -> None:
-    # P(U <= u) = P(|z| >= (atanh(1 - u) / s)^(1/q)) = 2 (1 - Phi(.)), U = 1 - tanh(s |z|^q)
+    # P(U <= u) = P(|z| >= (atanh(1 - u) / s)**(1/q)) = 2 (1 - Phi(.)), U = 1 - tanh(s |z|**q)
     cdf = lambda u: 2 * (1 - _phi((torch.atanh(1 - u) / s).pow(1 / q)))
     u = torch.linspace(0.02, 0.98, 49, dtype=torch.float64)
     h = 1e-6
@@ -69,7 +74,7 @@ def test_energy_density_is_the_derivative_of_the_sampler_cdf(s, q) -> None:
 
 @pytest.mark.parametrize("kap, pw", [(8.0, 1.0), (2.0, 0.5), (0.7, 2.5), (15.0, 0.3)])
 def test_angle_density_matches_the_sampler(kap, pw) -> None:
-    # P(W <= w) = P(|z| <= kappa atanh(w^(1/pw))) = erf(kappa atanh(w^(1/pw)) / sqrt2), W = theta / pi
+    # P(W <= w) = P(|z| <= kappa atanh(w**(1/pw))) = erf(kappa atanh(w**(1/pw)) / sqrt2), W = theta / pi
     cdf = lambda w: torch.erf(kap * torch.atanh(w.pow(1 / pw)) / 2 ** 0.5)
     w = torch.linspace(0.01, 0.95, 48, dtype=torch.float64)
     h = 1e-7
@@ -79,7 +84,7 @@ def test_angle_density_matches_the_sampler(kap, pw) -> None:
     w0 = torch.tensor([W0], dtype=torch.float64)
     cen = angles_logp(Angles(k[:2], p[:2]), torch.tensor([0.0, 1e-4], dtype=torch.float64))
     assert torch.allclose(cen, ((1 - 1e-3) * cdf(w0) + 1e-3 * W0).log().expand(2), rtol=1e-9)
-    # and the sampler draws that law
+    # and ``sample_directions`` samples this distribution
     torch.manual_seed(0)
     loc = torch.nn.functional.normalize(torch.tensor([[0.3, -0.5, 0.8]]), dim=-1)
     d = sample_directions(Angles(torch.tensor(kap), torch.tensor(pw)), loc, Noise((200000, 1), loc.device))
@@ -138,7 +143,7 @@ def test_a_lik_head_that_does_not_load_raises() -> None:
     sd = LEGOLtng(_config(base_head_hidden=[8, 4])).base_head.state_dict()
     with pytest.raises(ValueError, match="does not load"):
         LEGOLtng(_config(base_head=sd))
-    seq = LEGOLtng(_config(base_head_lik=False)).base_head.state_dict()   # a moment head's file
+    seq = LEGOLtng(_config(base_head_lik=False)).base_head.state_dict()   # a moment head's state dict
     with pytest.raises(ValueError, match="does not load"):
         LEGOLtng(_config(base_head=seq))
 
@@ -291,7 +296,7 @@ def test_lik_loss_terms_are_the_per_unit_means() -> None:
     edep = torch.tensor([0.1, 0.0, 0.3, 0.2, 0.0, 0.05])       # two zero-deposit events
     ds = _batch(n_out, edep)
     ds.f.full[:, 5, 4:7] = torch.nn.functional.normalize(torch.tensor([-0.8, 0.5, 0.3]), dim=-1)
-    ds.f.full[1, 6, 0] = 0.0                                   # two absorbed (atom) slots among the valid ones
+    ds.f.full[1, 6, 0] = 0.0                                   # two valid slots with energy 0 (the point mass at u = 0)
     ds.f.full[4, 7, 0] = 0.0
     got = _lik_parts(model, ds)
     sm, mu, sig, kap, pw, q = model.base_head_params(ds)
@@ -321,7 +326,7 @@ def test_lik_head_starts_at_the_priors_with_the_k0_fan_in_bound() -> None:
     assert torch.allclose(h.re.bias, torch.cat((full(torch.tensor(0.5).log().item()), full(0.0))))
     assert torch.equal(h.rd.bias, torch.zeros(2))
     assert torch.allclose(h.ra.bias, torch.cat((full(torch.tensor(8.0).log().item()), full(0.0))))
-    bound = (4 + n) ** -0.5                                 # the nonzero block's fan-in: one species' row
+    bound = (4 + n) ** -0.5                                 # fan-in of k0's nonzero block: one incoming species' inputs
     assert 0.9 * bound < h.k0.weight.abs().max() <= bound
 
 

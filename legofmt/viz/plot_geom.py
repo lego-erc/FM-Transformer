@@ -9,6 +9,8 @@ plt.rcParams.update({"axes.labelpad": 8, "font.serif": "Computer Modern", "axes.
 
 
 class PlotGeom:
+    """A 3-D axes that shows particles as points with momentum arrows inside the cube's edges."""
+
     def __init__(self, figure=None, ax=None):
         self.figure = figure
         self.ax = ax
@@ -32,9 +34,10 @@ class PlotGeom:
         arr_c: str = "y",
         lims: float = 1.4,
     ) -> plt.Axes:
-        """Plots (mom, pos) 6-vectors as quiver + scatter, or bare 3-vectors as scatter only.
+        """Plots ``coord``: (mom, pos) 6-vectors as points with arrows, 3-vectors as points only.
 
-        ``incoming`` is drawn at -pos.
+        ``incoming`` (mom, pos) is drawn in red at ``-pos``. ``arr_l``, ``arr_lw``, ``arr_lr`` and ``arr_c`` are the
+        arrows' length, line width, head ratio and colour; ``lims`` the axes' limits. Returns ``ax``.
         """
         if coord.shape[-1] == 6:
             vec, pts = coord.movedim(-1, 0).split(3, 0)
@@ -64,10 +67,11 @@ class PlotGeom:
         arr_lr: float = 0.1,
         arr_c: str = "y",
     ) -> plt.Axes:
+        """Draws the edges of the cube with corners at +-1 and plots ``coords`` into it (``plot_points``)."""
         v = torch.tensor([-1, 1])
         vertices = torch.cartesian_prod(v, v, v)
         cc_edges = vertices[torch.combinations(torch.arange(8), r=2)]
-        cc_edges = cc_edges[cc_edges.diff(dim=1).squeeze(1).abs().sum(dim=-1) == 2.0]  # pairs one edge apart
+        cc_edges = cc_edges[cc_edges.diff(dim=1).squeeze(1).abs().sum(dim=-1) == 2.0]  # the vertex pairs one edge apart
 
         ax = self.do_ax()
         ax.add_collection(Line3DCollection(cc_edges.cpu().numpy(), linestyles="--", colors="k", linewidths=1))

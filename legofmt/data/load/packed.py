@@ -2,20 +2,22 @@
 
     load_dataset       a dataset directory or file -> PackedData, on the model scale
     PackedData         the events; ``dataset[idx]`` pads a batch of them to a ``DataStruct``
-    EventView          some of a dataset's events, by index: the train / validation split, and
-    interacting_only   the events without the pass-through ones (``model_conf.exclude_passthrough``)
+    EventView          some of a dataset's events, by index: the train / validation split, ``interacting_only``
+    interacting_only   the view without the pass-through events (``model_conf.exclude_passthrough``)
+    is_packed          whether a loaded object is a packed dataset
 
-Everything but the particle tokens of a padded ``(f, m, am[, edep_layers])`` follows from a few per-event numbers:
+Everything in a padded ``(f, m, am)`` but its particle tokens follows from a few numbers per event and two template
+tokens:
 
 ```
-prefix tokens   [prefix[i, j], *prefix_token[1:]]
-am              one block of n_prefix + 1 + n_out tokens from token 0
-m               am, with its first n_prefix + 1 entries [0, 1, 0, ...]
-padded tokens   [pad_e0[i], *pad_token[1:]]
+prefix tokens    [prefix[i, j], *prefix_token[1:]]
+am               True on the first n_prefix + 1 + n_out tokens
+m                am, with its first n_prefix + 1 entries [0, 1, 0, ...]
+padding tokens   [pad_e0[i], *pad_token[1:]]
 ```
 
-Those values are copied when packing, so ``unpack`` gives the padded tensors back bit for bit; the packing
-(``legofmt.data.write.pack``) refuses anything else.
+Packing (``legofmt.data.write.pack``) copies those values, so ``unpack`` gives the padded tensors back bit for bit;
+it refuses tensors for which that would not hold.
 """
 
 from __future__ import annotations
@@ -46,19 +48,21 @@ def is_packed(obj) -> bool:
 class PackedData:
     """A prepped dataset of N events without its padding; ``unpack`` pads events back to ``L`` tokens.
 
-    Indexed by a batch of event indices at a time, it gives a ``DataStruct``. The per-event accessors (``lengths``,
-    ``n_out``, ``edep``, ...) answer without padding anything; ``data`` materialises the whole padded dataset.
+    ``dataset[idx]`` with a batch of event indices gives a ``DataStruct``. The per-event accessors (``lengths``,
+    ``n_out``, ``edep``, ...) answer without padding anything; ``data`` materialises the whole padded dataset. The
+    incoming energy, E_dep and ``edep_layers`` are in MeV as the file stores them, and on the model scale once
+    ``norm_e`` has run.
     """
 
     prefix: Tensor         # (N, n_prefix) channel 0 of the prefix tokens
-    tokens: Tensor         # (R, 8) every event's incoming and outgoing tokens, back to back
+    tokens: Tensor         # (R, 8) the incoming and outgoing tokens of all events, back to back
     offsets: Tensor        # (N + 1,) event i's tokens are tokens[offsets[i]:offsets[i + 1]]
-    pad_e0: Tensor         # (N,) channel 0 of an event's padded tokens (NaN: none)
-    pad_token: Tensor      # (8,) channels 1: of every padded token
-    prefix_token: Tensor   # (8,) channels 1: of every prefix token
-    n_prefix: int
-    L: int
-    edep_layers: Tensor | None = None
+    pad_e0: Tensor         # (N,) channel 0 of the event's padding tokens (NaN: the event has none)
+    pad_token: Tensor      # (8,) channels 1: of every padding token (channel 0: ``pad_e0``)
+    prefix_token: Tensor   # (8,) channels 1: of every prefix token (channel 0: ``prefix``)
+    n_prefix: int          # the number of prefix tokens
+    L: int                 # the tokens per event in the padded layout
+    edep_layers: Tensor | None = None   # (N, n_layers) the per-layer E_dep, when the dataset carries it
 
     def __len__(self) -> int:
         return self.prefix.shape[0]
@@ -69,7 +73,7 @@ class PackedData:
     @cached_property
     def data(self) -> DataStruct:
         """The whole dataset as padded tensors, materialised here, once."""
-        gb = len(self) * self.L * 41 / 1e9   # bytes per padded token: 8 * 4 + 8 + 1
+        gb = len(self) * self.L * 41 / 1e9   # bytes per token of the padded tensors: f 8 * 4, m 8, am 1
         warnings.warn(f"materialising the packed dataset as padded tensors (~{gb:.1f} GB); "
                       "index it or use its accessors instead", UserWarning, stacklevel=3)
         return DataStruct(*self.unpack())
@@ -78,12 +82,12 @@ class PackedData:
 
     @property
     def lengths(self) -> Tensor:
-        """Tokens per event in the padded layout (prefix + incoming + outgoing)."""
+        """Tokens per event in the padded layout (prefix + incoming + outgoing), (N,)."""
         return self.n_prefix + self.offsets.diff()
 
     @property
     def n_out(self) -> Tensor:
-        """Outgoing particles per event."""
+        """Outgoing particles per event, (N,)."""
         return self.offsets.diff() - 1
 
     @property
@@ -92,7 +96,7 @@ class PackedData:
         return self.prefix[:, 1]
 
     def cond(self, name: str) -> Tensor:
-        """Returns a conditioning scalar per event, (N,)."""
+        """Returns the conditioning scalar ``name`` of every event, (N,)."""
         return self.prefix[:, cond_slot(name)]
 
     @property
@@ -104,8 +108,11 @@ class PackedData:
         """Counts the outgoing particles of each species per event, ``(N, len(ptypes))`` int16.
 
         ```
-        counts[i, j] = number of event i's outgoing tokens (all but its first) with pdgid ptypes[j]
+        counts[i, j] = the number of event i's outgoing tokens with pdgid ptypes[j]
         ```
+
+        Raises:
+            ValueError: ``ptypes`` holds pdgid 0, which is the padding's.
         """
         ptypes = torch.as_tensor(ptypes)
         if (ptypes == 0).any():
@@ -131,7 +138,7 @@ class PackedData:
                           edep_layers=None if self.edep_layers is None else self.edep_layers[idx])
 
     def unpack(self, idx=slice(None)) -> tuple:
-        """Pads the events ``idx`` to full ``L``.
+        """Pads the events ``idx`` to ``L`` tokens.
 
         ```
         f[i, j]    = [prefix[i, j], *prefix_token[1:]]       j < n_prefix
@@ -142,10 +149,11 @@ class PackedData:
         ```
 
         Args:
-            idx: any index of the event axis; its shape becomes the batch shape.
+            idx: an index into the event axis (an int, a slice, an index tensor); what it selects is the batch shape.
 
         Returns:
-            ``(f, m, am)`` as they were packed, with ``edep_layers`` as a 4th tensor when the dataset carries it.
+            ``(f, m, am)``: (..., L, 8) float32, (..., L) int64 and (..., L) bool; the events' ``edep_layers`` as a
+            4th tensor when the dataset carries it.
         """
         P, L = self.n_prefix, self.L
         start = self.offsets[:-1][idx]
@@ -153,19 +161,19 @@ class PackedData:
         f = torch.empty(*lens.shape, L, 8)
         f[..., :P, :] = self.prefix_token                  # the prefix
         f[..., :P, 0] = self.prefix[idx]
-        f[..., P:, :] = self.pad_token                     # the rest padded ...
+        f[..., P:, :] = self.pad_token                     # the rest as padding ...
         f[..., P:, 0] = self.pad_e0[idx].unsqueeze(-1)
         am = torch.arange(L) < (lens + P).unsqueeze(-1)
-        valid = am[..., P:]                                # ... but for the event's tokens
+        valid = am[..., P:]                                # ... except the event's own tokens
         f[..., P:, :][valid] = self.tokens[(start.unsqueeze(-1) + torch.arange(L - P))[valid]]
         out = (f, loss_mask(am, P), am)
         return out if self.edep_layers is None else out + (self.edep_layers[idx],)
 
     def norm_e(self, prep) -> None:
-        """Applies ``prep.norm_e`` in place to all events at once, as the padded file gets it.
+        """Applies ``prep.norm_e`` to all events at once, in place: the result a padded file gets.
 
-        ``norm_e`` changes the prefix (the E_dep token), the incoming energy and ``edep_layers``: only the prefix and
-        incoming tokens are padded for it, and the three are written back.
+        ``norm_e`` changes the E_dep token (in the prefix), the incoming energy and ``edep_layers``, so only the prefix
+        and incoming tokens are padded for it, and those three are written back.
         """
         P = self.n_prefix
         f, _, _, *edep_layers = prep.norm_e(self._prefix_and_incoming(), inplace=True)
@@ -189,7 +197,7 @@ class PackedData:
         if not is_packed(d) or d.get("version") != PACKED_VERSION:
             raise ValueError(f"not a {PACKED_FORMAT} v{PACKED_VERSION} file: "
                              f"format={d.get('format')!r} version={d.get('version')!r}")
-        d = token_names(d)   # legacy: a file from before the token names
+        d = token_names(d)   # legacy: a file that names the fields ``rows`` / ``pad_row`` / ``prefix_row``
         return cls(**{k: v for k, v in d.items() if k not in ("format", "version")})
 
     # ---- plumbing ------------------------------------------------------------------------------------------------
@@ -204,7 +212,8 @@ class PackedData:
     def _prefix_and_incoming(self) -> tuple:
         """Returns every event's prefix and incoming tokens as a padded batch ``(f, None, None[, edep_layers])``.
 
-        The masks, which ``norm_e`` does not read, are left out: for 20M events they were another GiB.
+        ``f`` is (N, n_prefix + 1, 8). The masks are None: ``norm_e`` does not read them, and for 20M events they
+        take a GiB.
         """
         N, P = len(self), self.n_prefix
         v = torch.empty(N, P + 1, 8)
@@ -228,19 +237,20 @@ class EventView:
 
 
 def interacting_only(ds) -> EventView:
-    """Returns the view of ``ds`` without its pass-through events (no deposit, one particle out)."""
+    """Returns the view of ``ds`` without its pass-through events (no deposit and exactly one outgoing particle)."""
     return EventView(ds, ((ds.edep.flatten() > 0) | (ds.n_out != 1)).nonzero(as_tuple=True)[0])
 
 
 def load_dataset(data: str | dict | tuple, *, prep=None, frac=None, device="cpu", **cut_args) -> PackedData:
-    """Loads a dataset file, puts its stored channels on the model scale and keeps a fixed fraction of its events.
+    """Loads a dataset file, puts its MeV values on the model scale and keeps a fixed fraction of its events.
 
     Args:
         data:     a dataset directory (its packed file) or a ``.pt`` file, stored in MeV. Legacy: a padded file, the
             padded tensors in memory, or a raw dict (cut with ``cut_args``).
-        prep:     the ``DataPrep`` whose ``norm_e`` puts the stored channels on the model scale; None: read as stored.
-        frac:     keep a fixed random fraction of the events.
+        prep:     the ``DataPrep`` whose ``norm_e`` puts the MeV values on the model scale; None: read as stored.
+        frac:     the fraction of the events to keep, the same random subset every run; None: all of them.
         device:   of ``frac``'s generator.
+        cut_args: ``GetLEGOData``'s arguments, for a legacy raw dict; a packed file ignores them.
 
     Returns:
         The events; a legacy input gives a ``PaddedData``, which answers the same calls.
@@ -275,7 +285,7 @@ def _check_packed_args(from_file: bool, prep) -> None:
     """Raises if a packed dataset was not read from its file, or if ``prep`` has no ``norm_e``.
 
     Raises:
-        TypeError: either.
+        TypeError: in either case.
     """
     if not from_file:
         raise TypeError("a packed dataset is read from its file: pass the path")
@@ -288,7 +298,7 @@ def _dataset_file(directory: str) -> str:
 
     Raises:
         ValueError: the packed file is stale: it sits next to a padded one whose meta.json lacks ``"format": "packed"``
-            (a padded writer ran since).
+            (the padded file was written after it).
     """
     if directory.endswith(".pt"):
         return directory

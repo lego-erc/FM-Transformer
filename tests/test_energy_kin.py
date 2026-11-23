@@ -1,9 +1,10 @@
-"""Tests for the kinetic-energy channel (``energy_kin``).
+"""The kinetic-energy channel (``energy_kin``, the default).
 
-With ``energy_kin: true`` the energy scalar and the cutoff use the RAW kinetic
-energy Geant4 records in column 0 -- not the momentum norm, which saturates for
-hadrons (a 1 GeV-kinetic proton has |p| = 1696 MeV > max_energy) and silently
-clamps 11.8%% of outgoing particles. Default stays momentum-based.
+The energy channel and the cutoff use the kinetic energy Geant4 records in
+column 0 of a raw particle. With ``energy_kin: false`` (legacy) they use the
+momentum norm, which saturates for hadrons (a proton of 1 GeV kinetic energy
+has |p| = 1696 MeV > max_energy) and silently clamps 11.8% of the outgoing
+particles.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ def _scal(e: float) -> float:
 
 
 def _raw_token(t: float, m: float, direction, pos, pdgid: float):
-    """[E_kin, Px, Py, Pz, X, Y, Z, PDGID] as pyg4lego records it."""
+    """Returns a raw particle ``[E_kin, p (3), x (3), pdgid]`` as pyg4lego records it."""
     p = _p_of(t, m) if m > 0 else t
     return [t, *[p * d for d in direction], *pos, pdgid]
 
@@ -56,8 +57,8 @@ def _batch():
 
 
 def _prepped(energy_kin: bool | None):
-    """(stored file, loaded-and-normalised) -- prep() keeps the max_energy-dependent
-    channels in MeV; DataPrep.norm_e puts them on the model scale at load time."""
+    """Returns the tokens as a file stores them and as ``norm_e`` loads them: ``prep`` keeps the
+    channels that depend on ``max_energy`` in MeV, ``norm_e`` puts them on the model scale."""
     prep = _prep(energy_kin)
     stored = prep.prep(_batch())
     return stored[0], prep.norm_e(stored)[0]
@@ -65,13 +66,13 @@ def _prepped(energy_kin: bool | None):
 
 @pytest.mark.parametrize("energy_kin", [True, None], ids=["explicit", "default"])
 def test_energy_kin_scalar_from_kinetic_column(energy_kin) -> None:
-    """Kinetic is the default."""
+    """The energy channel holds the kinetic energy, with the key and without it: kinetic is the default."""
     stored, loaded = _prepped(energy_kin)
     assert abs(float(_F(stored).in_p[..., 0, 0]) - 100.0) < 1e-4      # MeV in the file
     got = float(_F(loaded).in_p[..., 0, 0])
     assert abs(got - _scal(100.0)) < 1e-5, (got, _scal(100.0))
-    # outgoing stores 1 - s_out/s_in in KINETIC scalars, and needs no conversion:
-    # log_range cancels in the ratio, so the column is max_energy-independent
+    # the outgoing energy is 1 - s_out / s_in of the kinetic energies and needs no conversion:
+    # log(max_energy / cutoff) cancels in the ratio, so the channel does not depend on max_energy
     want = 1 - _scal(20.0) / _scal(100.0)
     for tag, f in (("stored", stored), ("loaded", loaded)):
         got_o = float(_F(f).out_p[..., 0, 0])
@@ -87,7 +88,7 @@ def test_explicit_false_is_momentum_based() -> None:
 
 
 def test_energy_kin_exothermic_outgoing_clamps_to_zero() -> None:
-    # capture gamma T=30 above the incoming neutron's T=12: ratio clamps -> 0
+    # a capture gamma with T=30, above the incoming neutron's T=12: the ratio clamps at 1, the channel is 0
     cc = torch.tensor([[
         _raw_token(12.0, 939.57, (1, 0, 0), (-50, 0, 0), 2112),
         _raw_token(30.0, 0.0, (0, 1, 0), (0, 50, 0), 22),
@@ -138,7 +139,7 @@ def test_energy_kin_is_carried_from_meta_into_model_conf(tmp_path) -> None:
         "opt_conf": {"opt": "schedulefree", "lr": 1e-3},
     }
     # resolve_legoltng_config deep-copies its input, so the flag has to be
-    # checked on the resolved config -- which is what scripts/train.py saves
+    # checked on the resolved config, which is what scripts/train.py saves
     # into the checkpoint (`model.rc.config`).
     rc = resolve_legoltng_config(cfg)
     assert rc.config["model_conf"].get("energy_kin") is True, (
@@ -160,9 +161,9 @@ def test_edep_is_normalised_by_model_max_energy() -> None:
 
 
 def test_mult_energy_rescale_is_the_same_physical_energy() -> None:
-    """``GenerateOut`` normalises `cond` with the FLOW's max_energy, so a mult
-    trained at a different ceiling needs its column rebased. Pure change of
-    logarithmic base: the MeV it decodes to must not move."""
+    """``GenerateOut`` normalises ``cond`` with the flow's ``max_energy``, so a multiplicity
+    model trained at another ``max_energy`` needs its energy column rescaled. That is a pure
+    change of the logarithm's base: the MeV it decodes to must not change."""
     cut, max_flow, max_mult = 10.0, 2000.0, 1000.0
     p_flow = EnergyProjections(cutoff_mev=cut, max_energy=max_flow)
     p_mult = EnergyProjections(cutoff_mev=cut, max_energy=max_mult)
@@ -171,6 +172,6 @@ def test_mult_energy_rescale_is_the_same_physical_energy() -> None:
     assert torch.allclose(
         (p_flow.to_scalar_e(e) * scale).clamp(0.0, 1.0), p_mult.to_scalar_e(e), atol=1e-6,
     )
-    # the failure it prevents: 1 GeV read on the wrong ceiling is 548 MeV
+    # the failure it prevents: 1 GeV read with the other max_energy is 548 MeV
     off = p_flow.to_scalar_e(torch.tensor([1000.0]))
     assert abs(float(p_mult.cutoff * (max_mult / cut) ** off) - 548.0) < 2.0

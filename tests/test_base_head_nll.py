@@ -1,10 +1,10 @@
-"""The E_dep base fit must recover (mu, sigma) of a known logit-normal.
+"""The moment head's E_dep fit recovers ``(mu, sig)`` of a known logit-normal (legacy ``_base_moment_loss``).
 
-It is fitted by the logit-normal NLL, the proper scoring rule for exactly the density the sampler draws from
-(``E_dep = e_dep_max * sigmoid(mu + sig*z)``, the formula ``lego_eval/likelihood.py`` scores with). Matching two
-moments instead let the width enter only through a fourth-order-small term: sigma collapsed (base std 7x too narrow in
-``rp_fm_kin_020926``) and the fit was unstable. Zero-deposit events are excluded: the logit-normal has no atom, and
-the zero-deposit atom is the flow's job (``overflow_delta``).
+E_dep's prior is fitted by the logit-normal NLL, the density the sampler draws from
+(``E_dep = e_dep_max * sigmoid(mu + sig*z)``; ``lego_eval/likelihood.py`` scores with the same formula). When two
+moments are matched instead, the width enters only through a fourth-order term: ``sig`` collapses (base std 7x too
+narrow in ``rp_fm_kin_020926``) and the fit is unstable. Events without a deposit are excluded: the logit-normal has
+no point mass at 0, and that point mass is the flow's (``overflow_delta``).
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ def _config() -> dict:
 
 
 def _batch(edep: torch.Tensor) -> DataStruct:
-    """Fixed conditioning: an incoming photon, two outgoing particles in every event."""
+    """Returns a batch with fixed conditioning: an incoming photon and two outgoing particles in every event."""
     return _head_batch(edep, torch.full(edep.shape, 2), pid_in=22.0)
 
 
@@ -49,8 +49,8 @@ def test_pretrain_recovers_logit_normal_params() -> None:
 
 
 def test_pretraining_runs_every_requested_batch_past_one_epoch() -> None:
-    # base_pretrain_batches used to be zipped against ONE epoch of the loader: 1000 asked, 280 run on the
-    # 4.6M-event wsi64 set at bs 16384, so every shipped head was fitted on a single pass
+    # base_pretrain_batches counts batches, across epochs of the loader. Capped at one epoch, 1000 asked were 280 run
+    # on the 4.6M-event wsi64 set at bs 16384: a head fitted on a single pass.
     cfg = _config()
     cfg["config"]["model_conf"].update(base_pretrain_batches=5, base_pretrain_bs=4)
     cfg["config"]["dl_conf"]["num_workers"] = 0
@@ -65,8 +65,8 @@ def test_pretraining_runs_every_requested_batch_past_one_epoch() -> None:
 
 
 def test_pretraining_anneals_the_lr_over_the_requested_steps(monkeypatch) -> None:
-    # on the wsi64 E^-0.1 set a 128x2 head with lr 1e-2 cosine-annealed to 1e-4 over 4000 steps fitted the 1 GeV
-    # proton survivors to mu +0.016, sig 0.09 (shipped: +0.19, 0.27); held-out NLL -2.01 vs -0.79
+    # ``steps`` cosine-anneals the lr from 1e-2 to 1e-4. On the wsi64 E^-0.1 set a 128x2 head annealed over 4000 steps
+    # fitted the 1 GeV proton survivors to mu +0.016, sig 0.09 (shipped: +0.19, 0.27); held-out NLL -2.01 vs -0.79.
     made = []
 
     class Adam(torch.optim.Adam):

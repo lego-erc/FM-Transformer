@@ -1,7 +1,7 @@
-"""Characterisation tests for the old-artefact support paths (``legofmt/compat.py`` and the config migrations).
+"""The paths that keep old checkpoints and configs loading (``legofmt/compat.py`` and the config migrations).
 
-They fire only when loading checkpoints/configs of earlier vintages, which no other offline test does.
-``test_xt_compat.py`` covers the qk-norm scale path; this file covers the rest.
+They run only when an old checkpoint or config is loaded, which no other test does. ``test_xt_compat.py`` covers the
+qk-norm scale; this file covers the rest.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from test_helpers import _tiny_config
 # --- config keys -----------------------------------------------------------
 
 def test_ntokens_is_renamed_to_max_seq_l() -> None:
-    """Pre-refactor checkpoints spelled max_seq_l 'ntokens'."""
+    """Old checkpoints name ``max_seq_l`` ``ntokens``."""
     c = _tiny_config()
     ma = c["config"]["model_conf"]["model_args"]
     ma["ntokens"] = ma.pop("max_seq_l")
@@ -32,7 +32,7 @@ def test_ntokens_is_renamed_to_max_seq_l() -> None:
 
 
 def test_project_in_checkpoint_sets_dim_in_out() -> None:
-    """vf.project_in/out linears only rebuild if dim_in_out is set from h_dim."""
+    """A checkpoint with ``vf.project_in`` weights gets ``dim_in_out = h_dim``: only then does the field build them."""
     c = _tiny_config()
     c["state_dict"] = {"vf.project_in.weight": torch.zeros(16, 7)}
     rc = resolve_legoltng_config(c)
@@ -73,7 +73,7 @@ def _trafo() -> CFMTrafo_x:
 
 
 def test_legacy_param_names_are_remapped_on_load() -> None:
-    """Old checkpoints carry l_mask_/b_mask_/... instead of cond_w_mask/..."""
+    """Old checkpoints name the parameters ``l_mask_`` / ``b_mask_`` / ... instead of ``cond_w_mask`` / ..."""
     ref = _trafo()
     sd = ref.state_dict()
     inv = {new: old for old, new in _RENAMES.items()}
@@ -115,7 +115,7 @@ def _mult_ckpt(state_dict: dict) -> dict:
 
 
 def test_per_position_mult_heads_are_fused() -> None:
-    """Pre-fusion checkpoints stored proj_out_.{i} / embd_in_.{i} ModuleLists."""
+    """Old checkpoints hold one ``proj_out_.{i}`` / ``embd_in_.{i}`` module per position; they load as fused tensors."""
     n_pos, h, n_cls = 2, 8, 3
     ws = [torch.randn(n_cls, h) for _ in range(n_pos)]
     bs = [torch.randn(n_cls) for _ in range(n_pos)]

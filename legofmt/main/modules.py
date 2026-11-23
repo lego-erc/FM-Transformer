@@ -3,16 +3,22 @@
 The model is one class put together from mixins, one file each:
 
 ```
-TrainStep    main/train_step.py    the loss and the training step
-BaseDist     base/interface.py     the base distribution x_0 and its learned head
-Solvers      cfm/solvers.py        ODE solving, the likelihood, forward
-Legacy*      legofmt/legacy/       superseded paths, each reached by one dispatch line
+TrainStep                      main/train_step.py    the loss and the training step
+BaseDist                       base/interface.py     the base (the distribution of x_0) and the base head
+Solvers                        cfm/solvers.py        ODE solving, the likelihood, forward
+Legacy*, ScheduleFreeSwitch    legacy/               superseded paths, each reached by one dispatch line
 ```
 
-This file builds the parts, holds the token maps the mixins share (``convert_pdgids``: raw pdgid -> vocabulary
-index, ``species_idx``: the same for tokens that may already hold indices; ``_enter_frame`` / ``_leave_frame``: into
-and out of the frame the flow works in, built from ``_canon_dirs``, the canonical cube frame, and ``_zoom_dirs``, the
-zoomed polar angle) and the Lightning hooks. The config is checked where it is resolved (``legofmt/config.py``).
+This file builds the parts, and holds the Lightning hooks and the token maps the mixins share:
+
+```
+convert_pdgids                 raw pdgid -> vocabulary index
+species_idx                    the same, for tokens that may already hold indices
+_enter_frame, _leave_frame     into and out of the frame the flow works in: the canonical cube frame
+                               (_canon_dirs) and the zoomed polar angle (_zoom_dirs)
+```
+
+The config is checked where it is resolved (``legofmt/config.py``).
 """
 
 import torch
@@ -57,7 +63,7 @@ from legofmt.rng import SYM_FLOW, randint_like
 
 class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, BaseDist, Solvers, ScheduleFreeSwitch,
                ltng.LightningModule):
-    """The flow-matching model: the field, its base distribution, training and solving.
+    """The flow: the field, its base, the training step and the solvers.
 
     Args:
         full_config: ``{"config": ..., "state_dict": ...}`` as a checkpoint stores it, or the config alone.
@@ -67,14 +73,14 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
         super().__init__()
         self.rc = rc = resolve_legoltng_config(full_config)
 
-        # token types: one per prefix token, the incoming one, then one shared by every outgoing slot
+        # token types: one per prefix token, one for the incoming token, one shared by every outgoing slot
         types_embd = torch.arange(rc.max_seq_l, dtype=torch.int64).clamp(max=rc.n_prefix + 1).unsqueeze(0)
         self.register_buffer("pdgids_template", rc.pdgids_template)
         self.register_buffer("types_embd", types_embd)
         self.register_buffer("cuboid_unit", CubeTrace(rc.config["model_conf"].get("cuboid_dim")).cuboid_dim,
                              persistent=False)
 
-        # the parts, in parameter-initialisation order
+        # the parts; reordering them changes the initial weights a seed gives
         self.model       = self._build_model(rc)
         self.gen_base    = GenerateBase(rc.config)
         self.sym         = CubeSymmetry() if rc.canon_sym else None
@@ -83,7 +89,7 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
         # the frozen per-layer E_dep autoencoder: its K latents are one token of the field (model_args.lat_dim);
         # solve leaves the generated latents in _edep_latents
         self.edep_ae       = build_edep_ae(rc.edep_ae) if rc.edep_ae else None
-        self._edep_dp      = DataPrep(rc.config) if rc.edep_ae else None   # the layers' E_dep scale -> MeV
+        self._edep_dp      = DataPrep(rc.config) if rc.edep_ae else None   # E_dep and its layers: scales -> MeV
         self._edep_latents = None
         head = build_base_head(rc, self.gen_base)
         if head is not None:
@@ -105,16 +111,16 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
         self._init_reflow()   # legacy: the reflow teacher
 
     def _build_model(self, rc) -> nn.Module:
-        """Builds the field on the manifold (``LEGOLtngDirect`` swaps in its one-step model)."""
+        """Constructs the field between its two projections (``ProjectModel``); ``LEGOLtngDirect`` overrides this."""
         return ProjectModel(CFMTrafo_x(**rc.model_args), rc.manifold)
 
     # ---- token maps the mixins share ------------------------------------------------------------------------------
 
     @torch.no_grad()
     def convert_pdgids(self, pdgids: Tensor) -> Tensor:
-        """Maps raw pdgids to 1-based indices into ``pdgids_template``.
+        """Maps raw pdgids to vocabulary indices: 1-based positions in ``pdgids_template``, 0 for unknown or padding.
 
-        NaN, 0, ions (>= 1e8) and ids outside the vocabulary map to the unknown/pad index 0.
+        NaN, 0, ions (>= 1e8) and every pdgid that is not in ``pdgids_template`` map to 0.
         """
         pos, known = vocab_index(self.pdgids_template.to(pdgids.device), pdgids.contiguous())
         unknown = (pdgids == 0) | (pdgids >= 1e8) | ~known   # NaN is never known
@@ -123,8 +129,8 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
     def species_idx(self, pdgids: Tensor) -> Tensor:
         """Returns the tokens' vocabulary indices.
 
-        ``convert_pdgids`` of raw pdgids; the tokens' own values when they already are indices (``pdgid_is_idx``:
-        ``GenerateOut``'s batches).
+        ``convert_pdgids`` of raw pdgids, or ``pdgids`` itself where the tokens already hold indices
+        (``rc.pdgid_is_idx``, which ``GenerateOut`` sets for its batches).
         """
         return pdgids.long() if self.rc.pdgid_is_idx else self.convert_pdgids(pdgids)
 
@@ -133,20 +139,23 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
         """Returns the batch in the frame the flow works in, and the frame, for ``_leave_frame``.
 
         ```
-        canon_sym   every forward event rotated onto the canonical cube face; aug: a random cube symmetry g on top
+        canon_sym   every forward event rotated onto the canonical cube face; aug: a random symmetry g of that face
+                    on top
         dir_zoom    the outgoing polar angles zoomed about the incoming direction (only with zoom)
         ```
 
         Args:
             ds_t:   the batch.
-            zoom:   zoom the outgoing directions too: training's targets. In generation the flow generates them.
-            aug:    sample the cube symmetry ``g`` (``sym_aug``).
-            rng:    keyed draws (``legofmt.rng.EventRNG``) for ``g``, or None.
-            stream: the keyed draw's site.
+            zoom:   zoom the outgoing directions too. Training zooms its targets; generation does not, because the
+                flow generates them zoomed.
+            aug:    sample ``g`` (``sym_aug``).
+            rng:    keys ``g`` on the event (``legofmt.rng.EventRNG``), or None.
+            stream: the draw site's id (``legofmt.rng``), which a keyed ``g`` uses.
 
         Returns:
-            ``(ds_t, (face, g, fwd))``: the batch in the frame (its ``edep_layers`` dropped once rotated), each event's
-            entry face (None without ``canon_sym``), the symmetry (None without ``aug``), the forward events.
+            ``(ds_t, (face, g, fwd))``: the batch in the frame (without its ``edep_layers`` once it is rotated or
+            zoomed); (B,), each event's entry face (None without ``canon_sym``); (B,), each event's ``g`` in 0..7
+            (None without ``aug``); (B,), the forward events.
         """
         fwd = ds_t.m.fwd
         face = g = None
@@ -160,7 +169,7 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
         return ds_t, (face, g, fwd)
 
     def _leave_frame(self, x: Tensor, ds_t: DataStruct, frame: tuple) -> Tensor:
-        """Returns the tokens ``x`` (B, L, 8) out of the flow's frame: ``dir_zoom`` undone, then ``canon_sym``.
+        """Returns the tokens ``x`` (B, L, 7 or 8) out of the flow's frame: ``dir_zoom`` undone, then ``canon_sym``.
 
         ``ds_t`` and ``frame`` as ``_enter_frame`` returned them.
         """
@@ -173,14 +182,14 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
                     g: Tensor | None = None) -> Tensor:
         """Rotates the momentum and position directions onto the canonical cube face (``canon_sym``), or back.
 
-        Only the particle tokens of forward events turn.
+        Only the incoming and outgoing tokens of forward events are rotated.
 
         Args:
-            x:       (B, L, 8) tokens.
+            x:       (B, L, 7 or 8), the tokens, with or without the pdgid channel.
             face:    (B,), the face each event enters through (``CubeSymmetry.face_of``).
             fwd:     (B,), the forward events.
             inverse: rotate back from the canonical frame.
-            g:       (B,), a cube symmetry on top (``sym_aug``), or None.
+            g:       (B,), each event's symmetry of the canonical face, in 0..7 (``sym_aug``), or None.
 
         Returns:
             The rotated tokens.
@@ -194,15 +203,15 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
                    pdgids: Tensor | None = None) -> Tensor:
         """Zooms each outgoing momentum's polar angle about the incoming direction (``dir_zoom``), or back.
 
-        Only the real outgoing tokens of forward events change; with ``dir_zoom_nucleons_max`` only events with at
-        most that many nucleons out.
+        Only the real outgoing tokens of forward events change; with ``dir_zoom_nucleons_max`` only in events with
+        at most that many outgoing nucleons.
 
         Args:
-            x:       (B, L, 8) tokens.
-            am:      (B, L), the real tokens.
+            x:       (B, L, 7 or 8), the tokens, with or without the pdgid channel.
+            am:      (B, L), the real tokens (the attention mask).
             fwd:     (B,), the forward events.
             inverse: zoom back.
-            pdgids:  (B, L, 1), the tokens' species, for the nucleon count.
+            pdgids:  (B, L, 1), the tokens' species, for the nucleon count (``dir_zoom_nucleons_max``).
 
         Returns:
             The zoomed tokens.
@@ -216,12 +225,13 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
     # ---- Lightning: data --------------------------------------------------------------------------------------------
 
     def setup(self, stage: str | None = None) -> None:
-        """Loads the dataset once, splits off the validation events, and fits the base head if it needs it."""
+        """Loads the dataset once, splits off the validation events, and pretrains the base head if it is not frozen."""
         if getattr(self, "_val_ds", None) is not None:
             return
         full = load_dataset(**self.rc.dl_conf["lds_args"], prep=DataPrep(self.rc.config))
         pool = self.model.vf.cond_pool
-        if pool is not None and self.rc.state_dict is None:   # a fresh field: its scalars on this dataset's scale
+        # a fresh field with ``cond_pool`` standardises its conditioning scalars by this dataset's mean and std
+        if pool is not None and self.rc.state_dict is None:
             pool.standardise_by(torch.stack([full.cond(name) for name in self.rc.cond_scalars], dim=-1))
         if self.rc.config.get("model_conf", {}).get("exclude_passthrough", False):
             full = interacting_only(full)
@@ -238,7 +248,11 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
         return self._make_loader(self._val_ds, shuffle=False)
 
     def on_before_batch_transfer(self, batch, dataloader_idx: int):
-        """Cuts the batch to its length bucket before the upload; its lengths stay on the host for ``_len_pieces``."""
+        """Cuts the batch to its length bucket before it is moved to the device.
+
+        The events' lengths are kept on the CPU (``_cpu_lengths``): ``_len_pieces`` reads them there, without a GPU
+        sync.
+        """
         if self.rc.len_buckets is not None:
             self._cpu_lengths = batch.am.full.sum(1)
             batch = batch.trim(int(smallest_bucket(self._cpu_lengths.max(), self.rc.len_buckets)))
@@ -267,14 +281,17 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
     # ---- plumbing ---------------------------------------------------------------------------------------------------
 
     def _lv_floor(self, rc) -> Tensor:
-        """Returns the floor of each loss cell's log-variance: ``max_loss_weight``, the E_dep cell's its own."""
+        """Returns the floor of each loss cell's log-variance ``lv_c``, which caps its weight ``exp(-lv_c)``.
+
+        ``max_loss_weight`` for every cell but E_dep's, which has ``max_loss_weight_edep``.
+        """
         floor = torch.full_like(self.lv, rc.max_loss_weight).detach()
         if rc.edep_cell:
             floor[3] = rc.max_loss_weight_edep
         return floor
 
     def _trained_params(self, head: nn.Module | None) -> list:
-        """Returns the parameters the optimizer trains, in its order: the field's, the base head's, the loss weights."""
+        """Returns the parameters the optimizer trains, in order: the field's, the base head's, the loss weights."""
         params = list(self.model.parameters())
         if head is not None:
             params += [p for p in head.parameters() if p.requires_grad]
@@ -303,7 +320,7 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
         )
 
     def _make_loader(self, dataset, *, shuffle: bool, bs: int | None = None, batch_sampler=None) -> DataLoader:
-        """Returns ``make_loader`` with the ``dl_conf`` batch size, workers and seed."""
+        """Constructs the DataLoader (``make_loader``) with ``dl_conf``'s batch size, workers and seed."""
         return make_loader(dataset, bs=bs if bs is not None else self.rc.dl_conf.get("bs", 2**12), shuffle=shuffle,
                            num_workers=self.rc.dl_conf.get("num_workers", 4), batch_sampler=batch_sampler,
                            seed=loader_seed(self.rc.dl_conf))

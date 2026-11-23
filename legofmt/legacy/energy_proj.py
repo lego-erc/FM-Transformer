@@ -1,5 +1,5 @@
-"""The pre-token energy transforms of ``EnergyProjections``: 6-column ``(p, x)`` batches with the incoming particle
-in row 0, from before the padded token layout (they do not follow ``_F``).
+"""The pre-token energy transforms of ``EnergyProjections``: (B, N, 6) batches ``(p, x)`` of momenta and positions
+with the incoming particle at index 0, a layout older than the padded token layout (they do not follow ``_F``).
 
 Kept for lego_eval's ``EnergyProjections("in_frac_log")``; ``EnergyProjections`` derives from ``LegacyEnergyTransforms``
 so that its first positional argument stays ``norm_type``.
@@ -10,7 +10,17 @@ from torch import Tensor
 
 
 class LegacyEnergyTransforms:
-    """``norm_type`` names the transform a call applies: ``identity``, ``log``, ``in_frac`` or ``in_frac_log``."""
+    """The pre-token transforms of a (B, N, 6) batch ``(p, x)``; ``norm_type`` names the one a call applies.
+
+    ```
+    identity      p
+    log           p (1 - log|p|) / |p|            the direction of p, with length 1 - log|p|
+    in_frac       p_out / |p_in|                  the incoming momentum p_in itself is kept
+    in_frac_log   log of in_frac's p_out
+    ```
+
+    The positions ``x`` pass unchanged. A ``norm_type`` that is not a string selects ``identity``.
+    """
 
     def __init__(self, norm_type: str | bool = "in_frac"):
         self.func = getattr(self, norm_type) if isinstance(norm_type, str) else self.identity

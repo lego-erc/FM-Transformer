@@ -1,6 +1,8 @@
-"""BatchedMuon must reproduce pytorch_optimizer.Muon's update (Muon on >=2-D incl.
-flattened 4-D weights, AdamW on 1-D, decoupled weight decay) up to bf16
-Newton-Schulz rounding, on the parameter shapes the vector field actually has."""
+"""``BatchedMuon`` reproduces ``pytorch_optimizer.Muon``'s update on the parameter shapes the field has.
+
+Muon on >=2-D weights (4-D ones flattened), AdamW on 1-D ones, the weight decay decoupled or not; equal up to the
+bf16 rounding of the batched Newton-Schulz.
+"""
 
 import pytest
 import torch
@@ -58,8 +60,8 @@ def test_factory_groups_and_scheduler_scales_both_lrs():
 
 
 def test_freezing_a_matrix_after_the_first_step_does_not_break_the_shape_cache() -> None:
-    """The shape-group index is into the gradient-carrying subset; caching it
-    per group broke the moment a 2-D parameter lost its gradient after step 1."""
+    """The shape groups index the parameters that carry a gradient: a cache keyed on the parameter group
+    alone goes stale when a 2-D parameter loses its gradient after the first step, and indexes past the end."""
     a, b, c = (torch.nn.Parameter(torch.randn(8, 4)) for _ in range(3))
     opt = muon_factory([a, b, c], lr=1e-3)
     for p in (a, b, c):
@@ -68,5 +70,5 @@ def test_freezing_a_matrix_after_the_first_step_does_not_break_the_shape_cache()
     b.requires_grad_(False); b.grad = None          # freeze one of the three
     for p in (a, c):
         p.grad = torch.randn_like(p)
-    opt.step()                                       # raised IndexError before
+    opt.step()                                       # an IndexError with a cache per group
     assert torch.isfinite(a).all() and torch.isfinite(c).all()

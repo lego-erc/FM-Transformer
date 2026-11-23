@@ -1,11 +1,12 @@
-"""Midpoint gives its half-step stage the flow map and keeps v2 instantaneous.
+"""Tests for the step size ``d`` that the midpoint solver tells a flow-map field.
 
-Like the Euler steps (``d = dt``), the midpoint step passes ``v1``, which only advances ``dt/2``, ``d = dt/2``
-(``flow/kin_1step_040926``, rho=3, N=16383, 5 paired seeds: 4 NFE MMD 0.01850 -> 0.00822, 22 sigma; at 8 NFE
--1.1 sigma, as ``emb_d`` vanishes for ``d -> 0``). ``v2`` keeps ``d = 0``: it is evaluated at the midpoint but applied
-as a full step from ``x``, the source of the scheme's second order; ``d = dt`` would ask for the average velocity
-over a window shifted by half a step (~3x worse MMD at 4 and 8 NFE). No flag is needed: a checkpoint that never
-trained the flow map has ``step_gain`` at its zero init, so ``d`` cannot change its output -- asserted below.
+The half step ``v1`` advances ``dt / 2`` and is told ``d = dt / 2``, as an Euler step is told ``d = dt`` (4 NFE: MMD
+0.01850 -> 0.00822, 22 sigma over 5 paired seeds; 8 NFE: -1.1 sigma, as the step embedding vanishes for ``d -> 0``).
+The midpoint velocity ``v2`` keeps ``d = 0``: it is evaluated at the midpoint but applied as a full step from ``x``,
+which is where the scheme's second order comes from; ``d = dt`` would ask for the average velocity over a window
+shifted by half a step (~3x worse MMD at 4 and 8 NFE). No flag is needed: a checkpoint that never trained the flow
+map has ``step_gain`` at its zero initialisation, so ``d`` cannot change its output
+(``test_zero_step_gain_makes_d_inert``).
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ def _model() -> LEGOLtng:
 
 
 def _stage_d(method: str) -> list:
-    """The ``d`` each field evaluation of a step-0.5 solve receives."""
+    """Returns the ``d`` that each field evaluation of a solve with step size 0.5 receives."""
     m = _model()
     seen: list = []
     m.model.register_forward_pre_hook(lambda _mod, _a, kw: seen.append(kw.get("d", None)), with_kwargs=True)
@@ -47,7 +48,7 @@ def test_euler_still_passes_the_whole_step() -> None:
 
 
 def test_zero_step_gain_makes_d_inert() -> None:
-    """Why no flag is needed: without a trained flow map, `d` cannot move it."""
+    """Why no flag is needed: with ``step_gain`` at its zero initialisation, ``d`` cannot change the field's output."""
     m = _model()
     assert float(m.model.vf.step_gain.abs().max()) == 0.0, "step_gain must init to 0"
 

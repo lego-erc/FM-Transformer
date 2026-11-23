@@ -2,8 +2,8 @@
 
 ```
 incoming   e     = log(E / cutoff) / log(max_energy / cutoff)             held in [0, 1]
-outgoing   e_out = 1 - log(E_out / cutoff) / log(E_in / cutoff)           inverted, and relative to the incoming
-                                                                          particle (written by DataPrep.cc_trafo)
+outgoing   e_out = 1 - log(E_out / cutoff) / log(E_in / cutoff)           0 at the incoming energy, 1 at the cutoff
+                                                                          (written by ``DataPrep.cc_trafo``)
 back       E     = cutoff (max_energy / cutoff) ** e
            E_out = cutoff (max_energy / cutoff) ** ((1 - e_out) e)        e: the incoming scalar
 ```
@@ -22,8 +22,8 @@ class EnergyProjections(LegacyEnergyTransforms):
 
     Args:
         norm_type:  legacy: the pre-token transform a call applies.
-        cutoff_mev: the dataset's energy cutoff [MeV].
-        max_energy: the top of the incoming scale [MeV].
+        cutoff_mev: the dataset's energy cutoff [MeV]: the incoming scalar is 0 there.
+        max_energy: the energy at which the incoming scalar is 1 [MeV].
     """
 
     def __init__(self, norm_type: str | bool = "in_frac", cutoff_mev: float = 10.0, max_energy: float | None = None):
@@ -44,7 +44,7 @@ class EnergyProjections(LegacyEnergyTransforms):
         return e.clamp(0.0, 1.0)
 
     def from_scalar(self, dir_: Tensor, e: Tensor) -> Tensor:
-        """Inverts ``to_scalar``: the incoming scalar and a unit direction -> the momentum [MeV]."""
+        """Inverts ``to_scalar``: a unit direction and the incoming scalar -> the momentum [MeV]."""
         e = e.clamp(0.0, 1.0)
         return dir_ * (self.cutoff * (self.max_energy / self.cutoff) ** e)
 

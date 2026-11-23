@@ -11,12 +11,12 @@ def odesolver_sample(model, x_init: Tensor, time_grid: Tensor, step_size: float,
                      return_intermediates: bool, z: list, **extras) -> Tensor:
     """Integrates ``x_init`` along ``time_grid`` with flow_matching's ``ODESolver``.
 
-    ``Solvers._solve`` hands every method that is not one of its own here.
+    ``Solvers._solve_in_chunks`` hands every method that is not one of its own here.
 
     Args:
         model:                the field (``ProjectModel``).
         x_init:               (B, L, 7), the start.
-        time_grid:            the grid.
+        time_grid:            the time grid: ``[0, 1]``, or an explicit one.
         step_size:            the step of a fixed-step method.
         method:               a torchdiffeq method.
         return_intermediates: return the state at every grid point.

@@ -25,7 +25,7 @@ E_IN, E_OUT, E_DEP = 200.0, 50.0, 60.0
 
 
 def _in_scalar(max_energy: float = 300.0) -> float:
-    """The incoming energy on the model scale of a ``max_energy`` model."""
+    """Returns the incoming energy on the scale of a model with this ``max_energy``."""
     return math.log(E_IN / CUTOFF) / math.log(max_energy / CUTOFF)
 
 
@@ -41,7 +41,7 @@ def _raw(n=4):
 
 @pytest.fixture
 def dataset_dir(tmp_path):
-    """A dataset generated with no knowledge of any model's max_energy."""
+    """A dataset directory written by a ``DataPrep`` that knows no model's ``max_energy``."""
     ds = load_dataset(data=_raw(), prep=DataPrep(_prep_config()), cutoff_mev=CUTOFF).data
     torch.save((ds.f.full, ds.m.full, ds.am.full), tmp_path / "data_prepped.pt")
     (tmp_path / "meta.json").write_text(json.dumps({
@@ -83,15 +83,15 @@ def test_norm_e_does_not_mutate_the_caller(dataset_dir) -> None:
 
 @pytest.mark.parametrize("prep", [None, lambda x: x])
 def test_loading_without_a_dataprep_gives_the_file_verbatim(dataset_dir, prep) -> None:
-    # inspection / plotting callers legitimately want the stored tensors
+    # a caller that inspects or plots the file wants the stored tensors
     d = load_dataset(data=str(dataset_dir / "data_prepped.pt"), prep=prep).data
     assert float(_F(d.f.full).in_p[..., 0, 0][0]) == pytest.approx(E_IN)   # MeV
     assert float(_F(d.f.full).edep[0]) == pytest.approx(E_DEP)
 
 
 def test_setup_normalises_the_training_data(dataset_dir) -> None:
-    """LEGOLtng.setup must pass a DataPrep -- forgetting it is how the stored
-    file silently reached the model in MeV before."""
+    """``LEGOLtng.setup`` loads the dataset with a ``DataPrep``: without one the stored
+    file reaches the model in MeV, silently."""
     from legofmt.main.modules import LEGOLtng
     cfg = {"dl_conf": {"lds_args": {"data": str(dataset_dir), "cutoff_mev": CUTOFF},
                        "bs": 2, "num_workers": 0},
@@ -109,13 +109,13 @@ def test_setup_normalises_the_training_data(dataset_dir) -> None:
 
 
 # --- legacy files ---------------------------------------------------------
-# Datasets written before the split (everything up to rp_kin_*) already carry
-# the normalisation. norm_e detects that and passes them through, so they load
-# correctly instead of being normalised a second time (which collapses every
-# incoming energy to 0 -- log of an already-normalised value is negative).
+# Datasets written before this split (everything up to rp_kin_*) already carry
+# the normalisation. norm_e detects that and passes them through. Normalised a
+# second time, every incoming energy would collapse to 0: the log of an
+# already-normalised value is negative.
 
 def _legacy(dataset_dir, max_energy=300.0):
-    """The same events, stored the pre-split way: both channels normalised."""
+    """Returns the same events as a file from before the split stores them: both MeV channels normalised."""
     return DataPrep(_prep_config(max_energy=max_energy)).norm_e(
         torch.load(dataset_dir / "data_prepped.pt", weights_only=False))
 

@@ -2,7 +2,7 @@
 
 Positions are stored as the direction of ``x / cuboid_dim``, i.e. of the point on the
 unit cube the cuboid maps to, so every face pair keeps a third of the sphere whatever
-the aspect ratio; for a cube that is exactly the old ``dir(x)``. The slab below is
+the aspect ratio; for a cube that is exactly the direction of ``x``. The slab below is
 10 x 100 x 100 (half-sizes 5, 50, 50): a gun at (-5, 30, 0) firing along +x exits
 at (5, 30, 0), whose stored direction is that of (1, 0.6, 0).
 """
@@ -54,7 +54,8 @@ def _prep(cuboid_dim=None) -> DataPrep:
 
 
 def _slab_event() -> tuple[torch.Tensor, torch.Tensor]:
-    """Incoming at (-5, 30, 0) along +x; one outgoing exiting at (5, 40, 10)."""
+    """Returns ``(cc, e_kin)`` of one event: incoming at (-5, 30, 0) along +x, one outgoing particle exiting at
+    (5, 40, 10)."""
     mom = torch.tensor([[[150.0, 0.0, 0.0], [0.0, 80.0, 0.0]]])
     pos = torch.tensor([[[-5.0, 30.0, 0.0], [5.0, 40.0, 10.0]]])
     return torch.cat((mom, pos), -1), torch.tensor([[[150.0], [80.0]]])
@@ -123,14 +124,15 @@ def test_to_cuboid_maps_stored_directions_back_onto_the_box() -> None:
     cc, e_kin = _slab_event()
     pos = _prep(SLAB).cc_trafo(cc, e_kin=e_kin)[..., 4:7]
     out = GeomTrafos().to_cuboid(torch.cat((torch.zeros_like(pos), pos), -1), d=torch.tensor(SLAB) / 2)[..., 3:]
-    # the incoming is stored ray-traced to its exit (5, 30, 0)
+    # the incoming particle is stored at the point where its ray leaves the cuboid, (5, 30, 0)
     assert torch.allclose(out, torch.tensor([[[5.0, 30.0, 0.0], [5.0, 40.0, 10.0]]]), atol=1e-4)
 
 
 @pytest.mark.parametrize("pos_scale", [50.0, [5.0, 50.0, 50.0]])
 def test_mult_pos_scale_is_the_box_half_width(pos_scale) -> None:
-    """mm_conf.pos_scale (a scalar or per axis) is the d of to_cuboid: a stored slab exit (1, 0.6, 0) enters the input
-    projection at its physical point; it is no state_dict key, so older checkpoints load as they are."""
+    """``mm_conf.pos_scale`` (a scalar, or one value per axis) is the ``d`` of ``to_cuboid``: a stored slab exit
+    (1, 0.6, 0) enters the input projection at its physical point. It is not a ``state_dict`` key, so old checkpoints
+    load as they are."""
     m = MultModel({"state_dict": {}, "config": _pt_mult_config(pos_scale=pos_scale)})
     d = torch.as_tensor(pos_scale)
     assert torch.equal(m.rc.pos_scale, d) and torch.equal(m.pos_scale, d) and "pos_scale" not in m.state_dict()

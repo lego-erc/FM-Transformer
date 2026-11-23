@@ -1,16 +1,16 @@
-"""``base_conf.base_head_nout``: the outgoing set as base-head conditioning.
+"""``base_conf.base_head_nout``: the outgoing set as an input of the base head (the legacy moment head).
 
-E_dep is bimodal in the outgoing multiplicity, and the head was blind to it.
-Measured on ``rp_had_060926`` at the eval point (argon, rho ~ 10, size 100 mm,
-proton T > 950 MeV, chord ~ 1.0, n = 262): the ``n_out == 1`` pass-through
-branch is 46% of events with a relative width ``(q90-q10)/median`` of 0.121,
-against 1.816 for the mixture. One logit-normal cannot be both, so the fitted
-prior spanned the mixture and the flow -- which contracts the prior only ~5x --
-inherited the excess width.
+E_dep is bimodal in the outgoing multiplicity. Measured on ``rp_had_060926``
+(argon, rho ~ 10, size 100 mm, proton T > 950 MeV, chord ~ 1.0, n = 262): the
+``n_out == 1`` pass-through branch is 46% of the events and has a relative
+width ``(q90-q10)/median`` of 0.121, against 1.816 for the mixture. One
+logit-normal cannot hold both: a head that does not see the multiplicity fits a
+prior as wide as the mixture, and the flow, which narrows the prior only ~5x,
+keeps the excess width.
 
-The multiplicity and the per-pdgid composition are fixed before the flow runs
-(``gen_batch`` sizes the slots from the mult model), so this is conditioning
-the sampler genuinely has, not a leak of the target.
+The multiplicity and the composition per pdgid are fixed before the flow runs
+(``gen_batch`` sizes the slots from the multiplicity model's counts), so the
+sampler has this input at generation too: it does not leak the target.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ def test_in_features_grow_only_with_the_flag() -> None:
     off, on = LEGOLtng(_config(False)), LEGOLtng(_config(True))
     n_pdg = len(off.pdgids_template)
     assert _n_features(off) == 4 + n_pdg
-    # + log1p(n_out) + log1p(count) per class, classes = pdgids + pad
+    # + log1p(n_out) + log1p(count) per class; the classes are the pdgids and the unknown one
     assert _n_features(on) == 4 + n_pdg + n_pdg + 2
 
 
@@ -69,7 +69,7 @@ def test_a_head_saved_without_the_flag_is_not_mis_loaded() -> None:
 
 
 def test_nout_conditioning_separates_the_bimodal_edep() -> None:
-    """With the flag the head resolves the two modes; without it, it cannot."""
+    """With the flag the head resolves the two modes of E_dep; without the flag it predicts one prior for both."""
     got = {}
     for flag in (False, True):
         model = LEGOLtng(_config(flag))
@@ -90,8 +90,8 @@ def test_nout_conditioning_separates_the_bimodal_edep() -> None:
 
 
 def test_only_edep_sees_the_outgoing_set() -> None:
-    """sm_scale and kappa must not move with n_out: conditioning them rewrote the
-    outgoing priors 8x across branches and cost 2x on the direction losses."""
+    """``sm_scale`` and ``kappa`` must not depend on ``n_out``: when they did, the outgoing
+    priors differed 8x between the branches and the direction losses doubled."""
     model = LEGOLtng(_config(True))
     model.pretrain_base(_mixed(512, s) for s in range(150))
     s, mu, sig, kap, _, _ = model.base_head_params(_batch(torch.full((2,), 0.1), torch.tensor([1, 2])))

@@ -1,13 +1,12 @@
-"""Prepare raw shower data for training.
+"""Simulates the training events with pyg4lego and writes them as a dataset.
 
-The events are simulated in chunks, each its own process (Geant4 is seeded from
-std::random_device, so chunks are independent and may run in parallel), and merged once into
-``data_packed.pt`` (the prepped tensors without their padding, see ``legofmt.data.load.packed``)
-and ``meta.json`` (the metadata the fresh-training config path reads). OUT is the first CLI
-argument, or ``$LEGO_DATA_DIR`` if none is given:
+The events are simulated in chunks, each in its own process (Geant4 is seeded from std::random_device, so chunks are
+independent and may run in parallel), and merged once into ``data_packed.pt`` (the prepped tokens without their
+padding, see ``legofmt.data.load.packed``) and ``meta.json`` (what a fresh model's config is completed from). OUT is
+the first CLI argument, or ``$LEGO_DATA_DIR`` if none is given:
 
-    python gen_data.py [OUT]                     # all chunks, one after the other, then merge none
-    python gen_data.py OUT chunk I               # I = 0 .. n_chunks-1 -> OUT/chunks/chunk_I.pt (cut and compacted)
+    python gen_data.py [OUT]                     # all chunks, one after the other, then the merge, keeping every event
+    python gen_data.py OUT chunk I               # I = 0 .. n_chunks-1 -> OUT/chunks/chunk_I.pt (cut at the cutoff)
     python gen_data.py OUT merge stats           # outgoing multiplicity, and what each cap would drop
     python gen_data.py OUT merge MAX_OUT         # drop events with > MAX_OUT outgoing (none: keep all), prep, write
 """
@@ -85,18 +84,17 @@ if mode == "chunk":
 torch.set_num_threads(8)   # torch defaults to every core; on a busy box the extra threads only spin-wait
 manifold = [{"name": "euclidean", "dim": 1 }, {"name": "sphere", "dim": 3 }, {"name": "sphere", "dim": 3 }]
 
-# Per-event conditioning scalars, in slot order. Must match the per_event keys
-# emitted by pyg4lego, and be identical in the training config; otherwise the
-# extra scalars are silently dropped / the slot layout mismatches.
+# The per-event conditioning scalars, in the order of their tokens. They must be per_event keys of pyg4lego's output
+# and the same list as the training config's cond_scalars: otherwise scalars are dropped silently or the token layout
+# differs.
 cond_scalars = ["Density", "Z", "A", "Size"]
 
 # Edge lengths [Lx, Ly, Lz] of a cuboid target (only their ratios are used); None = cube.
 # Positions are stored as the direction of x / cuboid_dim, so the model needs the same value.
 cuboid_dim = None
 
-# max_energy is not used by DataPrep.prep -- the stored file keeps the
-# max_energy-dependent channels in MeV and DataPrep.norm_e converts them at
-# load time. It goes into meta.json only as the default for a fresh model.
+# DataPrep.prep does not read max_energy: the stored file keeps the values that depend on it in MeV, and
+# DataPrep.norm_e converts them at load time. max_energy goes into meta.json only, as the default of a fresh model.
 config = {
     "cutoff_mev": energy_min,
     "manifold": manifold,
@@ -106,12 +104,13 @@ config = {
 }
 prep = DataPrep(config)
 
-# One chunk in memory at a time (a 20M-event set went past 400 GB at once). DataPrep is per event, so prepping
-# chunk by chunk gives what one call over all events would.
+# One chunk in memory at a time (all at once, a 20M-event set takes more than 400 GB). DataPrep is per event, so
+# prepping chunk by chunk gives what one call over all events would.
 # mmap for the n_out pass only: it reads just the attention masks. The merge pass reads everything, and on
 # GPFS faulting a whole chunk in through mmap takes ~5x as long as a plain load.
 paths = [f"{out_dir}/chunks/chunk_{i}.pt" for i in range(n_chunks)]
-n_out = [torch.load(p, weights_only=False, mmap=True)[2].sum(1) - 1 for p in paths]   # outgoing per event; token 0 is the incoming
+# the outgoing particles per event: its valid tokens without the incoming one (token 0 of a chunk)
+n_out = [torch.load(p, weights_only=False, mmap=True)[2].sum(1) - 1 for p in paths]
 sizes = [len(n) for n in n_out]
 n_out = torch.cat(n_out)
 if arg == "stats":
@@ -131,7 +130,7 @@ for path, kp in zip(paths, keep.split(sizes)):
                   F.pad(pam[kp, :L], (0, w)),
                   {k: v[kp] for k, v in padd.items()}))
     del pf, pm, pam, padd
-    for p, e in DataPrep.edep_excess_max(parts[0]).items():   # per incoming pdgid: the E_dep cap's margin
+    for p, e in DataPrep.edep_excess_max(parts[0]).items():   # per incoming pdgid: the largest E_dep - E_in
         excess[p] = max(excess.get(p, 0.0), e)
     n_edep_layers = parts[3].shape[1] if len(parts) > 3 else None
     chunks.append(pack(*parts[:3], n_prefix=len(cond_scalars) + 1,
@@ -144,7 +143,7 @@ torch.save(packed.to_dict(), f"{out_dir}/data_packed.pt")
 ntokens, pids = packed.L, packed.tokens[:, -1]
 
 pdgids = pids.flatten().nan_to_num().unique()
-pdgids = pdgids[(0 < pdgids.abs()) & (pdgids.abs() < 100000000)].tolist() # filter pdgids
+pdgids = pdgids[(0 < pdgids.abs()) & (pdgids.abs() < 100000000)].tolist()   # no padding (0), no nuclei (10 digits)
 
 meta_dict = {
     "ntokens": ntokens,

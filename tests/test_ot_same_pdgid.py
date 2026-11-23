@@ -1,13 +1,10 @@
-"""OT coupling is restricted to within one particle species, always.
+"""The OT coupling pairs base and data slots within one species only.
 
-The OT cost is species-blind, so the training assignment can hand a slot's
-base draw to a *different* species -- systematically, since the leading
-particle always claims the most compatible draw. The (species, draw) pairs
-that never occur in training then occur constantly at sampling, where there is
-no assignment, and the field acts ~identity there (per-species energy spectra
-collapse toward the species-blind base; verified against abl_1gev_no_ot).
-Cross-species pairs are blocked in the cost the same way
-``inf_cond`` already blocks valid<->pad pairs.
+The cost itself does not see the species. Unrestricted, the assignment hands a slot's base sample to a slot of
+another species, and systematically so, since the leading particle claims the most compatible sample. The
+(species, base sample) pairs that training then never shows are the rule at generation, where there is no
+assignment, and the field is close to the identity on them: the per-species energy spectra collapse towards the
+species-blind base. Cross-species pairs are therefore blocked in the cost, like the pairs of a particle with padding.
 """
 
 from __future__ import annotations
@@ -23,14 +20,14 @@ from test_helpers import _fake_batch, _tiny_config
 
 
 def _batch() -> DataStruct:
-    """``_fake_batch`` with 4 outgoing slots, pdgids [22, 22, 211, 211], and the E_dep token generated."""
+    """Returns ``_fake_batch`` with 4 outgoing slots of pdgids [22, 22, 211, 211] and a generated E_dep token."""
     ds = _fake_batch(B=3, L=7, edep_generated=True)
     ds.f.full[:, 3:, 7] = torch.tensor([22.0, 22.0, 211.0, 211.0])
     return ds
 
 
 class _BruteLap:
-    """Exact CPU stand-in for torch_linear_assignment's batch_linear_assignment; records the cost."""
+    """An exact CPU stand-in for torch_linear_assignment's ``batch_linear_assignment`` that records the cost."""
 
     def __init__(self) -> None:
         self.cost = None

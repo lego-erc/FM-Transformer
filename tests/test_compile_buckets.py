@@ -1,9 +1,9 @@
-"""odeint_conf.compile_buckets: pad every solve chunk to one of a few batch
-sizes so a compiled velocity model only ever sees that many shapes.
+"""``odeint_conf.compile_buckets``: every chunk of a solve is padded to one of a
+few batch sizes, so a compiled field only ever sees that many shapes.
 
-The composition chain hands the flow a different particle count every round;
-without this, inductor recompiles per round until the dynamo cache limit drops
-it to eager (~135 s per leg for ~5 s of generation).
+A composition chain hands the flow a different number of events every round.
+Without the buckets inductor recompiles every round, until dynamo's cache limit
+drops the field to eager (~135 s per leg for ~5 s of generation).
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ def _recording(fn):
 
 
 @pytest.mark.parametrize("n, split_size, buckets, shapes", [
-    (5, None, None, [5]),          # no buckets: the old behaviour
+    (5, None, None, [5]),          # no buckets: the chunk as it is
     (5, None, [8, 16], [8]),       # a partial chunk is padded to the smallest fitting bucket
     (8, None, [8, 16], [8]),       # an exact bucket size is not padded
     (20, 16, [8, 16], [16, 8]),    # split, then bucket: exactly the bucket shapes
@@ -44,7 +44,7 @@ def test_chunks_run_at_their_bucket_and_come_back_unpadded(n, split_size, bucket
 
 
 def test_padding_tiles_the_chunks_own_rows() -> None:
-    """Padded rows must be valid events, not zeros or garbage."""
+    """The padding repeats the chunk's own rows: valid events, not zeros."""
     s = _solvers()
     x = torch.arange(3.0).view(3, 1, 1)
     captured = []
@@ -53,7 +53,7 @@ def test_padding_tiles_the_chunks_own_rows() -> None:
 
 
 def test_stacked_intermediates_are_sliced_on_the_batch_axis() -> None:
-    """cat_dim=-3 is the batch axis of a (T, B, L, C) intermediates stack."""
+    """``cat_dim=-3`` is the batch axis of a stack of intermediates (T, B, L, C)."""
     s = _solvers()
     x = torch.randn(5, 3, 2)
     out = s.chunked(lambda x: torch.stack([x, x * 2]), x, cat_dim=-3, buckets=[8])

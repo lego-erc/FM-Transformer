@@ -1,12 +1,12 @@
-"""``odeint_conf.compile_dynamic`` compiles the field as ONE symbolic-shape graph.
+"""``odeint_conf.fwd_compile`` compiles the field as one graph with symbolic shapes, unless ``compile_dynamic: false``.
 
 ``torch.compile(dynamic=True)`` alone is not enough: x-transformers masks the
-attention output with ``einx.where('b n, b n d, -> b n d', mask, out, 0.)`` and
-einx traces per concrete shape, which specialises batch and length, so every
-(length bucket, row bucket) shape still got its own graph. ``compat.dynamic_shape_attention``
-swaps that one pattern for the equivalent ``torch.where`` (feat/unify-models, measured
-2026-10-12: 15-22 s compile once, then any shape at no cost). The static grid compiled
-28 graphs in ~5 min for the 59x W/Si slab chain (2026-10-16).
+attention output with ``einx.where('b n, b n d, -> b n d', mask, out, 0.)``, and
+einx traces per concrete shape. That specialises batch size and length, so every
+(length bucket, ``compile_buckets`` batch size) shape still gets its own graph.
+``compat.dynamic_shape_attention`` swaps that one pattern for the equivalent
+``torch.where``: 15-22 s of compile once, then any shape at no cost. The static
+grid compiled 28 graphs in ~5 min for the 59x W/Si slab chain.
 """
 
 from __future__ import annotations
@@ -36,8 +36,9 @@ def test_patched_where_matches_einx_and_delegates_other_patterns() -> None:
                                                    (False, None, "reduce-overhead"),
                                                    (True, [2, 4, 8], "reduce-overhead"), (True, None, None)])
 def test_forward_compiles_static_or_dynamic(monkeypatch, dynamic: bool, buckets, mode) -> None:
-    """CUDA graphs only where the shapes are bounded: always for the static grid, for a dynamic graph only with
-    compile_buckets (every new row count would record and keep another graph)."""
+    """``reduce-overhead`` (CUDA graphs) only where the batch sizes are bounded: always for static graphs, for the
+    dynamic graph only with ``compile_buckets``. Without them every new row count would record and keep another
+    CUDA graph."""
     seen = {}
     monkeypatch.setattr(torch, "compile", lambda m, **k: seen.update(k) or m)
     model = _model(_config(odeint={"method": "euler", "step_size": 0.25, "fwd_compile": True,
@@ -48,7 +49,7 @@ def test_forward_compiles_static_or_dynamic(monkeypatch, dynamic: bool, buckets,
 
 
 def test_fwd_compile_is_dynamic_unless_static_is_asked_for(monkeypatch) -> None:
-    """A static graph recompiles on every new row count (the last chunk of a GenerateOut call: ~10 s each)."""
+    """A static graph recompiles on every new row count (the last chunk of a ``GenerateOut`` call: ~10 s each)."""
     seen = {}
     monkeypatch.setattr(torch, "compile", lambda m, **k: seen.update(k) or m)
     model = _model(_config(odeint={"method": "euler", "step_size": 0.25, "fwd_compile": True}))
@@ -61,8 +62,8 @@ def test_fwd_compile_is_dynamic_unless_static_is_asked_for(monkeypatch) -> None:
 
 def test_dynamic_graph_sees_no_shape_it_would_specialise_on(monkeypatch) -> None:
     """Dynamo still guards a symbolic graph on a 1-row batch (0/1 specialisation) and on the strides / storage
-    offset of its inputs; length buckets and split chunks are views. Either recompiles the whole flow (16 graphs and
-    ~4 min of compile for the W/Si slab chain, 2026-10-17), so the field must see >= 2 contiguous rows."""
+    offset of its inputs; length buckets and split chunks are views. Either guard recompiles the whole field (16
+    graphs and ~4 min of compile for the W/Si slab chain), so the field must see >= 2 contiguous rows."""
     monkeypatch.setattr(torch, "compile", lambda m, **k: m)
     model = _model(_config(odeint={"method": "euler", "step_size": 0.25, "fwd_compile": True, "compile_dynamic": True,
                                    "len_buckets": [4, 6], "split_size": 2}))

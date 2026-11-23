@@ -1,4 +1,4 @@
-"""``GenerateOut``: the multiplicity and the flow checkpoint put together into a generator.
+"""``GenerateOut``: a multiplicity checkpoint and a flow checkpoint put together into a generator.
 
 One call, in the order it runs:
 
@@ -6,16 +6,18 @@ One call, in the order it runs:
 cond      [*cond_scalars, mom * E_MeV (3), pos (3), pdgid] per incoming particle, as given;
           [*cond_scalars, e, dir (3), pos (3), pdgid] on the model's scales: the position ray-traced onto the cube,
           the energy split off the momentum (_model_cond); after the scalars it is the incoming token
-counts    the multiplicity model samples the pass-through flag and the per-species counts (sample_counts)
+counts    the multiplicity model samples the pass-through flag and the counts per species (sample_counts)
 slots     n_s = floor(c_s min(1, max_particles / C)),  C = sum_s c_s;  the slots the rounding frees take species
-          drawn ~ c_s (fit_counts); the slots fill species by species (slot_species)
-tokens    [*cond_scalars, E_dep, incoming, slot_1 .. slot_max_particles]: each slot a copy of the incoming token with
-          its species index, 0 when empty (build_batch)
+          sampled ~ c_s (fit_counts); the slots fill species by species (slot_species)
+tokens    [prefix, incoming, slot_1 .. slot_max_particles], the prefix being the conditioning scalar tokens and the
+          E_dep token (struct.py): each slot a copy of the incoming token with its species index, 0 when empty
+          (build_batch)
 flow      LEGOLtng.forward flows the base to the outgoing particles and E_dep; pass-through events skip it
-output    species indices back to pdgids; the E_dep token capped at norm(E_in + excess(species)) (_clamp_edep)
+output    species indices back to pdgids; the E_dep token capped at norm_edep_layer(E_in + excess(species))
+          (_clamp_edep); with model_conf.edep_ae the E_dep layers [MeV], left in self.edep_layers
 ```
 
-The momentum in ``cond`` must be energy-scaled, not unit-norm, or the event conditions on a ~1 MeV particle.
+The momentum in ``cond`` must be energy-scaled, not unit-norm, or the event is conditioned on a ~1 MeV particle.
 ``gen_model_w_g4_args`` takes Geant4-shaped arguments instead. The energy balance and exit consistency
 (``odeint_conf``) and ``GenerateIn``, the reverse direction, are :mod:`legofmt.legacy.generate`.
 """
@@ -45,10 +47,13 @@ def fit_counts(counts: torch.Tensor, max_particles: int, refill) -> torch.Tensor
     when C > M, the M - sum_s n_s slots the rounding frees take species sampled ~ c_s
     ```
 
+    An event without particles (C = 0) hands ``refill`` uniform weights, only so that it has weights to sample
+    from: none of its samples count.
+
     Args:
         counts:        (B, S), the sampled counts.
         max_particles: the slots per event.
-        refill:        samples ``(B, max_particles)`` species from (B, S) weights; any species when an event has none.
+        refill:        a function that samples (B, max_particles) species indices from (B, S) weights.
 
     Returns:
         (B, S), the fitted counts.
@@ -69,7 +74,8 @@ def slot_species(counts: torch.Tensor, max_particles: int) -> tuple[torch.Tensor
         max_particles: the slots per event.
 
     Returns:
-        ``(occupied, species)``, both (B, max_particles); slot j's species is the number of cumulative counts <= j.
+        ``(occupied, species)``, both (B, max_particles). Slot j's species, an index into the S species, is the
+        number of cumulative counts ``<= j``; on an empty slot it means nothing.
     """
     slots    = torch.arange(max_particles, device=counts.device)
     occupied = slots < counts.sum(-1, keepdim=True)
@@ -84,8 +90,15 @@ def mult_energy_scale(mult_conf: dict, rc) -> float:
     scale = log(max_energy / cutoff) / log(mm_max_energy / cutoff)       1 when the two max_energy agree
     ```
 
+    The flow's energy scalar times ``scale`` is the same energy on the multiplicity model's scale. Warns when the two
+    ``cutoff_mev`` differ: the factor assumes one cutoff.
+
+    Args:
+        mult_conf: the multiplicity checkpoint, ``{"config": ..., "state_dict": ...}``.
+        rc:        the flow's resolved config.
+
     Raises:
-        ValueError: the multiplicity model's ``cond_scalars`` are not a prefix of the flow's.
+        ValueError: the multiplicity model's ``cond_scalars`` are not the first of the flow's, in order.
     """
     mm = mult_conf["config"]["mm_conf"]
     mm_cond = mm.get("cond_scalars")
@@ -107,10 +120,11 @@ class GenerateOut(torch.nn.Module):
     """The generator: incoming particles in, outgoing particles and E_dep out.
 
     Args:
-        flow_conf_path:       the flow checkpoint.
-        mult_conf_path:       the multiplicity checkpoint.
+        flow_conf_path:       the path of the flow checkpoint.
+        mult_conf_path:       the path of the multiplicity checkpoint.
         device:               where both models run.
-        couple_in_out_pdgids: let the flow generate only the incoming species (``odeint_conf.filter_pdgid``).
+        couple_in_out_pdgids: keep only the outgoing particles whose species is one of the multiplicity model's
+            incoming species ``ptypes_in``; the others come back NaN with pdgid 0 (``odeint_conf.filter_pdgid``).
     """
 
     flow_cls = LEGOLtng
@@ -128,43 +142,48 @@ class GenerateOut(torch.nn.Module):
         self.max_seq_l  = mc["model_args"]["max_seq_l"]
         self.pdgids     = mc["pdgids"].to(device)
 
-        # the multiplicity model; its conditioning is a prefix of the flow's scalars, its energy scalar rescaled
+        # the multiplicity model; its conditioning scalars are the first of the flow's, its energy scalar is rescaled
         mult_conf     = torch.load(mult_conf_path, map_location=device, weights_only=False)
         self.gen_mult = MultModel(mult_conf).to(device).eval()   # in training mode its dropout enters the samples
         mm = mult_conf["config"]["mm_conf"]
         self._compile_mult(mm)
         self.pdgid_in     = mm["ptypes_in"].to(device)
         self.ptypes       = mm["ptypes"].to(device)
-        self.ptype_idx, self.ptype_in_mask = vocab_index(self.ptypes, self.pdgids)   # the flow's species it counts
+        # per species of the flow: its column in the sampled counts, and whether the multiplicity model counts it
+        self.ptype_idx, self.ptype_in_mask = vocab_index(self.ptypes, self.pdgids)
         self.n_mult_cond  = (len(mm["cond_scalars"]) if mm.get("cond_scalars")
                              else self.gen_mult.proj_in_.in_features - 7)
         self.mult_e_scale = mult_energy_scale(mult_conf, rc)
 
-        set_layout(self.cond_names)
+        set_layout(self.cond_names)   # back to the flow's layout: resolving the multiplicity config set its own
         if couple_in_out_pdgids:
             rc.odeint_conf["filter_pdgid"] = self.pdgid_in
 
-        # the scales, the flow's own DataPrep's: the E_dep token's (for the E_in cap), the energies, the incoming
-        # position's ray trace
+        # the flow's DataPrep: the E_dep scales (dp), the energy scalars (pen), the incoming position's ray trace
+        # (proj_ray)
         self.dp         = DataPrep(flow_conf)
         self.pen        = self.dp.pen
         self.proj_ray   = self.dp.ppa
-        self.cuboid_dim = self.proj_ray.cuboid_dim   # kept apart: no_raytrace models stub proj_ray
+        # cuboid_dim is kept apart from proj_ray: for a model trained without the ray trace, callers stub proj_ray
+        self.cuboid_dim = self.proj_ray.cuboid_dim
 
     def __call__(self, cond: torch.Tensor, prepped: bool = False, passthrough: bool = True, rng=None):
         """Generates the outgoing particles and E_dep of a batch of incoming particles.
 
         Args:
-            cond:        ``[B, n_cond + 7] = [*cond_scalars, mom * E_MeV (3), pos (3), pdgid]``; the momentum must be
+            cond:        (B, n_cond + 7), ``[*cond_scalars, mom * E_MeV (3), pos (3), pdgid]``; the momentum must be
                 energy-scaled.
-            prepped:     skip the ray-trace and the energy split.
-            passthrough: False never fires the pass-through token: the interacting branch, for a caller that drew the
-                pass-through itself (``passthrough_prob``).
+            prepped:     ``cond`` is on the model's scales already, (B, n_cond + 8) (``_model_cond``): no ray trace
+                and no energy split.
+            passthrough: False: no event is sampled as a pass-through. For a caller that sampled the pass-through
+                flag itself (``passthrough_prob``) and generates the interacting events.
             rng:         makes every random draw a function of the event's key: independent of the batch, and shared by
                 two models run on the same keys (``legofmt.rng.EventRNG``, one unique key per event).
 
         Returns:
-            ``(sols, mask, attn_mask)`` in the ``(B, L, 8)`` layout.
+            ``(sols, mask, attn_mask)``: the tokens (B, L, 8) on the model's scales, the pdgid in the last channel;
+            the loss mask (B, L), 1 on the generated tokens; the attention mask (B, L), True on the real tokens.
+            With ``model_conf.edep_ae`` the E_dep layers [MeV] are left in ``self.edep_layers`` (None without).
 
         Raises:
             ValueError: ``rng`` does not hold one key per event.
@@ -186,7 +205,7 @@ class GenerateOut(torch.nn.Module):
         return sols, mask, attn_mask
 
     def _model_cond(self, cond: torch.Tensor, prepped: bool) -> torch.Tensor:
-        """Returns ``cond`` on the model's scales (module docstring); ``prepped`` input already is."""
+        """Returns ``cond`` on the model's scales (module docstring); a ``prepped`` one is only copied."""
         if prepped:
             return cond.clone()
         scalars, mom, pos, pid = cond.split((self.n_cond, 3, 3, 1), dim=-1)
@@ -197,19 +216,23 @@ class GenerateOut(torch.nn.Module):
     def _clamp_edep(self, edep: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor) -> torch.Tensor:
         """Caps the E_dep token at ``norm_edep_layer(E_in + excess(species))``, out of place.
 
-        Only the layer-scale token is capped (a margin token is capped by construction). The excess is the training
-        data's largest (``model_conf.edep_excess_mev``), or for checkpoints from before it the hand-set
-        ``legacy.norm.HAND_SET_EXCESS_MEV``; a species without one stays uncapped. Out of place, so the density design
-        can differentiate through it.
+        Only a token on the layer scale is capped; a margin token is capped by its scale. The excess is the training
+        data's largest ``edep - e_in`` per incoming species (``model_conf.edep_excess_mev``); a checkpoint from before
+        that key takes the hand-set ``legacy.norm.HAND_SET_EXCESS_MEV``. A species without an excess stays uncapped.
+        Out of place, so that the density design can differentiate through it.
+
+        ``edep`` is (B,), the generated E_dep token; ``e_in`` [MeV] and ``pid_in`` are (B,), the incoming energy and
+        pdgid.
         """
         excess, capped = self._edep_excess(pid_in, e_in)
         cap = self.dp.norm_edep_layer(e_in + excess).to(edep)
         return torch.where(capped, torch.minimum(edep, cap), edep)
 
     def _edep_layers(self, sols, pt_mask, e_in, pid_in, rng):
-        """Returns the per-layer E_dep [MeV] the edep_ae decodes from the final E_dep token (None without an AE).
+        """Returns the E_dep layers [MeV], (B, n_layers); None without an edep_ae.
 
-        Pass-through events deposit nothing.
+        The edep_ae samples them from the latents the flow generated (``model._edep_latents``) and the event's total
+        E_dep. A pass-through event deposits nothing.
         """
         ae = self.model.edep_ae
         if ae is None:
@@ -228,11 +251,12 @@ class GenerateOut(torch.nn.Module):
 
     def sample_counts(self, cond: torch.Tensor, passthrough: bool = True,
                       rng=None) -> tuple[torch.Tensor, torch.Tensor]:
-        """Samples the multiplicity model for ``cond`` (model layout).
+        """Samples the multiplicity model for ``cond``, (B, n_cond + 8), on the model's scales.
 
         Returns:
-            ``(pt_mask, counts)``: the pass-through flags, and the raw per-slot counts as ``MultModel.forward``
-            returns them (``MultModel.log_prob`` scores them).
+            ``(pt_mask, counts)``: (B,), the pass-through flags (all False with ``passthrough=False``); (B, S), the
+            counts per species of the multiplicity model's ``ptypes``, as ``MultModel.forward`` returns and
+            ``MultModel.log_prob`` scores them.
         """
         mult_in, pdgid_in_idx = self._mult_in(cond)
         if passthrough:
@@ -243,18 +267,18 @@ class GenerateOut(torch.nn.Module):
         return pt_mask, counts
 
     def passthrough_prob(self, cond: torch.Tensor, prepped: bool = False) -> torch.Tensor:
-        """Returns P(the incoming particle passes through unchanged).
+        """Returns each event's probability, (B,), that the incoming particle passes through unchanged.
 
-        The probability the pass-through token's draw uses, 0 for species the head does not cover. ``cond`` as for
-        ``__call__``.
+        The pass-through flag is sampled with this probability; it is 0 for a species the pass-through head does not
+        cover. ``cond`` and ``prepped`` as for ``__call__``.
         """
         return self.gen_mult.passthrough_prob(*self._mult_in(self._model_cond(cond, prepped)))
 
     def _mult_in(self, cond: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns the multiplicity model's input for ``cond`` and the incoming species' index into ``ptypes_in``.
 
-        The input is the multiplicity model's scalars and the incoming particle without its pdgid; its energy scalar
-        is rescaled to the multiplicity model's ``max_energy`` (``mult_e_scale``).
+        The input, (B, n_mult_cond + 7), is the multiplicity model's conditioning scalars and the incoming token without
+        its pdgid; the energy scalar is rescaled to the multiplicity model's ``max_energy`` (``mult_e_scale``).
 
         Raises:
             ValueError: an incoming species the multiplicity model was not trained on.
@@ -270,32 +294,32 @@ class GenerateOut(torch.nn.Module):
     def build_batch(self, cond: torch.Tensor, pt_mask: torch.Tensor, counts: torch.Tensor, rng=None):
         """Builds the flow's padded tokens for the sampled counts (module docstring: slots, tokens).
 
-        ``mask`` is 1 on the generated tokens (E_dep and the occupied slots), ``attn_mask`` True on the prefix, the
-        incoming token and the occupied slots. A pass-through event generates nothing, deposits nothing, and every slot
-        holds the full-energy atom.
+        ``mask`` is 1 on the generated tokens (E_dep and the occupied slots); ``attn_mask`` is True on the prefix, the
+        incoming token and the occupied slots. A pass-through event generates nothing and deposits nothing, and its
+        slots hold the outgoing energy 0, which stands for the full incoming energy.
 
         Args:
-            cond:    (B, n_cond + 8), the model-layout conditioning.
+            cond:    (B, n_cond + 8), ``cond`` on the model's scales.
             pt_mask: (B,), the pass-through events.
-            counts:  the raw per-slot counts (``sample_counts``).
-            rng:     keyed draws (``legofmt.rng.EventRNG``), or None.
+            counts:  (B, S), the counts per species of the multiplicity model's ``ptypes`` (``sample_counts``).
+            rng:     keys ``fit_counts``' refill on the event (``legofmt.rng.EventRNG``), or None.
 
         Returns:
-            ``(cond_fm, mask, attn_mask)``.
+            ``(cond_fm, mask, attn_mask)``: the tokens (B, max_seq_l, 8) and the two masks (B, max_seq_l).
         """
         n_slots = self.max_seq_l - (self.n_prefix + 1)
         slots   = torch.arange(n_slots, device=counts.device)
-        counts  = fit_counts(counts[:, self.ptype_idx] * self.ptype_in_mask,      # the flow's species
+        counts  = fit_counts(counts[:, self.ptype_idx] * self.ptype_in_mask,      # per species of the flow
                              n_slots, lambda w: categorical(w, rng, REFILL, slots))
         occupied, species = slot_species(counts, n_slots)
 
-        tok = _F(self._tokens(cond, n_slots))   # [cond scalars, E_dep, incoming, a copy of the incoming per slot]
+        tok = _F(self._tokens(cond, n_slots))   # [prefix, incoming, a copy of the incoming token per slot]
         tok.out_pid.copy_(occupied * (species + 1))                        # 0: an empty slot
         attn_mask = F.pad(occupied, (self.n_prefix + 1, 0), value=True)   # the prefix, the incoming, occupied slots
         mask      = loss_mask(attn_mask, self.n_prefix)                    # E_dep and the occupied slots
 
         tok.edep.masked_fill_(pt_mask, 0.0)                      # a pass-through event deposits nothing,
-        tok.out_energy.masked_fill_(pt_mask.unsqueeze(1), 0.0)   # every slot holds the full-energy atom,
+        tok.out_energy.masked_fill_(pt_mask.unsqueeze(1), 0.0)   # its slots hold the full incoming energy (0),
         mask.masked_fill_(pt_mask.unsqueeze(1), 0)               # and nothing is generated
         return tok.full, mask, attn_mask
 
@@ -305,13 +329,35 @@ class GenerateOut(torch.nn.Module):
                             rng=None):
         """Generates events from Geant4-shaped arguments.
 
-        Broadcasts the per-gun arguments to ``B * n`` events. ``rng`` as in ``__call__``, with ``B * n`` keys
-        (gun-major, as ``repeat_interleave`` orders the events).
+        Each argument has 1 or B rows. Row b is generated ``n`` times: ``B * n`` events, ordered by row
+        (``repeat_interleave``).
+
+        Args:
+            n:           the events per row.
+            pos:         (1 or B, 3), the incoming position.
+            mom:         (1 or B, 3), the incoming direction; its length is ignored.
+            energy:      (1 or B,), the incoming energy [MeV].
+            density:     (1 or B,), the conditioning scalar ``Density``.
+            size:        (1 or B,), the conditioning scalar ``Size``.
+            pdgids:      (1 or B,), the incoming species.
+            Z, A:        (1 or B,), the conditioning scalars ``Z`` and ``A``; None unless the checkpoint's
+                ``cond_scalars`` name them.
+            passthrough: as in ``__call__``.
+            rng:         as in ``__call__``, with ``B * n`` keys in the events' order.
 
         Returns:
-            ``{per_event, per_particle, per_voxel}`` in *model* normalisation: ``per_event["E_dep"]`` is the normalised
-                scalar, not MeV, always on the ``norm_edep_layer`` scale that callers decode with ``edep_log_min``
-                (a ``model_conf.edep_margin`` token is re-encoded on it here).
+            ``{per_event, per_particle, per_voxel}`` on the model's scales:
+
+            ```
+            per_event      E_dep, and each conditioning scalar by its name, (B * n,) each
+            per_particle   Incoming (B * n, 1, 8) and Outgoing (B * n, n_slots, 8), the tokens
+            per_voxel      E_dep, empty: (B * n, 0, 4)
+            per_slab       E_dep (B * n, n_layers), the E_dep layers (only with model_conf.edep_ae)
+            ```
+
+            ``per_event["E_dep"]`` is the normalised token, not MeV, and always on the ``norm_edep_layer`` scale,
+            which callers decode with ``edep_log_min`` (a ``model_conf.edep_margin`` token is re-encoded on it here);
+            the E_dep layers are on the same scale.
         """
         cond = self._g4_cond(n, pos, mom, energy, density, size, pdgids, Z, A)
         sols, _, _ = self(cond, passthrough=passthrough, rng=rng)
@@ -321,7 +367,7 @@ class GenerateOut(torch.nn.Module):
             "per_particle": {"Incoming": s.in_p, "Outgoing": s.out_p},
             "per_voxel": {"E_dep": sols.new_empty(sols.shape[0], 0, 4)},
         }
-        if self.edep_layers is not None:  # geom/slab_calo's own group, in model normalisation like E_dep
+        if self.edep_layers is not None:  # the slab geometry's own group, on the layer scale like E_dep
             out["per_slab"] = {"E_dep": self.dp.norm_edep_layer(self.edep_layers)}
         return out
 
@@ -334,15 +380,15 @@ class GenerateOut(torch.nn.Module):
     def _compile_mult(self, mm: dict) -> None:
         """Compiles the multiplicity model's trunk when ``mm_conf.fwd_compile`` asks for it.
 
-        Dynamic: the KV-cache decode grows the cache every step, so a static graph recompiled per step until the
-        recompile limit sent it to eager -- 115 vs 68 ms per 8192 events (plateSi pair).
+        With ``dynamic=True``: the KV-cache decode grows the cache at every slot, so a static graph recompiles per slot
+        until the recompile limit sends it to eager (115 ms per 8192 events, against 68 ms for the dynamic graph).
         """
         if mm.get("fwd_compile", False) and not is_compiled(self.gen_mult.model):
             dynamic_shape_attention()
             self.gen_mult.model = torch.compile(self.gen_mult.model, dynamic=True)
 
     def _incoming_energy_pid(self, cond: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Returns the incoming particle's energy [MeV] and pdgid, (B,) each, from the model-layout ``cond``."""
+        """Returns the incoming particle's energy [MeV] and pdgid, (B,) each, from ``cond`` on the model's scales."""
         _, e, dir_, _, pid = cond.split((self.n_cond, 1, 3, 3, 1), dim=-1)
         return self.pen.from_scalar(dir_, e).norm(dim=-1), pid[:, 0].long()
 
@@ -355,7 +401,7 @@ class GenerateOut(torch.nn.Module):
         """Returns the incoming species' index into the multiplicity model's ``ptypes_in``.
 
         Raises:
-            ValueError: a species it was not trained on.
+            ValueError: a species that is not in ``ptypes_in``.
         """
         pdgid_in_idx, known = vocab_index(self.pdgid_in, pdgid_in)
         if not known.all():
@@ -366,7 +412,7 @@ class GenerateOut(torch.nn.Module):
         """Runs the flow on the events that interact; a pass-through event keeps its tokens as built.
 
         Returns:
-            ``(sols, mask, attn_mask)``.
+            ``(sols, mask, attn_mask)``, as ``LEGOLtng.forward`` returns them.
         """
         if pt_mask.all():
             return cond_fm.clone(), mask, attn_mask
@@ -383,15 +429,19 @@ class GenerateOut(torch.nn.Module):
         return F.pad(self.pdgids.to(idx.dtype), (1, 0))[idx.long()]
 
     def _edep_excess(self, pid_in: torch.Tensor, e_in: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Returns each event's E_dep excess [MeV] by its incoming species, and whether that species is capped."""
+        """Returns each event's E_dep excess [MeV] by its incoming species, and whether its E_dep token is capped.
+
+        Capped: the species has an excess, and its token is on the layer scale (not the margin scale).
+        """
         excess, known = species_values(self.dp.edep_excess_mev or HAND_SET_EXCESS_MEV, pid_in, e_in)   # legacy
         return excess, known & ~self.dp.edep_margin_mask(pid_in)
 
     def _tokens(self, cond: torch.Tensor, n_slots: int) -> torch.Tensor:
         """Returns the tokens before the slots get their species, (B, n_prefix + 1 + n_slots, 8).
 
-        The cond scalars in channel 0 of their prefix tokens, every prefix token's directions the (1, 1, 1) filler;
-        the incoming token, its pdgid a vocabulary index, in its own place and in every slot.
+        The prefix: each conditioning scalar in channel 0 of its token, the E_dep token's channel 0 still 0, and the
+        directions of every prefix token the (1, 1, 1) filler. Then the incoming token, its pdgid a vocabulary index,
+        and a copy of it in every slot.
         """
         scalars, incoming = cond[:, :self.n_cond], cond[:, self.n_cond:].clone()
         incoming[:, -1] = self.model.convert_pdgids(incoming[:, -1])
@@ -409,7 +459,7 @@ class GenerateOut(torch.nn.Module):
         return self.dp.norm_edep_layer(edep).to(s.edep.dtype)
 
     def _g4_cond(self, n, pos, mom, energy, density, size, pdgids, Z, A):
-        """Builds ``cond`` from Geant4-shaped arguments, each of size 1 or B, every event repeated ``n`` times."""
+        """Builds ``cond``, (B * n, n_cond + 7), from Geant4-shaped arguments of 1 or B rows, each row ``n`` times."""
         device = next(self.model.parameters()).device
         pos, mom, energy, density, size, pdgids, Z, A = (
             None if t is None else t.to(device) for t in (pos, mom, energy, density, size, pdgids, Z, A))
@@ -426,8 +476,8 @@ class GenerateOut(torch.nn.Module):
         """Returns the batch size B the Geant4-shaped arguments broadcast to.
 
         Raises:
-            ValueError: a conditioning scalar is missing, an argument has neither size 1 nor B, or several sizes are
-                given while Size is not a conditioning scalar.
+            ValueError: a conditioning scalar is missing, an argument has neither 1 nor B rows, or ``size`` has several
+                rows while ``Size`` is not a conditioning scalar.
         """
         missing = [k for k in self.cond_names if scalars.get(k) is None]
         if missing:

@@ -1,5 +1,5 @@
-"""Offline smoke tests of :class:`legofmt.legacy.reflow.GenerateOutDirect` and ``GenerateIn``: tiny checkpoints
-written to disk (no HF download), one end-to-end forward on a synthetic ``cond``."""
+"""Offline tests of :class:`legofmt.legacy.reflow.GenerateOutDirect` and ``GenerateIn``, end to end on tiny checkpoints
+written to disk (no HF download) and a synthetic ``cond``."""
 
 from __future__ import annotations
 
@@ -36,8 +36,8 @@ def test_forward_shapes(generator: GenerateOut) -> None:
 
 @torch.no_grad()
 def test_unknown_incoming_pdgid_raises(generator: GenerateOut) -> None:
-    """An incoming species outside the mult model's ptypes_in used to be relabelled
-    as its searchsorted neighbour, silently generating the wrong particle's shower."""
+    """An incoming species outside the multiplicity model's ``ptypes_in`` must raise: relabelled as its
+    ``searchsorted`` neighbour, it would silently generate another species' event."""
     cond = _gun_cond(generator.pdgids[0].item(), batch=2)
     cond[0, -1] = 2112.0  # neighbour of 2212 in ptypes_in = (22, 211, 2212)
     with pytest.raises(ValueError, match="ptypes_in"):
@@ -46,9 +46,9 @@ def test_unknown_incoming_pdgid_raises(generator: GenerateOut) -> None:
 
 @torch.no_grad()
 def test_saturation_refill_adds_no_unpredicted_species(generator: GenerateOut, monkeypatch) -> None:
-    """Counts (22: 5, 211: 1) exceed the 4 outgoing slots; flooring the rescaled counts
-    leaves one slot, which used to be drawn with weight 1 for every species -- 2212,
-    which the multiplicity model never predicted, included."""
+    """Counts (22: 5, 211: 1) exceed the 4 outgoing slots, and flooring the rescaled counts (3, 0) frees one slot.
+    Its species must be sampled in proportion to the counts: never 2212, which the multiplicity model did not
+    predict."""
     B = 2000
     monkeypatch.setattr(type(generator.gen_mult), "forward",
                         lambda self, batch, pt_mask=None, rng=None: torch.tensor([[5, 1]]).expand(B, -1))
@@ -60,8 +60,7 @@ def test_saturation_refill_adds_no_unpredicted_species(generator: GenerateOut, m
 
 
 def _fake_shower(B: int = 2, L: int = 7) -> tuple:
-    """Synthetic shower with RAW PDG ids in the last column, as a dataset
-    batch would carry them."""
+    """Returns a synthetic batch ``(f, m, am)`` with raw PDG ids in the pdgid channel, as a dataset batch has them."""
     f = torch.zeros(B, L, 8)
     f[:, 0, 0] = 1.0
     _F(f).non_p[..., 1:-1] = 1.0
@@ -78,7 +77,7 @@ def _fake_shower(B: int = 2, L: int = 7) -> tuple:
 
 @torch.no_grad()
 def test_generate_in_smoke(tmp_path_factory: pytest.TempPathFactory) -> None:
-    """Inverse generation from a raw-PDG-id shower batch (offline)."""
+    """``GenerateIn`` infers the incoming particle from a batch with raw PDG ids, on tiny offline checkpoints."""
     tmp = tmp_path_factory.mktemp("in_ckpts")
     gen_in = GenerateIn(
         str(_save_flow_ckpt(tmp, LEGOLtngVelocity)), str(_save_mult_ckpt(tmp)), device="cpu",

@@ -1,29 +1,29 @@
-"""The three flow base distributions: for each, how to draw it and its log density.
+"""The three distributions of the flow's base: for each, how to sample it and its log density.
 
 ```
-Energy   u = 1 - tanh(s |z|^q)      an outgoing particle's energy, as a fraction of the incoming one
-Angles   w = tanh(|z| / kappa)^pw   its momentum / position direction: the angle to the incoming one, / pi
-Edep     y = z                      the event's deposited energy, in units of its prior (mu, sig)
+Energy   u = 1 - tanh(s |z|**q)      an outgoing particle's energy scalar: 0 at the incoming energy, 1 at the cutoff
+Angles   w = tanh(|z| / kappa)**pw   theta / pi: an outgoing direction's angle to the incoming one (momentum, position)
+Edep     y = z                       the event's deposited energy, in units of its prior (mu, sig)
 ```
 
-``z ~ N(0, 1)`` throughout. Each is a class that holds its parameters for a batch and has ``sample(z)`` and
-``log_density(x)``; ``Edep`` has no ``sample``, its draw is ``z`` as it is. ``BaseParams`` holds all six parameters:
-the base head (``nn.py``) predicts them, ``GenerateBase`` draws with them, ``nn_fit.head_nll`` scores data under
-them.
+``z ~ N(0, 1)`` throughout. Each distribution is a class that holds its parameters for a batch and has ``sample(z)``
+and ``log_density(x)``. ``Edep`` has no ``sample``: its sample is ``z`` itself. ``Angles`` also has ``cdf``.
+``BaseParams`` holds all six parameters: the base head (``nn.py``) predicts them, ``GenerateBase`` samples with them,
+``nn_fit.head_nll`` scores data under them.
 
-Each class is written the same way: the distribution, its inverse and its log density as plain formulas, then code
-that follows them symbol by symbol. The energy and angle distributions are functions of ``|z|``, which is
-half-normal:
+Each class is written the same way: the sample, its inverse and the log density as plain formulas, then code that
+follows them symbol by symbol. The energy and angle distributions are functions of ``|z|``, which is half-normal:
 
 ```
-log p(|z|) = log sqrt(2/pi) - |z|^2 / 2
+log p(|z|) = log sqrt(2/pi) - |z|**2 / 2
 ```
 
 so their density in the distribution's own variable ``x`` is ``log p(x) = log p(|z|) + log |d|z| / dx|``.
 
-This file is the formulas and nothing else. Every argument and every result is a tensor, broadcast against the
-parameters, and has to lie inside the formula's open domain: ``u`` and ``w`` in (0, 1), ``x`` real. Holding data
-there, and everything else a fit does to a density, is ``nn_fit.py``; the parameters' ranges are ``nn.py``.
+This file holds the formulas and nothing else. Every argument and every result is a tensor that broadcasts against
+the parameters. An argument has to lie inside its formula's open domain: ``u`` and ``w`` in (0, 1), ``x`` real.
+``nn_fit.py`` holds the data inside that domain and does everything else a fit does to a density; ``nn.py`` sets the
+parameters' ranges.
 """
 
 from typing import NamedTuple
@@ -38,15 +38,15 @@ _LOG_SQRT_2PI       = torch.log(torch.tensor(2 * torch.pi, dtype=torch.float64))
 
 
 class Energy(NamedTuple):
-    """An outgoing particle's energy ``u``, as a fraction of the incoming one.
+    """An outgoing particle's energy scalar ``u``: 0 at the incoming energy, 1 at the cutoff (``energy_proj.py``).
 
     ```
-    sample    u = 1 - tanh(s y),   y = |z|^q
+    sample    u = 1 - tanh(s y),   y = |z|**q
 
-    inverse   y = atanh(1 - u) / s,   |z| = y^(1/q)
+    inverse   y = atanh(1 - u) / s,   |z| = y**(1/q)
 
     density   log p(u)        = log p(|z|) + log |d|z| / du|
-              log p(|z|)      = log sqrt(2/pi) - y^(2/q) / 2
+              log p(|z|)      = log sqrt(2/pi) - y**(2/q) / 2
               log |d|z| / du| = (1/q - 1) log y - log(q s u (2 - u))
     ```
     """
@@ -70,16 +70,16 @@ class Energy(NamedTuple):
 
 
 class Angles(NamedTuple):
-    """An outgoing particle's angle to the incoming one, ``w = theta / pi`` (momentum and position alike).
+    """An outgoing direction's angle ``theta`` to the incoming one, as ``w = theta / pi`` (momentum and position alike).
 
     ```
-    sample    w = t^pw,   t = tanh(|z| / kappa)
+    sample    w = t**pw,   t = tanh(|z| / kappa)
 
-    inverse   t = w^(1/pw),   |z| = kappa atanh(t)
+    inverse   t = w**(1/pw),   |z| = kappa atanh(t)
 
     density   log p(w)        = log p(|z|) + log |d|z| / dw|
-              log p(|z|)      = log sqrt(2/pi) - |z|^2 / 2
-              log |d|z| / dw| = log kappa - log pw + (1/pw - 1) log w - log(1 - t^2)
+              log p(|z|)      = log sqrt(2/pi) - |z|**2 / 2
+              log |d|z| / dw| = log kappa - log pw + (1/pw - 1) log w - log(1 - t**2)
 
     cdf       P(W < w) = P(|Z| < |z|) = erf(|z| / sqrt 2)
     ```
@@ -116,11 +116,12 @@ class Edep(NamedTuple):
     ```
     sample    y = z,   y = (x - mu) / sig,   x = logit(E / e_dep_max)
 
-    density   log p(x) = -log sig - (x - mu)^2 / (2 sig^2) - log sqrt(2 pi)
+    density   log p(x) = -log sig - (x - mu)**2 / (2 sig**2) - log sqrt(2 pi)
               (log p(E) adds log |dx/dE|, which is free of mu and sig)
     ```
 
-    The base is ``z`` as it is drawn. ``(mu, sig)`` set the unit; they are fitted so that the data's ``x`` is normal.
+    The base's sample is ``z`` itself. ``(mu, sig)`` set the unit: the base head fits them by the likelihood of the
+    data's ``x`` under N(mu, sig**2).
     """
     mu:  Tensor
     sig: Tensor
@@ -133,8 +134,8 @@ class Edep(NamedTuple):
 class BaseParams(NamedTuple):
     """The three distributions' parameters for a batch.
 
-    One column per outgoing class ``(B, n_cls)`` as the head returns them, or gathered onto the outgoing slots
-    ``(B, n_out)``; E_dep's are per event ``(B,)``.
+    The energy and angle parameters have one column per outgoing species ``(B, n_cls)`` as the base head returns them,
+    or one per outgoing slot ``(B, n_out)`` after ``BaseDist._slot_prior``. E_dep's are per event ``(B,)``.
     """
     sm_scale: Tensor   # energy s
     edep_mu:  Tensor   # E_dep mu

@@ -22,14 +22,19 @@ GEOM = {"layers": [[1.4, 19.3, 74.0, 183.84], [0.3, 2.33, 14.0, 28.0855]], "repe
 
 
 def _prep_config(**kw) -> dict:
-    """A ``DataPrep`` config: 10 MeV cutoff, no ray projection, Density only, kinetic energy; ``kw`` overrides."""
+    """Returns a ``DataPrep`` config; ``kw`` overrides.
+
+    10 MeV cutoff, no ray projection, ``Density`` as the only conditioning scalar, kinetic energy.
+    """
     return {"cutoff_mev": 10.0, "manifold": MANIFOLD, "proj_ray": False, "cond_scalars": ["Density"],
             "energy_kin": True, **kw}
 
 
 def _tiny_config(model_args: dict | None = None, **model_conf) -> dict:
-    """A 2-layer, h_dim 16 flow checkpoint dict; ``model_conf`` keys are set, ``model_args`` is merged into
-    ``model_conf.model_args``."""
+    """Returns the checkpoint dict of a tiny flow: 2 layers, ``h_dim`` 16, pdgids [22, 211, 2212].
+
+    The ``model_conf`` keywords are set on its ``model_conf``; ``model_args`` is merged into ``model_conf.model_args``.
+    """
     pdgids = torch.tensor([22, 211, 2212], dtype=torch.int64)
     cfg = {
         "state_dict": {},
@@ -52,9 +57,7 @@ def _tiny_config(model_args: dict | None = None, **model_conf) -> dict:
                 "manifold": MANIFOLD,
                 "max_energy": 300.0,
                 "pdgids": pdgids,
-                # base_pretrain_batches defaults to 300, which (with
-                # scale_dist=sm_norm) builds base_head -- and that reads the
-                # Z/A cond scalars this fixture does not carry.
+                # no base head: it needs the Z / A / Size conditioning scalars, which ``_head_config`` adds
                 "base_pretrain_batches": 0,
                 "model_args": {
                     "h_dim": 16,
@@ -82,9 +85,11 @@ def _tiny_config(model_args: dict | None = None, **model_conf) -> dict:
 
 
 def _fake_batch(B: int = 2, L: int = 5, edep_generated: bool = False) -> DataStruct:
-    """Synthetic batch matching the padded sequence layout: 2 conditioning
-    slots, 1 incoming-particle slot, then ``L - 3`` outgoing slots. ``edep_generated``
-    marks the E_dep token generated (``m = 1``), as in production."""
+    """Returns a synthetic batch in the padded layout.
+
+    Its tokens are ``Density``, E_dep, the incoming particle (a photon) and ``L - 3`` outgoing particles (pions).
+    ``edep_generated`` marks the E_dep token as generated (``m = 1``), as in production.
+    """
     f = torch.zeros(B, L, 8)
     f[:, 0, 0] = 1.0
     f[:, 1, 0] = 0.1
@@ -110,7 +115,7 @@ def _fake_batch(B: int = 2, L: int = 5, edep_generated: bool = False) -> DataStr
 
 
 def _vf_kwargs(m, ds: DataStruct) -> dict:
-    """The keyword inputs of ``m.model`` besides x and t, for the batch ``ds``."""
+    """Returns the keyword inputs of ``m.model`` besides ``x`` and ``t``, for the batch ``ds``."""
     return dict(mask=ds.m.full, attn_mask=ds.am.full, types=m.types_embd[:, :ds.f.full.shape[1]],
                 pdgids=m.convert_pdgids(ds.f.pdgids))
 
@@ -131,8 +136,11 @@ def _save_flow_ckpt(tmp_path: Path, cls=LEGOLtngDirect, name: str = "flow.pt") -
 
 
 def _mult_config() -> dict:
-    """Checkpoint-style mult config: ptypes/max_count present so
-    ``resolve_mult_config`` takes the restore path (no meta.json needed)."""
+    """Returns a multiplicity-model config as a checkpoint holds it.
+
+    It carries ``ptypes``, ``ptypes_in`` and ``max_count``, which a fresh config takes from the dataset: loaded with
+    a ``state_dict``, it needs no dataset.
+    """
     return {
         "dl_conf": {"lds_args": {"cutoff_mev": 10.0}, "bs": 2, "num_workers": 0},
         "mm_conf": {
@@ -156,7 +164,10 @@ def _mult_config() -> dict:
 
 
 def _pt_mult_config(**mm) -> dict:
-    """``_mult_config`` without the inverse model, ``mm`` merged into mm_conf (e.g. ``passthrough_head=True``)."""
+    """Returns ``_mult_config`` without the inverse model.
+
+    ``mm`` is merged into ``mm_conf``, e.g. ``passthrough_head=True``.
+    """
     cfg = _mult_config()
     del cfg["mm_conf"]["inv_model_args"]
     cfg["mm_conf"].update(train_inverse=False, **mm)
@@ -164,7 +175,7 @@ def _pt_mult_config(**mm) -> dict:
 
 
 def _pt_mult_model(**mm):
-    """A seeded MultModel over ptypes [22, 211, 2112] and ptypes_in [22, 211, 2112, 2212]."""
+    """Returns a seeded ``MultModel`` over ``ptypes`` [22, 211, 2112] and ``ptypes_in`` [22, 211, 2112, 2212]."""
     from legofmt.multiplicity.model import MultModel
 
     torch.manual_seed(0)
@@ -184,7 +195,11 @@ def _save_mult_ckpt(tmp_path: Path, cfg: dict | None = None) -> Path:
 
 
 def _head_config(nout: bool, model_args: dict | None = None, **model_conf) -> dict:
-    """``_tiny_config`` with a base head (the Z/A/Size scalars, pdgids [11, 22, 2212]); overrides as there."""
+    """Returns ``_tiny_config`` with a base head.
+
+    The conditioning scalars are Density, Z, A and Size, the pdgids [11, 22, 2212], and the head gets one pretraining
+    batch. ``nout`` sets ``base_conf.base_head_nout``; the other arguments are ``_tiny_config``'s.
+    """
     pdgids = torch.tensor([11, 22, 2212], dtype=torch.int64)
     cfg = _tiny_config({"nlayers": 1, "max_seq_l": 8, "npdgids": pdgids.numel() + 1},
                        pdgids=pdgids, cond_scalars=("Density", "Z", "A", "Size"), base_pretrain_batches=1)
@@ -195,7 +210,10 @@ def _head_config(nout: bool, model_args: dict | None = None, **model_conf) -> di
 
 
 def _head_batch(edep: torch.Tensor, n_out: torch.Tensor, pid_in: float = 2212.0) -> DataStruct:
-    """Tokens [Density, edep, Z, A, Size, incoming, out, out]; ``n_out`` in {1, 2}."""
+    """Returns a batch with the tokens ``[Density, E_dep, Z, A, Size, incoming, outgoing, outgoing]``.
+
+    ``edep`` (B,) is the E_dep token's value. ``n_out`` (B,) is 1 or 2: with 1 the second outgoing token is padding.
+    """
     B = len(edep)
     f = torch.zeros(B, 8, 8)
     for token, val in ((0, 3.0), (2, 18.0), (3, 39.95), (4, 100.0)):
@@ -222,7 +240,7 @@ def _head_batch(edep: torch.Tensor, n_out: torch.Tensor, pid_in: float = 2212.0)
 
 
 def _gun_cond(pdgid: int, e_mev: float = 150.0, batch: int = 4) -> torch.Tensor:
-    """``GenerateOut``'s ``[B, 8]`` input: density 1, E-scaled momentum along +z, entry on the -z face, pdgid."""
+    """Returns ``GenerateOut``'s ``[B, 8]`` input: density 1, ``e_mev`` along +z, entry on the -z face, ``pdgid``."""
     cond = torch.zeros(batch, 8)
     cond[:, 0] = 1.0
     cond[:, 3] = e_mev
@@ -232,7 +250,7 @@ def _gun_cond(pdgid: int, e_mev: float = 150.0, batch: int = 4) -> torch.Tensor:
 
 
 def _fill_edep(value: float):
-    """A stand-in for the flow's forward that writes ``value`` into every event's E_dep token."""
+    """Returns a stand-in for the flow's ``forward`` that writes ``value`` into every event's E_dep token."""
     def forward(batch, *_, rng=None):
         f, m, am = batch
         f = f.clone()
@@ -242,7 +260,11 @@ def _fill_edep(value: float):
 
 
 def _base_rc(**base_conf):
-    """The resolved-config surface ``build_base_head`` / ``_base_moment_loss`` read: pdgids [11, 22], Z/A/Size."""
+    """Returns the resolved-config attributes that ``build_base_head`` and ``_base_moment_loss`` read.
+
+    The pdgids are [11, 22], the conditioning scalars Density, Z, A and Size; ``base_conf`` goes into
+    ``config.base_conf``.
+    """
     return SimpleNamespace(pdgids_template=torch.tensor([11, 22]), cond_scalars=("Density", "Z", "A", "Size"),
                            base_pretrain_batches=1, config={"base_conf": {"base_head": None, **base_conf}})
 
@@ -253,8 +275,11 @@ _PREPPED_E_OUT = [[50, 50, 50, 50], [50, 1, 50, 1], [1, 1, 1, 1],
 
 
 def prepped_padded(cond=("Density",), layers=False, n=6, k=4) -> tuple:
-    """A real prepped padded dataset, ``(f, m, am)`` or ``(f, m, am, edep_layers)``, of
-    events with 4/2/0/1/3/2 outgoing particles (event 0 full length, event 2 none)."""
+    """Returns a padded dataset as ``load_dataset`` cuts and normalises it from raw tokens.
+
+    ``(f, m, am)`` or ``(f, m, am, edep_layers)``: events with 4/2/0/1/3/2 outgoing particles (event 0 at full
+    length, event 2 with none).
+    """
     g = torch.Generator().manual_seed(0)
     e_out = torch.tensor(_PREPPED_E_OUT, dtype=torch.float32)[:n, :k]
     def tokens(e, shape):
@@ -280,14 +305,17 @@ PACKED_COND = ("Density", "Z", "A", "Size")
 
 
 def packed_prep(**kw) -> DataPrep:
-    """The DataPrep the packed-dataset tests load ``write_two_dirs`` with."""
+    """Returns the ``DataPrep`` the packed-dataset tests load the files of ``write_two_dirs`` with."""
     return DataPrep({"cutoff_mev": 10.0, "manifold": MANIFOLD, "proj_ray": False, "cond_scalars": list(PACKED_COND),
                      "energy_kin": True, "max_energy": 300.0, **kw})
 
 
 def write_two_dirs(tmp_path: Path, cond=PACKED_COND, layers=True) -> tuple[Path, Path, Path]:
-    """The same ``prepped_padded`` events as ``pad/`` (only ``data_prepped.pt``), ``pk/`` (only
-    ``data_packed.pt``) and ``both/`` (both files), each with a ``meta.json``."""
+    """Writes the same ``prepped_padded`` events to three dataset directories and returns their paths.
+
+    ``pad/`` holds only ``data_prepped.pt``, ``pk/`` only ``data_packed.pt`` and ``both/`` both files; each has a
+    ``meta.json``.
+    """
     t = prepped_padded(cond, layers)
     packed = pack(*t[:3], n_prefix=len(cond) + 1, edep_layers=t[3] if layers else None)
     meta = {"ntokens": t[0].shape[1], "particles": [22.0, 2212.0], "particles_in": [2212.0],
@@ -295,7 +323,7 @@ def write_two_dirs(tmp_path: Path, cond=PACKED_COND, layers=True) -> tuple[Path,
     pad, pk, both = dirs = tuple(tmp_path / n for n in ("pad", "pk", "both"))
     for d in dirs:
         d.mkdir()
-        fmt = {} if d == pad else {"format": "packed", "n_events": len(packed)}   # as gen_data writes
+        fmt = {} if d == pad else {"format": "packed", "n_events": len(packed)}   # as scripts/gen_data.py writes it
         (d / "meta.json").write_text(json.dumps({**meta, **fmt}))
         if d != pk:
             torch.save(t, d / "data_prepped.pt")

@@ -1,4 +1,5 @@
-"""Smoke test: load checkpoints from HF and run GenerateOut end-to-end."""
+"""Smoke tests on published checkpoints: a flow and a multiplicity model from the Hugging Face hub, run end to end
+through ``GenerateOut`` and ``GenerateIn``. Skipped unless ``HF_FLOW_CKPT_DECOUPLED`` is set."""
 from __future__ import annotations
 
 import os
@@ -47,11 +48,14 @@ def generator(ckpt_paths: tuple[Path, Path]) -> GenerateOut:
 
 
 def _dummy_cond(gen: GenerateOut, batch: int = 2) -> torch.Tensor:
-    """Build a valid [B, 8] cond: [density, mom(3), pos(3), pdgid]."""
+    """Returns a ``[B, 8]`` input of ``GenerateOut``, ``[density, mom * E_MeV (3), pos (3), pdgid]``.
+
+    The first incoming species at 150 MeV along +z, entering on the -z face.
+    """
     pdgid = gen.pdgid_in[0].item()
     cond = torch.zeros(batch, 8, device=DEVICE)
     cond[:, 0] = 1.0                                            # density
-    cond[:, 1:4] = torch.tensor([0.0, 0.0, 150.0], device=DEVICE)   # momentum
+    cond[:, 1:4] = torch.tensor([0.0, 0.0, 150.0], device=DEVICE)   # momentum direction times energy [MeV]
     cond[:, 4:7] = torch.tensor([0.0, 0.0, -1.0], device=DEVICE)     # entry position
     cond[:, 7] = pdgid
     return cond
@@ -71,7 +75,7 @@ def test_forward_shape(generator: GenerateOut) -> None:
     assert out.ndim == 3
     assert out.shape[0] == cond.shape[0]
     assert out.shape[1] == generator.max_seq_l
-    assert out.shape[2] == 8  # density, px, py, pz, x, y, z, pdgid
+    assert out.shape[2] == 8  # energy, momentum direction (3), position direction (3), pdgid
     assert mask.shape == (cond.shape[0], generator.max_seq_l)
     assert attn_mask.shape == (cond.shape[0], generator.max_seq_l)
 
@@ -89,7 +93,7 @@ def test_g4_style_api(generator: GenerateOut) -> None:
     out = generator.gen_model_w_g4_args(n, pos, mom, energy, density, size, pdgids)
 
     assert set(out) == {"per_event", "per_particle", "per_voxel"}
-    assert out["per_particle"]["Incoming"].shape[-1] == 8   # E, mom(3), pdgid, pos(3)
+    assert out["per_particle"]["Incoming"].shape[-1] == 8   # the token's 8 channels, pdgid last
     assert out["per_particle"]["Outgoing"].shape[-1] == 8
 
 
@@ -101,7 +105,7 @@ def in_generator(ckpt_paths: tuple[Path, Path]) -> GenerateIn:
 
 @torch.no_grad()
 def test_generate_in_shapes(generator: GenerateOut, in_generator: GenerateIn) -> None:
-    """Forward-generate a shower, then infer the incoming particle from it."""
+    """``GenerateIn`` infers one incoming particle per event from events that ``GenerateOut`` generated."""
     sols, mask, attn_mask = generator(_dummy_cond(generator, batch=2))
     in_p = in_generator((sols.nan_to_num(), mask, attn_mask))
     assert in_p.shape == (2, 1, 8)
