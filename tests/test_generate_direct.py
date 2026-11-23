@@ -51,7 +51,7 @@ def test_saturation_refill_adds_no_unpredicted_species(generator: GenerateOut, m
     which the multiplicity model never predicted, included."""
     B = 2000
     monkeypatch.setattr(type(generator.gen_mult), "forward",
-                        lambda self, batch, pt_mask=None: torch.tensor([[5, 1]]).expand(B, -1))
+                        lambda self, batch, pt_mask=None, rng=None: torch.tensor([[5, 1]]).expand(B, -1))
     cond = generator._model_cond(_gun_cond(generator.pdgids[0].item(), batch=B), prepped=False)
     cond_fm, _, attn = generator.gen_batch(cond, passthrough=False)
     out_idx = _F(cond_fm).out_p[..., -1]

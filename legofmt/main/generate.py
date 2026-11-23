@@ -34,7 +34,7 @@ from legofmt.legacy.generate import balance_passthrough, close_balance, generate
 from legofmt.legacy.norm import HAND_SET_EXCESS_MEV
 from legofmt.main.modules import LEGOLtng
 from legofmt.multiplicity.model import MultModel
-from legofmt.rng import REFILL, categorical, rng_on
+from legofmt.rng import REFILL, categorical, rng_on, rng_sub
 
 
 def fit_counts(counts: torch.Tensor, max_particles: int, refill) -> torch.Tensor:
@@ -171,7 +171,7 @@ class GenerateOut(torch.nn.Module):
         """
         rng  = rng_on(rng, cond)
         cond = self._model_cond(cond, prepped)
-        cond_fm, mask, attn_mask = self.gen_batch(cond, passthrough=passthrough, **_rng_kw(rng))
+        cond_fm, mask, attn_mask = self.gen_batch(cond, passthrough=passthrough, rng=rng)
         e_in, pid_in = self._incoming_energy_pid(cond)
 
         pt_mask = mask.sum(-1) == 0                                             # nothing to generate
@@ -217,14 +217,14 @@ class GenerateOut(torch.nn.Module):
         layers, run = sols.new_zeros(sols.shape[0], ae.n_layers), ~pt_mask
         if run.any():
             edep_mev    = self.dp.denorm_edep_margin(_F(sols).edep[run].float(), e_in[run].float(), pid_in[run])
-            layers[run] = ae.sample(self.model._edep_latents, edep_mev, **_rng_kw(rng, run))
+            layers[run] = ae.sample(self.model._edep_latents, edep_mev, rng=rng_sub(rng, run))
         return layers
 
     # ---- the multiplicity model -------------------------------------------------------------------------------------
 
     def gen_batch(self, cond: torch.Tensor, passthrough: bool = True, rng=None):
         """Samples the counts and builds the flow's padded ``(cond_fm, mask, attn_mask)`` from them."""
-        return self.build_batch(cond, *self.sample_counts(cond, passthrough, **_rng_kw(rng)), **_rng_kw(rng))
+        return self.build_batch(cond, *self.sample_counts(cond, passthrough, rng=rng), rng=rng)
 
     def sample_counts(self, cond: torch.Tensor, passthrough: bool = True,
                       rng=None) -> tuple[torch.Tensor, torch.Tensor]:
@@ -236,10 +236,10 @@ class GenerateOut(torch.nn.Module):
         """
         mult_in, pdgid_in_idx = self._mult_in(cond)
         if passthrough:
-            pt_mask = self.gen_mult.sample_passthrough(mult_in, pdgid_in_idx, **_rng_kw(rng))
+            pt_mask = self.gen_mult.sample_passthrough(mult_in, pdgid_in_idx, rng=rng)
         else:   # the interacting branch: nothing passes through
             pt_mask = torch.zeros(len(cond), dtype=torch.bool, device=cond.device)
-        counts = self.gen_mult((mult_in, None, pdgid_in_idx), pt_mask=pt_mask, **_rng_kw(rng))
+        counts = self.gen_mult((mult_in, None, pdgid_in_idx), pt_mask=pt_mask, rng=rng)
         return pt_mask, counts
 
     def passthrough_prob(self, cond: torch.Tensor, prepped: bool = False) -> torch.Tensor:
@@ -314,7 +314,7 @@ class GenerateOut(torch.nn.Module):
                 (a ``model_conf.edep_margin`` token is re-encoded on it here).
         """
         cond = self._g4_cond(n, pos, mom, energy, density, size, pdgids, Z, A)
-        sols, _, _ = self(cond, passthrough=passthrough, **_rng_kw(rng))
+        sols, _, _ = self(cond, passthrough=passthrough, rng=rng)
         s = _F(sols)
         out = {
             "per_event": {"E_dep": self._edep_on_layer_scale(s), **{k: s.cond(k) for k in self.cond_names}},
@@ -371,9 +371,9 @@ class GenerateOut(torch.nn.Module):
         if pt_mask.all():
             return cond_fm.clone(), mask, attn_mask
         if not pt_mask.any():
-            return self.model((cond_fm, mask, attn_mask), **_rng_kw(rng))
+            return self.model((cond_fm, mask, attn_mask), rng=rng)
         keep = ~pt_mask
-        sub, _, _ = self.model((cond_fm[keep], mask[keep], attn_mask[keep]), **_rng_kw(rng, keep))
+        sub, _, _ = self.model((cond_fm[keep], mask[keep], attn_mask[keep]), rng=rng_sub(rng, keep))
         sols = cond_fm.clone()
         sols[keep] = sub.to(sols.dtype)
         return sols, mask, attn_mask
@@ -446,10 +446,3 @@ class GenerateOut(torch.nn.Module):
 class GenerateIn(GenerateOut):
     """The reverse direction: the incoming particle from the outgoing set (legacy, needs ``train_inverse``)."""
     __call__ = generate_in
-
-
-# ---- plumbing --------------------------------------------------------------------------------------------------------
-
-def _rng_kw(rng, rows=None) -> dict:
-    """Returns ``rng=`` for a call only when keyed, so stubs and subclasses without the argument keep working."""
-    return {} if rng is None else {"rng": rng if rows is None else rng.sub(rows)}

@@ -233,7 +233,7 @@ def _gun_cond(pdgid: int, e_mev: float = 150.0, batch: int = 4) -> torch.Tensor:
 
 def _fill_edep(value: float):
     """A stand-in for the flow's forward that writes ``value`` into every event's E_dep token."""
-    def forward(batch, *_):
+    def forward(batch, *_, rng=None):
         f, m, am = batch
         f = f.clone()
         _F(f).edep.fill_(value)
