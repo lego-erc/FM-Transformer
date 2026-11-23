@@ -12,6 +12,7 @@ from legofmt.data.load.packed import load_dataset
 from legofmt.data.struct import DataStruct, _F
 from legofmt.data.write.norm import DataPrep
 from legofmt.data.write.pack import pack
+from legofmt.legacy.norm import norm_out_energy_log
 from legofmt.legacy.reflow import LEGOLtngDirect
 
 MANIFOLD = [{"name": "euclidean", "dim": 1},
@@ -127,8 +128,10 @@ def _flow_config() -> dict:
     return cfg
 
 
-def _save_flow_ckpt(tmp_path: Path, cls=LEGOLtngDirect, name: str = "flow.pt") -> Path:
+def _save_flow_ckpt(tmp_path: Path, cls=LEGOLtngDirect, name: str = "flow.pt", **model_conf) -> Path:
+    """Writes the checkpoint of a tiny flow (``_flow_config``) and returns its path; ``model_conf`` keys are set."""
     cfg = _flow_config()
+    cfg["model_conf"].update(model_conf)
     m = cls({"state_dict": {}, "config": cfg})
     path = tmp_path / name
     torch.save({"state_dict": m.model.vf.state_dict(), "config": cfg}, path)
@@ -310,14 +313,26 @@ def packed_prep(**kw) -> DataPrep:
                      "energy_kin": True, "max_energy": 300.0, **kw})
 
 
+def as_file_from_before(t: tuple, cutoff: float = 10.0) -> tuple:
+    """Returns padded tensors as a dataset file from before stores them: the outgoing energy on the legacy log scale.
+
+    The padding takes the scale too, as the legacy ``prep`` gave it.
+    """
+    f = t[0].clone()
+    s = _F(f)
+    s.out_energy.copy_(norm_out_energy_log(s.out_energy, s.in_p[..., 0], cutoff))
+    return (f, *t[1:])
+
+
 def write_two_dirs(tmp_path: Path, cond=PACKED_COND, layers=True) -> tuple[Path, Path, Path]:
     """Writes the same ``prepped_padded`` events to three dataset directories and returns their paths.
 
     ``pad/`` holds only ``data_prepped.pt``, ``pk/`` only ``data_packed.pt`` and ``both/`` both files; each has a
-    ``meta.json``.
+    ``meta.json``. They are files from before (``as_file_from_before``), so the padded and the packed file hold the
+    same tensors.
     """
-    t = prepped_padded(cond, layers)
-    packed = pack(*t[:3], n_prefix=len(cond) + 1, edep_layers=t[3] if layers else None)
+    t = as_file_from_before(prepped_padded(cond, layers))
+    packed = pack(*t[:3], n_prefix=len(cond) + 1, edep_layers=t[3] if layers else None, out_energy_mev=False)
     meta = {"ntokens": t[0].shape[1], "particles": [22.0, 2212.0], "particles_in": [2212.0],
             "cutoff_mev": 10.0, "cond_scalars": list(cond), "energy_kin": True, "max_energy": 300.0}
     pad, pk, both = dirs = tuple(tmp_path / n for n in ("pad", "pk", "both"))

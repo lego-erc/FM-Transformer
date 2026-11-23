@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import json
+import warnings
 from dataclasses import MISSING, dataclass, fields
 from pathlib import Path
 from typing import Any
@@ -61,7 +62,9 @@ class ResolvedLEGOConfig:
     dir_zoom_nucleons_max: int | None = None   # events with more outgoing nucleons (nuclear interactions) are
                                                # not zoomed
     max_loss_weight: float = -6.0              # the floor of lv: a loss cell's weight exp(-lv) <= exp(-max_loss_weight)
-    overflow_delta: float = 0.0
+    overflow_delta: float = 0.0                # legacy: the exact zeros of a target moved to -overflow_delta
+    exclude_absorbed: bool = False             # absorbed events (no outgoing particle) are left out of training, and
+                                               # generation gives them their E_dep without the flow (main/generate.py)
     energy_border: bool = False                # the field sees the generated outgoing energy held in [0, 1], and an
                                                # energy outside moves straight to the border (cfm/project_model.py)
     canon_sym: bool = False
@@ -132,6 +135,10 @@ def _resolve_fresh(config: dict) -> ResolvedLEGOConfig:
                               {int(float(p)): float(m) for p, m in meta["edep_excess_max_mev"].items()})
     else:
         edep_excess_from_data(config)   # a dataset whose meta.json lacks the key
+    # per pair of incoming and outgoing pdgid, the data's largest E_out - E_in [MeV]: the caps of model_conf.out_margin
+    if "out_excess_max_mev" in meta:
+        model_conf.setdefault("out_excess_mev", {int(float(p)): {int(float(q)): float(m) for q, m in row.items()}
+                                                 for p, row in meta["out_excess_max_mev"].items()})
     model_args.setdefault("ntypes", len(model_conf["cond_scalars"]) + 3)
     # In model_conf, not in model_args (the field's constructor arguments): ``pdgids`` is saved with the config, and
     # ``_resolve_from_checkpoint`` reads it back.
@@ -467,6 +474,11 @@ def _check_lego(config: dict, c: dict, cond_scalars: tuple, len_buckets, state_d
         raise ValueError(f"dir_zoom_nucleons_max must be an int >= 0 or absent, got {nuc}.")
     if c["overflow_delta"] < 0:
         raise ValueError(f"overflow_delta must be >= 0, got {c['overflow_delta']}.")
+    cutoff = dl_conf["lds_args"].get("cutoff_mev") or 0.0
+    if c["exclude_absorbed"] and cutoff > 1.0:   # the rule holds to about 0.1 MeV at a 0.1 MeV cutoff
+        warnings.warn(f"model_conf.exclude_absorbed gives an absorbed event E_dep = E_in (+ 2 m_e for an e+), but at "
+                      f"cutoff_mev={cutoff} the particles that escape below the cutoff are missing from its deposit: "
+                      "a median 7 MeV at 10 MeV (Ar/Cu bricks)", UserWarning, stacklevel=2)
     if c["energy_border"] and c["overflow_delta"] > 0:
         raise ValueError(f"energy_border holds the outgoing energy in [0, 1], but overflow_delta puts targets at "
                          f"{-c['overflow_delta']}, outside it: set overflow_delta to 0.")
@@ -506,6 +518,9 @@ def _check_lego(config: dict, c: dict, cond_scalars: tuple, len_buckets, state_d
                          "tokens), nor with time_cond: false or reflow (their forward does not pool).")
 
     if model_conf.get("edep_ae") is not None:
+        if c["exclude_absorbed"]:
+            raise ValueError("model_conf.exclude_absorbed skips the flow for absorbed events, but an edep_ae samples "
+                             "the E_dep layers from the latents the flow generates.")
         # len_mode group keeps a batch whole and in order (the per-layer targets stay with their events); split
         # reorders and runs pieces, which do not carry the latent token
         if ((len_buckets is not None and len_mode != "group") or c["reflow_path"] or c["reflow_start_epoch"] > 0

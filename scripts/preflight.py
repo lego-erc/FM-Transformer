@@ -92,6 +92,9 @@ if meta and train_model == "fm" and "max_energy" in mc:
              "(norm_e normalises at load); a pre-split, already-normalised file must match")
     else:
         ok(f"max_energy matches dataset ({mc['max_energy']})")
+if meta and train_model == "fm" and mc.get("out_margin") and "out_excess_max_mev" not in meta:
+    bad("model_conf.out_margin needs a dataset that stores the outgoing energy in MeV (meta.json out_excess_max_mev): "
+        "regenerate it with scripts/gen_data.py")
 
 # ---- devices vs allocation ------------------------------------------------
 dev = run.get("devices")

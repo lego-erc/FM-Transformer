@@ -5,6 +5,8 @@
     t distribution   ``t_dist: sm_norm`` (logit-normal) and ``t_dist_shift != 1`` (``_sample_t_options``)
     reflow           a frozen teacher's transport of the base replaces the data target: ``reflow_path`` from step 0,
                      ``reflow_start_epoch > 0`` the student's end-of-epoch snapshot from that epoch on
+    overflow_delta   an outgoing energy of exactly 0 (the particle keeps the full incoming energy) and an E_dep of
+                     exactly 0 (no deposit) move to ``-overflow_delta``, outside [0, 1] (``_shift_overflow_targets``)
 
 ``LegacyTrainStep`` follows ``TrainStep`` in ``LEGOLtng``'s bases; ``TrainStep`` reaches each path in one line
 (``_flow_frame``, ``_sample_t``, ``_step``). ``LEGOLtngDirect`` (``legacy/reflow.py``) reuses ``_sample_mask`` and
@@ -14,11 +16,22 @@
 import torch
 from torch import Tensor
 
-from legofmt.data.struct import DataStruct
+from legofmt.data.struct import DataStruct, _F
 
 
 class LegacyTrainStep:
     """Legacy training-step mixin for :class:`~legofmt.main.modules.LEGOLtng`."""
+
+    def _shift_overflow_targets(self, ds_t: DataStruct) -> DataStruct:
+        """Returns a copy of the batch with its exact zeros at ``-overflow_delta``, outside [0, 1].
+
+        The zeros are an outgoing energy 0 on a real outgoing token, and an E_dep 0.
+        """
+        f = ds_t.f.full.clone()
+        out_e, edep = _F(f).out_energy, _F(f).edep
+        out_e.masked_fill_((out_e == 0) & ds_t.am.out_p.bool(), -self.rc.overflow_delta)
+        edep.masked_fill_(edep == 0, -self.rc.overflow_delta)
+        return DataStruct(f, ds_t.m.full, ds_t.am.full)
 
     @torch.no_grad()
     def _sample_mask(self, ds_t: DataStruct) -> Tensor:

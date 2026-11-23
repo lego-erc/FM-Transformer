@@ -2,8 +2,9 @@
 
     load_dataset       a dataset directory or file -> PackedData, on the model scale
     PackedData         the events; ``dataset[idx]`` pads a batch of them to a ``DataStruct``
-    EventView          some of a dataset's events, by index: the train / validation split, ``interacting_only``
-    interacting_only   the view without the pass-through events (``model_conf.exclude_passthrough``)
+    EventView          some of a dataset's events, by index: the train / validation split, ``without``
+    without            the view without the pass-through events, the absorbed events or both
+                       (``model_conf.exclude_passthrough``, ``model_conf.exclude_absorbed``)
     is_packed          whether a loaded object is a packed dataset
 
 Everything in a padded ``(f, m, am)`` but its particle tokens follows from a few numbers per event and two template
@@ -49,9 +50,9 @@ class PackedData:
     """A prepped dataset of N events without its padding; ``unpack`` pads events back to ``L`` tokens.
 
     ``dataset[idx]`` with a batch of event indices gives a ``DataStruct``. The per-event accessors (``lengths``,
-    ``n_out``, ``edep``, ...) answer without padding anything; ``data`` materialises the whole padded dataset. The
-    incoming energy, E_dep and ``edep_layers`` are in MeV as the file stores them, and on the model scale once
-    ``norm_e`` has run.
+    ``n_out``, ``edep``, ...) answer without padding anything; ``data`` materialises the whole padded dataset. Every
+    energy is in MeV as the file stores it, and on the model scale once ``norm_e`` has run; a file from before stores
+    the outgoing energy on the legacy log scale already (``out_energy_mev`` false).
     """
 
     prefix: Tensor         # (N, n_prefix) channel 0 of the prefix tokens
@@ -63,6 +64,7 @@ class PackedData:
     n_prefix: int          # the number of prefix tokens
     L: int                 # the tokens per event in the padded layout
     edep_layers: Tensor | None = None   # (N, n_layers) the per-layer E_dep, when the dataset carries it
+    out_energy_mev: bool = False        # the outgoing energy is in MeV, until norm_e; false: a file from before
 
     def __len__(self) -> int:
         return self.prefix.shape[0]
@@ -135,7 +137,8 @@ class PackedData:
         src = (self.offsets[idx] - offsets[:-1]).repeat_interleave(lens) + torch.arange(int(offsets[-1]))
         return PackedData(prefix=self.prefix[idx], tokens=self.tokens[src], offsets=offsets, pad_e0=self.pad_e0[idx],
                           pad_token=self.pad_token, prefix_token=self.prefix_token, n_prefix=self.n_prefix, L=self.L,
-                          edep_layers=None if self.edep_layers is None else self.edep_layers[idx])
+                          edep_layers=None if self.edep_layers is None else self.edep_layers[idx],
+                          out_energy_mev=self.out_energy_mev)
 
     def unpack(self, idx=slice(None)) -> tuple:
         """Pads the events ``idx`` to ``L`` tokens.
@@ -170,13 +173,16 @@ class PackedData:
         return out if self.edep_layers is None else out + (self.edep_layers[idx],)
 
     def norm_e(self, prep) -> None:
-        """Applies ``prep.norm_e`` to all events at once, in place: the result a padded file gets.
+        """Applies ``prep.norm_e`` to all events at once, in place: what it gives the padded tensors.
 
-        ``norm_e`` changes the E_dep token (in the prefix), the incoming energy and ``edep_layers``, so only the prefix
-        and incoming tokens are padded for it, and those three are written back.
+        ``prep.norm_e`` gets only the prefix and incoming tokens, padded, and the E_dep token, the incoming energy and
+        ``edep_layers`` are written back. The outgoing energy, in MeV, takes ``prep.norm_out_energy`` here, before the
+        incoming energy is written back: it reads it in MeV.
         """
         P = self.n_prefix
-        f, _, _, *edep_layers = prep.norm_e(self._prefix_and_incoming(), inplace=True)
+        f, _, _, *edep_layers = prep.norm_e(self._prefix_and_incoming(), inplace=True, out_mev=self.out_energy_mev)
+        if self.out_energy_mev:
+            self._norm_out_energy(prep)
         self.prefix = f[:, :P, 0].clone()
         self.tokens[self.offsets[:-1], 0] = f[:, P, 0]   # the incoming energy
         if edep_layers:
@@ -201,6 +207,14 @@ class PackedData:
         return cls(**{k: v for k, v in d.items() if k not in ("format", "version")})
 
     # ---- plumbing ------------------------------------------------------------------------------------------------
+
+    def _norm_out_energy(self, prep) -> None:
+        """Puts every outgoing token's energy on the model scale, in place (``prep.norm_out_energy``)."""
+        out = torch.ones(self.tokens.shape[0], dtype=torch.bool)
+        out[self.offsets[:-1]] = False   # an event's first token is its incoming particle
+        e_in, pid_in = (self.incoming[:, c].repeat_interleave(self.n_out) for c in (0, -1))
+        self.tokens[out, 0] = prep.norm_out_energy(self.tokens[out, 0], e_in, pid_in, self.tokens[out, -1])
+        self.out_energy_mev = False
 
     def _outgoing(self) -> tuple[Tensor, Tensor]:
         """Returns each outgoing token's event index and pdgid, in token order."""
@@ -236,9 +250,20 @@ class EventView:
         return self.ds[self.idx[i]]
 
 
-def interacting_only(ds) -> EventView:
-    """Returns the view of ``ds`` without its pass-through events (no deposit and exactly one outgoing particle)."""
-    return EventView(ds, ((ds.edep.flatten() > 0) | (ds.n_out != 1)).nonzero(as_tuple=True)[0])
+def without(ds, passthrough: bool = False, absorbed: bool = False) -> EventView:
+    """Returns the view of ``ds`` without the events the flow does not train on.
+
+    ```
+    passthrough   no deposit and exactly one outgoing particle      model_conf.exclude_passthrough
+    absorbed      no outgoing particle                               model_conf.exclude_absorbed
+    ```
+    """
+    keep = torch.ones(len(ds), dtype=torch.bool)
+    if passthrough:
+        keep &= (ds.edep.flatten() > 0) | (ds.n_out != 1)
+    if absorbed:
+        keep &= ds.n_out > 0
+    return EventView(ds, keep.nonzero(as_tuple=True)[0])
 
 
 def load_dataset(data: str | dict | tuple, *, prep=None, frac=None, device="cpu", **cut_args) -> PackedData:

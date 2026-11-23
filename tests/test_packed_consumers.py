@@ -14,7 +14,7 @@ from test_helpers import PACKED_COND, packed_prep, write_two_dirs
 from legofmt.data.load.packed import load_dataset
 from legofmt.data.load.loader import event_lengths as _event_lengths
 from legofmt.data.load.loader import split_val
-from legofmt.data.load.packed import interacting_only as _interacting_only
+from legofmt.data.load.packed import without
 from legofmt.multiplicity.model import MultLoader
 
 
@@ -30,10 +30,10 @@ def test_event_lengths_and_interacting_match(tmp_path) -> None:
     a, b = (load_dataset(str(d), prep=packed_prep()) for d in (pad, pk))
     split = lambda ds: split_val(ds, {"val_frac": 0.34})[0]
     with _no_materialising():
-        lb, ib = _event_lengths(split(b)), _interacting_only(b)
+        lb, ib = _event_lengths(split(b)), without(b, passthrough=True)
         lib = _event_lengths(ib)
     assert torch.equal(_event_lengths(split(a)), lb)
-    ia = _interacting_only(a)
+    ia = without(a, passthrough=True)
     assert torch.equal(ia.idx, ib.idx)
     assert torch.equal(_event_lengths(ia), lib)
 

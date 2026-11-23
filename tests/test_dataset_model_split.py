@@ -1,10 +1,11 @@
 """A stored dataset must carry no model parameters.
 
-``DataPrep.prep`` writes the incoming energy and ``E_dep`` in MeV and the
-outgoing energy as a cutoff-only log ratio; ``DataPrep.norm_e`` puts the two
-MeV channels on the model scale when ``load_dataset`` loads the file. So one
-dataset can feed models with different ``max_energy``, and a dataset can be
-generated before any model exists.
+``DataPrep.prep`` writes every energy in MeV, and ``DataPrep.norm_e`` puts
+them on the model scale when ``load_dataset`` loads the file. So one dataset
+can feed models with different ``max_energy``, and a dataset can be generated
+before any model exists. The padded files here are files from before
+(``as_file_from_before``): they store the outgoing energy as a cutoff-only log
+ratio, which needs no conversion either.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import math
 import pytest
 import torch
 
-from test_helpers import MANIFOLD, _prep_config
+from test_helpers import MANIFOLD, _prep_config, as_file_from_before
 from legofmt.data.load.packed import load_dataset
 from legofmt.data.write.norm import DataPrep
 from legofmt.data.struct import _F
@@ -43,7 +44,7 @@ def _raw(n=4):
 def dataset_dir(tmp_path):
     """A dataset directory written by a ``DataPrep`` that knows no model's ``max_energy``."""
     ds = load_dataset(data=_raw(), prep=DataPrep(_prep_config()), cutoff_mev=CUTOFF).data
-    torch.save((ds.f.full, ds.m.full, ds.am.full), tmp_path / "data_prepped.pt")
+    torch.save(as_file_from_before((ds.f.full, ds.m.full, ds.am.full), CUTOFF), tmp_path / "data_prepped.pt")
     (tmp_path / "meta.json").write_text(json.dumps({
         "ntokens": ds.f.full.shape[1], "particles": [22.0, 2212.0],
         "particles_in": [2212.0], "cutoff_mev": CUTOFF,
@@ -117,7 +118,7 @@ def test_setup_normalises_the_training_data(dataset_dir) -> None:
 def _legacy(dataset_dir, max_energy=300.0):
     """Returns the same events as a file from before the split stores them: both MeV channels normalised."""
     return DataPrep(_prep_config(max_energy=max_energy)).norm_e(
-        torch.load(dataset_dir / "data_prepped.pt", weights_only=False))
+        torch.load(dataset_dir / "data_prepped.pt", weights_only=False), out_mev=False)
 
 
 def test_already_normalised_file_is_passed_through(dataset_dir) -> None:

@@ -46,6 +46,11 @@ density_space = np.linspace(0.5, 10.0, n_items)
 density = np.tile(density_space, len(materials))
 atomic_number, mass_number, size = np.repeat(np.array(materials).T, n_items, axis=1)
 
+# The per-event conditioning scalars, in the order of their tokens. They must be per_event keys of pyg4lego's output
+# and the same list as the training config's cond_scalars: otherwise scalars are dropped silently or the token layout
+# differs.
+cond_scalars = ["Density", "Z", "A", "Size"]
+
 args = sys.argv[1:]
 out_dir = args[0] if args else os.environ.get("LEGO_DATA_DIR", ".")
 os.makedirs(out_dir, exist_ok=True)
@@ -61,6 +66,8 @@ if mode is None:
 
 if mode == "chunk":
     rows = np.array_split(np.arange(len(density)), n_chunks)[int(arg)]
+    # the chunk's materials (density, Z, A): Geant4 builds their physics tables once, instead of at every change
+    chunk_materials = np.unique(np.stack((density[rows], atomic_number[rows], mass_number[rows]), axis=1), axis=0)
     data = pyg4lego.run_simulation(
         n_events_per_item, pos, mom, energy,
         random_energy_emax=energy_max,
@@ -69,10 +76,15 @@ if mode == "chunk":
         density=density[rows],
         atomic_number=atomic_number[rows],
         mass_number=mass_number[rows],
-        size=size[rows],
+        size=np.unique(size[rows]),   # pyg4lego takes one cube edge per call: a chunk holds one material's items
         random_energy=True,
         SourceParticles=pdgids_in,
+        preregistered_materials=chunk_materials,
     )
+    missing = [k for k in cond_scalars if k not in data["per_event"]]
+    if missing:   # here, not in the merge after every chunk has run
+        raise ValueError(f"pyg4lego wrote no per_event {missing}, which cond_scalars needs: this pyg4lego lacks main's "
+                         "writeout of Z, A and Size (f3d358e)")
     data = {grp: {k: torch.as_tensor(v) for k, v in d.items()} for grp, d in data.items()}
     if "per_slab" in data:   # per-layer E_dep (slab geometry): stored as a 4th tensor next to (f, m, am)
         data["per_event"]["E_dep_layers"] = data["per_slab"]["E_dep"]
@@ -83,11 +95,6 @@ if mode == "chunk":
 # Everything from here on is the merge.
 torch.set_num_threads(8)   # torch defaults to every core; on a busy box the extra threads only spin-wait
 manifold = [{"name": "euclidean", "dim": 1 }, {"name": "sphere", "dim": 3 }, {"name": "sphere", "dim": 3 }]
-
-# The per-event conditioning scalars, in the order of their tokens. They must be per_event keys of pyg4lego's output
-# and the same list as the training config's cond_scalars: otherwise scalars are dropped silently or the token layout
-# differs.
-cond_scalars = ["Density", "Z", "A", "Size"]
 
 # Edge lengths [Lx, Ly, Lz] of a cuboid target (only their ratios are used); None = cube.
 # Positions are stored as the direction of x / cuboid_dim, so the model needs the same value.
@@ -121,7 +128,7 @@ if arg == "stats":
 cap = int(n_out.max()) if arg == "none" else int(arg)
 keep = n_out <= cap
 L = 1 + int(n_out[keep].max())
-chunks, excess = [], {}
+chunks, excess, out_excess = [], {}, {}
 for path, kp in zip(paths, keep.split(sizes)):
     pf, pm, pam, padd = torch.load(path, weights_only=False)
     w = L - min(L, pf.shape[1])
@@ -132,6 +139,9 @@ for path, kp in zip(paths, keep.split(sizes)):
     del pf, pm, pam, padd
     for p, e in DataPrep.edep_excess_max(parts[0]).items():   # per incoming pdgid: the largest E_dep - E_in
         excess[p] = max(excess.get(p, 0.0), e)
+    for p, row in DataPrep.out_excess_max(parts[0]).items():   # per pair of pdgids: the largest E_out - E_in
+        for q, e in row.items():
+            out_excess.setdefault(p, {})[q] = max(out_excess.get(p, {}).get(q, 0.0), e)
     n_edep_layers = parts[3].shape[1] if len(parts) > 3 else None
     chunks.append(pack(*parts[:3], n_prefix=len(cond_scalars) + 1,
                        edep_layers=parts[3] if len(parts) > 3 else None))
@@ -156,6 +166,7 @@ meta_dict = {
     "cuboid_dim": cuboid_dim,
     "n_edep_layers": n_edep_layers,
     "edep_excess_max_mev": dict(sorted(excess.items())),
+    "out_excess_max_mev": {p: dict(sorted(row.items())) for p, row in sorted(out_excess.items())},
     "format": "packed",
     "n_events": len(packed),
 }

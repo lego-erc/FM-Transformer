@@ -69,8 +69,12 @@ config:
     base_pretrain_bs: 16384
     edep_log_min: 1.0e-6     # the floor [MeV] of E_dep's log scale
     edep_margin: true        # the margin token: E_dep as the log-odds of the deposited fraction of E_in + margin,
-                             # for the incoming species of edep_margin_species
-    edep_margin_species: [11, -11, 22]
+                             # for every incoming species (edep_margin_species: only for these)
+    out_margin: true         # the outgoing energy on the margin scale of E_in + margin(pid_in, pid_out); needs a
+                             # dataset that stores the outgoing energy in MeV (scripts/gen_data.py)
+    exclude_absorbed: true   # an event without an outgoing particle: not trained on, generated as E_dep = E_in;
+                             # for a low cutoff only: what escapes below the cutoff is missing from E_dep
+    energy_border: true      # an outgoing energy outside [0, 1] moves straight to the border
     edep_whiten: true        # the flow carries the E_dep token in units of the base head's per-event prior
     mask_conf: { p_forward: 1. }
     canon_sym: true

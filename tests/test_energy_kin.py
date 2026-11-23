@@ -71,12 +71,12 @@ def test_energy_kin_scalar_from_kinetic_column(energy_kin) -> None:
     assert abs(float(_F(stored).in_p[..., 0, 0]) - 100.0) < 1e-4      # MeV in the file
     got = float(_F(loaded).in_p[..., 0, 0])
     assert abs(got - _scal(100.0)) < 1e-5, (got, _scal(100.0))
-    # the outgoing energy is 1 - s_out / s_in of the kinetic energies and needs no conversion:
-    # log(max_energy / cutoff) cancels in the ratio, so the channel does not depend on max_energy
+    # the outgoing energy is stored in MeV too; loaded on the legacy log scale, it is 1 - s_out / s_in of the kinetic
+    # energies: log(max_energy / cutoff) cancels in the ratio, so the channel does not depend on max_energy
+    assert abs(float(_F(stored).out_p[..., 0, 0]) - 20.0) < 1e-4
     want = 1 - _scal(20.0) / _scal(100.0)
-    for tag, f in (("stored", stored), ("loaded", loaded)):
-        got_o = float(_F(f).out_p[..., 0, 0])
-        assert abs(got_o - want) < 1e-5, (tag, got_o, want)
+    got_o = float(_F(loaded).out_p[..., 0, 0])
+    assert abs(got_o - want) < 1e-5, (got_o, want)
 
 
 def test_explicit_false_is_momentum_based() -> None:
@@ -88,15 +88,18 @@ def test_explicit_false_is_momentum_based() -> None:
 
 
 def test_energy_kin_exothermic_outgoing_clamps_to_zero() -> None:
-    # a capture gamma with T=30, above the incoming neutron's T=12: the ratio clamps at 1, the channel is 0
+    # a capture gamma with T=30, above the incoming neutron's T=12: stored as it is; on the legacy log scale the ratio
+    # clamps at 1, and the channel is 0
     cc = torch.tensor([[
         _raw_token(12.0, 939.57, (1, 0, 0), (-50, 0, 0), 2112),
         _raw_token(30.0, 0.0, (0, 1, 0), (0, 50, 0), 22),
     ]])
     batch = (cc, torch.tensor([[0, 1]]), torch.ones(1, 2, dtype=torch.bool),
              {"E_dep": torch.tensor([1.0]), "Density": torch.tensor([3.0])})
-    f, _, _ = _prep(energy_kin=True).prep(batch)
-    assert float(_F(f).out_p[..., 0, 0]) == 0.0
+    prep = _prep(energy_kin=True)
+    stored = prep.prep(batch)
+    assert float(_F(stored[0]).out_p[..., 0, 0]) == pytest.approx(30.0)
+    assert float(_F(prep.norm_e(stored)[0]).out_p[..., 0, 0]) == 0.0
 
 
 def test_energy_kin_cutoff_uses_kinetic() -> None:

@@ -39,7 +39,9 @@ class PaddedData(DataStruct):
                 the padded tensors.
             frac:     keep this fraction of the events, the same random ones every run.
             device:   of the raw particles' result and of ``frac``'s generator.
-            inplace:  the tensors are a fresh load nobody else holds: ``norm_e`` may normalise them in place.
+            inplace:  the tensors are a file, freshly loaded, which nobody else holds: ``norm_e`` may normalise them
+                in place, and their outgoing energy is on the legacy log scale. False: tensors that ``DataPrep.prep``
+                wrote, every energy in MeV.
 
         Raises:
             ValueError: a raw dict without a ``prep``.
@@ -51,8 +53,8 @@ class PaddedData(DataStruct):
                     "GetLEGOData yields pre-format_add layout that DataStruct misaligns."
                 )
             data = prep(GetLEGOData(device=device, **cut_args)(data))
-        elif prep is not None:
-            data = prep.norm_e(data, inplace=inplace) if hasattr(prep, "norm_e") else prep(data)
+        elif prep is not None:   # a padded file stores the outgoing energy on the legacy log scale
+            data = prep.norm_e(data, inplace=inplace, out_mev=not inplace) if hasattr(prep, "norm_e") else prep(data)
         self = cls(*data)
         if frac and frac < 1.0:   # the same events every run
             n = int(len(self) * frac)

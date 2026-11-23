@@ -192,33 +192,18 @@ class TrainStep:
 
     @torch.no_grad()
     def _flow_frame(self, ds_t: DataStruct) -> DataStruct:
-        """Returns the batch as the flow learns it: the exact zeros moved, the canonical frame, the zoomed directions.
+        """Returns the batch as the flow learns it: the canonical frame, the zoomed directions.
 
         ```
-        overflow_delta   an outgoing energy of exactly 0 (the particle keeps the full incoming energy) and an E_dep
-                         of exactly 0 (no deposit) -> -overflow_delta
-        canon_sym        every event rotated onto the canonical cube face; sym_aug: a random symmetry of that face
-                         on top
-        dir_zoom         the outgoing polar angles zoomed about the incoming direction
+        canon_sym   every event rotated onto the canonical cube face; sym_aug: a random symmetry of that face on top
+        dir_zoom    the outgoing polar angles zoomed about the incoming direction
         ```
         """
         m = self._sample_mask(ds_t) if self.rc.inverse_events else ds_t.m.full   # legacy: inverse events
         ds_t = DataStruct(ds_t.f.full, m, ds_t.am.full)
-        if self.rc.overflow_delta > 0:
-            ds_t = self._shift_overflow_targets(ds_t)
+        if self.rc.overflow_delta > 0: ds_t = self._shift_overflow_targets(ds_t)   # legacy: overflow_delta
         ds_t, _ = self._enter_frame(ds_t, zoom=True, aug=self.rc.sym_aug)
         return ds_t
-
-    def _shift_overflow_targets(self, ds_t: DataStruct) -> DataStruct:
-        """Returns a copy of the batch with its exact zeros at ``-overflow_delta``, outside [0, 1].
-
-        The zeros are an outgoing energy 0 on a real outgoing token, and an E_dep 0.
-        """
-        f = ds_t.f.full.clone()
-        out_e, edep = _F(f).out_energy, _F(f).edep
-        out_e.masked_fill_((out_e == 0) & ds_t.am.out_p.bool(), -self.rc.overflow_delta)
-        edep.masked_fill_(edep == 0, -self.rc.overflow_delta)
-        return DataStruct(f, ds_t.m.full, ds_t.am.full)
 
     def _sample_t(self, ds_t: DataStruct) -> Tensor:
         """Samples each event's time ``t``, (B,), with ``sd3_time``."""

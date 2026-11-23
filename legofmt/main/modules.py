@@ -42,7 +42,7 @@ from legofmt.cfm.solvers import Solvers
 
 from legofmt.main.train_step import TrainStep
 
-from legofmt.data.load.packed import interacting_only, load_dataset
+from legofmt.data.load.packed import load_dataset, without
 from legofmt.data.load.loader import (
     AUTO_MIN_BATCHES, LengthBucketBatchSampler, event_lengths, loader_seed, make_loader, smallest_bucket, split_val,
 )
@@ -233,8 +233,9 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
         # a fresh field with ``cond_pool`` standardises its conditioning scalars by this dataset's mean and std
         if pool is not None and self.rc.state_dict is None:
             pool.standardise_by(torch.stack([full.cond(name) for name in self.rc.cond_scalars], dim=-1))
-        if self.rc.config.get("model_conf", {}).get("exclude_passthrough", False):
-            full = interacting_only(full)
+        passthrough = self.rc.config.get("model_conf", {}).get("exclude_passthrough", False)
+        if passthrough or self.rc.exclude_absorbed:   # events the flow does not train on
+            full = without(full, passthrough=passthrough, absorbed=self.rc.exclude_absorbed)
         self._train_ds, self._val_ds = split_val(full, self.rc.val_conf)
         self._pretrain_base_if_needed()
 

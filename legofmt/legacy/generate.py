@@ -25,8 +25,15 @@ def balance_passthrough(gen, pt_mask: torch.Tensor, attn_mask: torch.Tensor, e_i
 
     ``pt_mask`` (B,) marks the events that skip the flow, ``attn_mask`` (B, L) the valid tokens; ``e_in`` [MeV] and
     ``pid_in`` are (B,), the incoming energy and pdgid.
+
+    Raises:
+        ValueError: ``energy_balance`` with ``model_conf.out_margin``: the balance reads the legacy log scale.
     """
-    if not gen.model.rc.odeint_conf.get("energy_balance", False) or gen.model.edep_ae is not None:
+    balance = gen.model.rc.odeint_conf.get("energy_balance", False)
+    if balance and gen.dp.out_margin:
+        raise ValueError("odeint_conf.energy_balance decodes the outgoing energy on the legacy log scale: it does not "
+                         "go with model_conf.out_margin")
+    if not balance or gen.model.edep_ae is not None:
         return pt_mask
     em = (pid_in.abs() == 11) | (pid_in == 22)
     leaves_nothing = attn_mask[:, gen.n_prefix + 1:].sum(-1) == 0

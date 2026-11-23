@@ -17,7 +17,8 @@ from legofmt.data.struct import loss_mask
 _NAN_TOKEN = torch.full((8,), float("nan"))
 
 
-def pack(f: Tensor, m: Tensor, am: Tensor, n_prefix: int, edep_layers: Tensor | None = None) -> PackedData:
+def pack(f: Tensor, m: Tensor, am: Tensor, n_prefix: int, edep_layers: Tensor | None = None,
+         out_energy_mev: bool = True) -> PackedData:
     """Packs padded tensors, refusing any that ``unpack`` would not give back bit for bit.
 
     ```
@@ -35,6 +36,8 @@ def pack(f: Tensor, m: Tensor, am: Tensor, n_prefix: int, edep_layers: Tensor | 
         am:          (N, L) bool, the attention mask.
         n_prefix:    the number of prefix tokens.
         edep_layers: (N, n_layers), the per-layer E_dep, carried along; None: the dataset has none.
+        out_energy_mev: the outgoing energy is in MeV, as ``DataPrep.prep`` writes it; false: the tensors of a file
+            from before, on the legacy log scale.
 
     Raises:
         TypeError:  a tensor has another dtype.
@@ -55,6 +58,7 @@ def pack(f: Tensor, m: Tensor, am: Tensor, n_prefix: int, edep_layers: Tensor | 
         n_prefix=P,
         L=f.shape[1],
         edep_layers=None if edep_layers is None else edep_layers.clone(),
+        out_energy_mev=out_energy_mev,
     )
 
 
@@ -62,20 +66,23 @@ def concat(parts: list[PackedData]) -> PackedData:
     """Joins datasets event-wise, as packing their padded tensors in one go would.
 
     Raises:
-        ValueError: the parts disagree on ``n_prefix``, ``L``, the template tokens, or on carrying
-            ``edep_layers``.
+        ValueError: the parts disagree on ``n_prefix``, ``L``, the template tokens, on carrying ``edep_layers``, or
+            on the unit of the outgoing energy.
     """
     P, L = parts[0].n_prefix, parts[0].L
     if any(p.n_prefix != P or p.L != L for p in parts):
         raise ValueError("parts disagree on n_prefix or L")
     if len({p.edep_layers is None for p in parts}) > 1:
         raise ValueError("some parts carry edep_layers and some do not")
+    if len({p.out_energy_mev for p in parts}) > 1:
+        raise ValueError("some parts store the outgoing energy in MeV and some on the legacy log scale")
     cat = lambda name: torch.cat([getattr(p, name) for p in parts])
     offsets = F.pad(torch.cat([p.offsets.diff() for p in parts]).cumsum(0), (1, 0))
     return PackedData(prefix=cat("prefix"), tokens=cat("tokens"), offsets=offsets, pad_e0=cat("pad_e0"),
                       pad_token=_merge_tokens([p.pad_token for p in parts], "pad_token"),
                       prefix_token=_merge_tokens([p.prefix_token for p in parts], "prefix_token"), n_prefix=P, L=L,
-                      edep_layers=None if parts[0].edep_layers is None else cat("edep_layers"))
+                      edep_layers=None if parts[0].edep_layers is None else cat("edep_layers"),
+                      out_energy_mev=parts[0].out_energy_mev)
 
 
 # ---- plumbing --------------------------------------------------------------------------------------------------------

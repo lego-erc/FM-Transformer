@@ -13,12 +13,15 @@ slots     n_s = floor(c_s min(1, max_particles / C)),  C = sum_s c_s;  the slots
 tokens    [prefix, incoming, slot_1 .. slot_max_particles], the prefix being the conditioning scalar tokens and the
           E_dep token (struct.py): each slot a copy of the incoming token with its species index, 0 when empty
           (build_batch)
-flow      LEGOLtng.forward flows the base to the outgoing particles and E_dep; pass-through events skip it
+flow      LEGOLtng.forward flows the base to the outgoing particles and E_dep; pass-through events skip it, and with
+          model_conf.exclude_absorbed so do absorbed events (no outgoing particle)
 output    species indices back to pdgids; the E_dep token capped at norm_edep_layer(E_in + excess(species))
-          (_clamp_edep); with model_conf.edep_ae the E_dep layers [MeV], left in self.edep_layers
+          (_clamp_edep); an absorbed event's E_dep = E_in, + 2 m_e for an e+ (absorbed_deposit); with
+          model_conf.edep_ae the E_dep layers [MeV], left in self.edep_layers
 ```
 
-The momentum in ``cond`` must be energy-scaled, not unit-norm, or the event is conditioned on a ~1 MeV particle.
+The momentum in ``cond`` must be energy-scaled, not unit-norm, or the event is conditioned on a ~1 MeV particle. The
+output stays on the model's scales; ``dp.denorm_out_energy`` decodes an outgoing energy to MeV.
 ``gen_model_w_g4_args`` takes Geant4-shaped arguments instead. The energy balance and exit consistency
 (``odeint_conf``) and ``GenerateIn``, the reverse direction, are :mod:`legofmt.legacy.generate`.
 """
@@ -32,12 +35,24 @@ import torch.nn.functional as F
 from legofmt.cfm.project_model import is_compiled
 from legofmt.compat import dynamic_shape_attention
 from legofmt.data.write.norm import DataPrep
-from legofmt.data.struct import _F, cond_slot, loss_mask, set_layout, species_values, vocab_index
+from legofmt.data.struct import _F, _M, cond_slot, loss_mask, set_layout, species_values, vocab_index
 from legofmt.legacy.generate import balance_passthrough, close_balance, generate_in
 from legofmt.legacy.norm import HAND_SET_EXCESS_MEV
 from legofmt.main.modules import LEGOLtng
 from legofmt.multiplicity.model import MultModel
 from legofmt.rng import REFILL, categorical, rng_on, rng_sub
+
+# an absorbed e+ annihilates at rest, and its two photons' 2 m_e [MeV] are deposited too
+_REST_DEPOSIT_MEV = {-11: 1.022}
+
+
+def absorbed_deposit(e_in: torch.Tensor, pid_in: torch.Tensor) -> torch.Tensor:
+    """Returns the E_dep [MeV] of absorbed events (no outgoing particle): ``E_in``, plus 2 m_e for an e+.
+
+    ``e_in`` [MeV] and ``pid_in`` (raw pdgids) are (B,).
+    """
+    rest, _ = species_values(_REST_DEPOSIT_MEV, pid_in, e_in)
+    return e_in + rest
 
 
 def fit_counts(counts: torch.Tensor, max_particles: int, refill) -> torch.Tensor:
@@ -198,13 +213,16 @@ class GenerateOut(torch.nn.Module):
         cond_fm, mask, attn_mask = self.gen_batch(cond, passthrough=passthrough, rng=rng, gt_mult=gt_mult)
         e_in, pid_in = self._incoming_energy_pid(cond)
 
-        pt_mask = mask.sum(-1) == 0                                             # nothing to generate
-        pt_mask = balance_passthrough(self, pt_mask, attn_mask, e_in, pid_in)   # legacy: energy_balance
-        sols, mask, attn_mask = self._flow(cond_fm, mask, attn_mask, pt_mask, rng)
+        pt_mask  = mask.sum(-1) == 0                                             # nothing to generate
+        pt_mask  = balance_passthrough(self, pt_mask, attn_mask, e_in, pid_in)   # legacy: energy_balance
+        absorbed = self.model.rc.exclude_absorbed & ~_M(attn_mask).out_p.any(-1) & ~pt_mask   # no outgoing particle
+        sols, mask, attn_mask = self._flow(cond_fm, mask, attn_mask, pt_mask | absorbed, rng)
 
         out = _F(sols)
         out.pdgids.copy_(self._pdgids_of(out.pdgids))
         out.edep.copy_(self._clamp_edep(out.edep, e_in, pid_in))
+        e_absorbed = self.dp.norm_edep_margin(absorbed_deposit(e_in, pid_in), e_in, pid_in).to(out.edep)
+        out.edep.copy_(torch.where(absorbed, e_absorbed, out.edep))   # an absorbed event deposits everything
         close_balance(self, sols, e_in, pid_in)   # legacy: energy_balance, exit_consistency
         self.edep_layers = self._edep_layers(sols, pt_mask, e_in, pid_in, rng)
         return sols, mask, attn_mask
@@ -375,7 +393,8 @@ class GenerateOut(torch.nn.Module):
 
             ``per_event["E_dep"]`` is the normalised token, not MeV, and always on the ``norm_edep_layer`` scale,
             which callers decode with ``edep_log_min`` (a ``model_conf.edep_margin`` token is re-encoded on it here);
-            the E_dep layers are on the same scale.
+            the E_dep layers are on the same scale. The outgoing energy decodes to MeV with ``dp.denorm_out_energy``
+            and the event's incoming energy and pdgid.
         """
         cond = self._g4_cond(n, pos, mom, energy, density, size, pdgids, Z, A)
         sols, _, _ = self(cond, passthrough=passthrough, rng=rng, gt_mult=gt_mult)
@@ -437,17 +456,19 @@ class GenerateOut(torch.nn.Module):
                              f"{self.ptypes.tolist()}: {(len(cond), len(self.ptypes))}, got {tuple(gt_mult.shape)}")
         return torch.zeros(len(cond), dtype=torch.bool, device=cond.device), gt_mult.to(cond.device).long()
 
-    def _flow(self, cond_fm, mask, attn_mask, pt_mask, rng):
-        """Runs the flow on the events that interact; a pass-through event keeps its tokens as built.
+    def _flow(self, cond_fm, mask, attn_mask, skip, rng):
+        """Runs the flow on the events that need it; an event in ``skip`` (B,) keeps its tokens as built.
+
+        The events skipped are the pass-through events, and with ``model_conf.exclude_absorbed`` the absorbed ones.
 
         Returns:
             ``(sols, mask, attn_mask)``, as ``LEGOLtng.forward`` returns them.
         """
-        if pt_mask.all():
+        if skip.all():
             return cond_fm.clone(), mask, attn_mask
-        if not pt_mask.any():
+        if not skip.any():
             return self.model((cond_fm, mask, attn_mask), rng=rng)
-        keep = ~pt_mask
+        keep = ~skip
         sub, _, _ = self.model((cond_fm[keep], mask[keep], attn_mask[keep]), rng=rng_sub(rng, keep))
         sols = cond_fm.clone()
         sols[keep] = sub.to(sols.dtype)

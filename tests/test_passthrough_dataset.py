@@ -1,5 +1,5 @@
-"""Tests for ``interacting_only`` (``model_conf.exclude_passthrough``): the dataset view without the pass-through
-events, which the flow then never trains on."""
+"""Tests for ``without`` (``model_conf.exclude_passthrough``, ``model_conf.exclude_absorbed``): the dataset view without
+the pass-through events, the absorbed events or both, which the flow then never trains on."""
 
 from __future__ import annotations
 
@@ -7,7 +7,11 @@ import pytest
 import torch
 
 from legofmt.data.struct import DataStruct, _F, set_layout
-from legofmt.data.load.packed import interacting_only as _interacting_only
+from legofmt.data.load.packed import without
+
+
+def _interacting_only(ds):
+    return without(ds, passthrough=True)
 
 
 class _FakeDS:
@@ -80,3 +84,12 @@ def test_a_batch_of_indices_is_gathered_in_one_go() -> None:
     assert batch.f.full.shape[0] == 2
     assert _F(batch.f.full).edep.reshape(-1).tolist() == pytest.approx([0.5, 0.9])
 
+
+def test_without_absorbed_drops_the_events_without_an_outgoing_particle() -> None:
+    view = without(_dataset([0.3, 0.5, 0.0, 0.2], [0, 1, 1, 2]), absorbed=True)
+    assert _edeps(view) == pytest.approx([0.5, 0.0, 0.2])
+
+
+def test_both_keys_drop_both() -> None:
+    view = without(_dataset([0.3, 0.5, 0.0, 0.2], [0, 1, 1, 2]), passthrough=True, absorbed=True)
+    assert _edeps(view) == pytest.approx([0.5, 0.2])
