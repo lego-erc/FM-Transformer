@@ -1,7 +1,8 @@
 """The flow-map term ``L_fm``: self-distillation of the field into few-step sampling.
 
 ```
-step      d = 2**-k,  k ~ U{0, ..., sections - 1};   t0 ~ the grid of d in [0, 1)
+step      d = 2**-k,  k ~ U{top, ..., sections - 1};   t0 ~ the grid of d in [0, 1)
+          top = 0; with one_step_euler_unlock the rungs are unlocked from the smallest d up (``top_rung``)
 teacher   two half steps from s0 = s_{t0}, without gradient:
             s_mid = exp_{s0}(d/2 v(s0, t0; d/2))
             s_end = exp_{s_mid}(d/2 v(s_mid, t0 + d/2; d/2))
@@ -51,7 +52,7 @@ def _one_step_euler_loss_fp32(lego, base: Tensor, ds_t, pdgid_idx: Tensor, model
     field, man, gen = _ladder_inputs(lego, ds_t, pdgid_idx, model)
     sections = lego.rc.one_step_euler_sections
     with torch.no_grad():
-        k     = _uniform_rung(sections, base)                                     # k ~ U{0, ..., sections - 1}
+        k     = _uniform_rung(sections, base, top_rung(lego))                     # k ~ U{top, ..., sections - 1}
         d     = 2.0 ** -k
         t0    = (torch.rand_like(d) * (1.0 / d).round()).floor() * d               # on the grid of d
         s0    = _on_path(lego, base, ds_t, z, t0)                                  # s_{t0}
@@ -75,9 +76,29 @@ def _ladder_inputs(lego, ds_t, pdgid_idx: Tensor, model):
     return state_field(model, ckw), LatentManifold(lego.model.manifold), (mask == 1).unsqueeze(-1)
 
 
-def _uniform_rung(sections: int, base: Tensor) -> Tensor:
-    """Samples one rung ``k`` per event, uniform on {0, ..., sections - 1}: (B, 1) in the dtype of ``base``."""
-    return (torch.randint(1, sections + 1, (base.shape[0], 1), device=base.device) - 1).to(base.dtype)
+def top_rung(lego) -> int:
+    """Returns the rung of the largest step drawn now, ``top``: training draws the rungs top, ..., sections - 1.
+
+    ```
+    f     = global_step / the run's optimizer steps          (the count the LR schedule runs on)
+    n     = 1 + floor((sections - 1) min(1, f / u))           u = one_step_euler_unlock: n rungs, the smallest d first
+    top   = sections - n
+    ```
+    0 (every rung) in validation and without the curriculum (u = 0).
+    """
+    sections, u = lego.rc.one_step_euler_sections, lego.rc.one_step_euler_unlock
+    if u <= 0 or not lego.training:
+        return 0
+    f = lego.global_step / lego.trainer.estimated_stepping_batches
+    return sections - 1 - int((sections - 1) * min(1.0, f / u))
+
+
+def _uniform_rung(sections: int, base: Tensor, top: int) -> Tensor:
+    """Samples one rung ``k`` per event, uniform on {top, ..., sections - 1}: (B, 1) in the dtype of ``base``.
+
+    One draw of the same shape for every ``top``, so the curriculum leaves the random stream as it is.
+    """
+    return (torch.randint(top + 1, sections + 1, (base.shape[0], 1), device=base.device) - 1).to(base.dtype)
 
 
 def _on_path(lego, base: Tensor, ds_t, z, t0: Tensor) -> State:

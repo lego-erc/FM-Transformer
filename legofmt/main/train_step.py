@@ -34,7 +34,7 @@ from legofmt.data.load.loader import smallest_bucket
 from legofmt.data.struct import DataStruct, _F
 from legofmt.numerics import held, masked_mean
 
-from legofmt.cfm.flow_map import one_step_euler_loss
+from legofmt.cfm.flow_map import one_step_euler_loss, top_rung
 from legofmt.main.val_metrics import UNSYNCED_PREFIXES
 
 def sd3_time(u, s):
@@ -185,7 +185,9 @@ class TrainStep:
 
         l_fm = one_step_euler_loss(self, base, ds_t, pdgid_idx, model, z=z)
         self._log_step({"loss/one_step_euler": l_fm,
-                        "loss_weight/var_flow": None if lv_f is None else torch.exp(lv_f.detach())})
+                        "loss_weight/var_flow": None if lv_f is None else torch.exp(lv_f.detach()),
+                        "flow_map/top_rung": None if self.rc.one_step_euler_unlock <= 0
+                                             else l_fm.new_tensor(float(top_rung(self)))})
         return loss + flow_map_term(l_fm, fac, every if self.training else 1, lv_f)
 
     # ---- the batch, the path, the field ---------------------------------------------------------------------------

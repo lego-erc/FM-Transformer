@@ -5,6 +5,7 @@ map (``step_cond``), ``overflow_delta`` and the learned loss weights."""
 from __future__ import annotations
 
 import warnings
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -231,6 +232,95 @@ def test_flow_map_ladder_is_anchored_at_zero() -> None:
     unsupervised = {d for d in teacher if d > 0} - supervised
     assert not unsupervised, f"teacher queries unsupervised d: {sorted(unsupervised)}"
     assert min(d for d in supervised) == 2.0 ** -(sections - 1)
+
+
+# ---- the rung curriculum (one_step_euler_unlock) -------------------------------------------------------------------
+
+def _at_fraction(f: float, total: int = 100):
+    """Puts the training clock at ``f`` of a run of ``total`` optimizer steps (``global_step``, the trainer's count)."""
+    return patch.multiple(LEGOLtngVelocity, global_step=round(f * total),
+                          trainer=SimpleNamespace(estimated_stepping_batches=total))
+
+
+def _steps_asked(model, calls: int = 40) -> tuple[set, set]:
+    """Returns the step sizes ``d`` that ``calls`` flow-map losses ask of the field: (predictions, teacher half steps)."""
+    from legofmt.cfm.flow_map import one_step_euler_loss
+
+    ds = _fake_batch(B=64)
+    base, pid = model.gen_base_wrapper(ds), model.convert_pdgids(ds.f.pdgids)
+    predicted, teacher = set(), set()
+    orig = model.model.vf.forward
+
+    def spy(x, mask, attn_mask, types, pdgids_, t=None, d=None):
+        if d is not None:
+            vals = {round(float(v), 8) for v in d.expand_as(mask)[mask == 1]}
+            (predicted if torch.is_grad_enabled() else teacher).update(vals)
+        return orig(x, mask, attn_mask, types, pdgids_, t=t, d=d)
+
+    model.model.vf.forward = spy
+    for _ in range(calls):
+        one_step_euler_loss(model, base, ds, pid)
+    model.model.vf.forward = orig
+    return predicted, teacher
+
+
+def test_one_step_euler_unlock_resolves() -> None:
+    """The key must reach the run config: an unknown ``model_conf`` key is dropped without a word, which would train a
+    curriculum run on every rung from step 0."""
+    assert LEGOLtngVelocity(_step_cond_config()).rc.one_step_euler_unlock == 0.0
+    assert LEGOLtngVelocity(_step_cond_config(one_step_euler_unlock=0.5)).rc.one_step_euler_unlock == 0.5
+    for u in (-0.1, 1.5):
+        with pytest.raises(ValueError, match="one_step_euler_unlock"):
+            LEGOLtngVelocity(_step_cond_config(one_step_euler_unlock=u))
+
+
+@pytest.mark.parametrize("f, steps", [(0.0, {0.125}), (0.2, {0.25, 0.125}), (0.5, {1.0, 0.5, 0.25, 0.125})])
+def test_curriculum_unlocks_the_rungs_from_the_smallest_step_up(f, steps) -> None:
+    """With u = 0.5 and 4 sections, n = 1 + floor(3 min(1, f / 0.5)) rungs are drawn, the smallest steps first: at
+    f = 0 only d = 1/8, whose teacher stays the instantaneous velocity (d = 0); every rung from f = u on."""
+    model = _fit(LEGOLtngVelocity(_step_cond_config(one_step_euler_unlock=0.5)))
+    with _at_fraction(f):
+        predicted, teacher = _steps_asked(model)
+    assert predicted == steps
+    assert 0.0 in teacher and teacher - {0.0} <= predicted
+
+
+def test_validation_draws_every_rung() -> None:
+    """Validation scores every rung at any point of training, so its flow-map loss compares across runs."""
+    model = _fit(LEGOLtngVelocity(_step_cond_config(one_step_euler_unlock=0.5)), train=False)
+    with _at_fraction(0.0):
+        predicted, _ = _steps_asked(model)
+    assert predicted == {1.0, 0.5, 0.25, 0.125}
+
+
+def test_unlocked_curriculum_is_the_plain_ladder() -> None:
+    """Once every rung is unlocked the loss equals the run without a curriculum, draw for draw (same seed)."""
+    from legofmt.cfm.flow_map import one_step_euler_loss
+
+    plain = _fit(LEGOLtngVelocity(_step_cond_config()))
+    cur = _fit(LEGOLtngVelocity(_step_cond_config(one_step_euler_unlock=0.5)))
+    cur.load_state_dict(plain.state_dict())
+    ds = _fake_batch(B=64)
+    base, pid = plain.gen_base_wrapper(ds), plain.convert_pdgids(ds.f.pdgids)
+    losses = []
+    for model, f in ((plain, 0.0), (cur, 0.75), (cur, 0.0)):
+        torch.manual_seed(0)
+        with _at_fraction(f):
+            losses.append(one_step_euler_loss(model, base, ds, pid))
+    assert torch.equal(losses[0], losses[1])
+    assert not torch.equal(losses[0], losses[2])   # the flag acts
+
+
+def test_curriculum_logs_the_top_rung() -> None:
+    """A curriculum run logs ``flow_map/top_rung``, the largest step's rung it draws (the proof the flag is active);
+    a run without one logs nothing new."""
+    for u, expected in ((0.5, 3.0), (0.0, None)):
+        model = _fit(LEGOLtngVelocity(_step_cond_config(one_step_euler_unlock=u)))
+        seen = {}
+        with _at_fraction(0.0), patch.object(model, "_log_step", seen.update):
+            model._step(_fake_batch(), 0)
+        top = seen.get("flow_map/top_rung")
+        assert (top is None) if expected is None else (float(top) == expected), f"u={u}: logged {top}"
 
 
 def test_one_step_euler_requires_step_cond() -> None:

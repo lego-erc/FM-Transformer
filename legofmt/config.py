@@ -50,6 +50,7 @@ class ResolvedLEGOConfig:
     one_step_euler_fac: float = 0.0
     one_step_euler_sections: int = 8
     one_step_euler_every: int = 1
+    one_step_euler_unlock: float = 0.0           # the rung curriculum (cfm/flow_map.py); 0: every rung from step 0
     learned_loss_weights: bool = False
     edep_cell: bool = False
     edep_whiten: bool = False                  # the E_dep token in units of the base head's per-event prior;
@@ -465,6 +466,8 @@ def _check_lego(config: dict, c: dict, cond_scalars: tuple, len_buckets, state_d
                              "sees the step size and the loss collapses to a curvature penalty on the velocity field.")
         if c["one_step_euler_sections"] < 1:
             raise ValueError(f"one_step_euler_sections must be >= 1, got {c['one_step_euler_sections']}.")
+        if not 0.0 <= c["one_step_euler_unlock"] <= 1.0:
+            raise ValueError(f"one_step_euler_unlock must be in [0, 1], got {c['one_step_euler_unlock']}.")
     if c["dir_zoom"] is not None and not c["dir_zoom"] > 0:
         raise ValueError(f"dir_zoom must be > 0 (rad) or absent, got {c['dir_zoom']}.")
     if not 0.0 <= c["dir_zoom_mix"] < 1.0:
