@@ -93,7 +93,9 @@ if mode == "chunk":
     if "per_slab" in data:   # per-layer E_dep (slab geometry): stored as a 4th tensor next to (f, m, am)
         data["per_event"]["E_dep_layers"] = data["per_slab"]["E_dep"]
     os.makedirs(f"{out_dir}/chunks", exist_ok=True)
-    torch.save(GetLEGOData(cutoff_mev=energy_min, min_particles=0)(data), f"{out_dir}/chunks/chunk_{arg}.pt")
+    # float64 up to pack: a nucleus' 10-digit PDG id (100ZZZAAAI) is not exact in float32
+    torch.save(GetLEGOData(cutoff_mev=energy_min, min_particles=0, dtype=torch.float64)(data),
+               f"{out_dir}/chunks/chunk_{arg}.pt")
     sys.exit()
 
 # Everything from here on is the merge.
@@ -154,10 +156,10 @@ for path, kp in zip(paths, keep.split(sizes)):
 packed = concat(chunks)
 del chunks
 torch.save(packed.to_dict(), f"{out_dir}/data_packed.pt")
-ntokens, pids = packed.L, packed.tokens[:, -1]
+ntokens, pids = packed.L, packed.pdgids
 
 pdgids = pids.flatten().nan_to_num().unique()
-pdgids = pdgids[(0 < pdgids.abs())].tolist()   # no padding (0), no nuclei (10 digits)
+pdgids = pdgids[(0 < pdgids.abs())].tolist()   # no padding (0); nuclei included
 
 meta_dict = {
     "ntokens": ntokens,

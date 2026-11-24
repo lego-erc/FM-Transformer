@@ -122,7 +122,7 @@ class TrainStep:
             ds_t = self._flow_frame(ds_t)
             base = self.gen_base_wrapper(ds_t, all_forward=not self.rc.inverse_events)
             z    = self._latent_ends(layers, base)
-            pdgid_idx = self.convert_pdgids(ds_t.f.pdgids)
+            pdgid_idx = self.species_idx(ds_t.f.pdgids)
             t = self._sample_t(ds_t)
             if self.reflow_teacher is not None: ds_t = self._reflow_coupling(ds_t, base)   # legacy: reflow
             # the data's E_dep token in units of its prior, which gen_base_wrapper set above (no second head call)

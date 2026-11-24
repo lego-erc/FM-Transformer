@@ -41,7 +41,7 @@ def test_fired_events_emit_the_primary_unchanged_and_deposit_nothing(generator: 
     first = out[:, 0]
     assert first[:, 0].abs().max().item() == 0.0            # e_out == e_in
     assert torch.allclose(first[:, 1:7], inc[:, 0, 1:7])    # same direction and position
-    assert first[:, -1].eq(22).all()                        # same species
+    assert generator.pdgids_of(first[:, -1]).eq(22).all()   # same species
 
 
 def test_count_model_is_in_eval_mode_from_construction(tmp_path) -> None:

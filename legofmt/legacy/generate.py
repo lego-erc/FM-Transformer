@@ -43,15 +43,15 @@ def balance_passthrough(gen, pt_mask: torch.Tensor, attn_mask: torch.Tensor, e_i
 def close_balance(gen, sols: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor) -> None:
     """Applies ``odeint_conf.energy_balance``, then ``odeint_conf.exit_consistency``, to the samples ``sols`` in place.
 
-    ``sols`` is (B, L, 8) with pdgids; ``e_in`` and ``pid_in`` as in ``balance_passthrough``.
+    ``sols`` is (B, L, 8) with species indices; ``e_in`` and ``pid_in`` as in ``balance_passthrough``.
     """
     if gen.model.rc.odeint_conf.get("energy_balance", False):
-        _balance_energy(sols, e_in, pid_in, gen.pen, gen.dp)
+        _balance_energy(sols, e_in, pid_in, gen.pen, gen.dp, gen.pdgids_of(_F(sols).out_p[..., -1]))
     if gen.model.rc.odeint_conf.get("exit_consistency", False):
         _exit_outward(sols)
 
 
-def _balance_energy(sols: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor, pen, dp) -> None:
+def _balance_energy(sols: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor, pen, dp, pid: torch.Tensor) -> None:
     """Closes each event's kinetic balance in place: the outgoing energies change, the generated E_dep stays.
 
     ```
@@ -69,11 +69,11 @@ def _balance_energy(sols: torch.Tensor, e_in: torch.Tensor, pid_in: torch.Tensor
     72-81%, and Geant4 closes those events exactly (residual 0.00 MeV to q90). The balance is only valid where the
     data's own balance closes (the 0.1 MeV-cutoff plates, not a 10 MeV cutoff), hence opt-in.
 
-    ``sols`` is (B, L, 8), the samples with pdgids; ``e_in`` [MeV] and ``pid_in`` are (B,), the incoming energy and
-    pdgid.
+    ``sols`` is (B, L, 8), the samples; ``e_in`` [MeV] and ``pid_in`` are (B,), the incoming energy and pdgid; ``pid``
+    (B, K) the outgoing slots' pdgids.
     """
     s = _F(sols)
-    e, pid = s.out_p[..., 0], s.out_p[..., -1]                        # (B, K): per outgoing slot
+    e = s.out_p[..., 0]                                               # (B, K): per outgoing slot
     e_in, pid_in = e_in.double()[:, None], pid_in[:, None]            # (B, 1): per event
     e_in_n = pen.to_scalar_e(e_in)
     live = (pid != 0) & e.isfinite()

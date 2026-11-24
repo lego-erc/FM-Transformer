@@ -170,19 +170,24 @@ def mean_depth(E: torch.Tensor, l: torch.Tensor) -> torch.Tensor:
     return ((E * l).sum(1) / E.sum(1).clamp(min=1e-12))[E.sum(1) > 0].mean()
 
 
+def _pdgids(lego, pid: torch.Tensor) -> torch.Tensor:
+    """Returns the PDG ids of ``pid``, which holds vocabulary indices with ``rc.pdgid_is_idx``."""
+    return F.pad(lego.pdgids_template.to(pid), (1, 0))[pid.long()] if lego.rc.pdgid_is_idx else pid
+
+
 class ShowerValMetrics:
     """The metrics of the module docstring: a call generates the batch with the model and returns them by log name."""
 
     def __call__(self, lego, ds_t) -> dict:
         gen = _overflow_decoded(_F(self._generate(lego, ds_t)))
-        active, pdg = ds_t.am.out_p, ds_t.f.out_pid
+        active, pdg = ds_t.am.out_p, _pdgids(lego, ds_t.f.out_pid)
         real, fake  = _mom_e_pos(ds_t.f.out_cc), _mom_e_pos(gen.out_p)
         out = {
             **_compare("particle", KIN_NAMES,
                        particle_kinematics(*real, active), particle_kinematics(*fake, active)),
             **_compare("summary", SUMMARY_FEATURE_NAMES,
                        event_summary(*real, pdg, active, ds_t.f.edep), event_summary(*fake, pdg, active, gen.edep)),
-            **edep_by_primary(ds_t.f.edep, gen.edep, ds_t.f.in_pid.long(), active.sum(-1)),
+            **edep_by_primary(ds_t.f.edep, gen.edep, _pdgids(lego, ds_t.f.in_pid).long(), active.sum(-1)),
         }
         if getattr(lego, "edep_ae", None) is not None and ds_t.edep_layers is not None:
             out.update(edep_layer_metrics(*_layers_mev(lego, ds_t, gen.edep)))
@@ -254,6 +259,6 @@ def _layers_mev(lego, ds_t, gen_edep):
     """
     dp   = lego._edep_dp
     e_in = dp.pen.from_scalar(ds_t.f.in_mom, ds_t.f.in_energy).norm(dim=-1)
-    edep = dp.denorm_edep_margin(gen_edep.float(), e_in.float(), ds_t.f.in_pid)
+    edep = dp.denorm_edep_margin(gen_edep.float(), e_in.float(), _pdgids(lego, ds_t.f.in_pid))
     fake = lego.edep_ae.sample(lego._edep_latents, edep)
     return dp.denorm_edep_layer(ds_t.edep_layers.float()), fake

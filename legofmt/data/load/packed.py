@@ -65,6 +65,7 @@ class PackedData:
     L: int                 # the tokens per event in the padded layout
     edep_layers: Tensor | None = None   # (N, n_layers) the per-layer E_dep, when the dataset carries it
     out_energy_mev: bool = False        # the outgoing energy is in MeV, until norm_e; false: a file from before
+    pdgid: Tensor | None = None         # (R,) int32 every token's exact PDG id (float32 rounds a nucleus' 10 digits)
 
     def __len__(self) -> int:
         return self.prefix.shape[0]
@@ -106,6 +107,11 @@ class PackedData:
         """The incoming particle's token of every event, (N, 8)."""
         return self.tokens[self.offsets[:-1]]
 
+    @property
+    def pdgids(self) -> Tensor:
+        """Every token's PDG id, (R,): the exact ``pdgid``, or channel 7 of a file without it."""
+        return self.tokens[:, 7] if self.pdgid is None else self.pdgid
+
     def species_counts(self, ptypes: Tensor) -> Tensor:
         """Counts the outgoing particles of each species per event, ``(N, len(ptypes))`` int16.
 
@@ -138,7 +144,7 @@ class PackedData:
         return PackedData(prefix=self.prefix[idx], tokens=self.tokens[src], offsets=offsets, pad_e0=self.pad_e0[idx],
                           pad_token=self.pad_token, prefix_token=self.prefix_token, n_prefix=self.n_prefix, L=self.L,
                           edep_layers=None if self.edep_layers is None else self.edep_layers[idx],
-                          out_energy_mev=self.out_energy_mev)
+                          out_energy_mev=self.out_energy_mev, pdgid=None if self.pdgid is None else self.pdgid[src])
 
     def unpack(self, idx=slice(None)) -> tuple:
         """Pads the events ``idx`` to ``L`` tokens.
@@ -213,7 +219,7 @@ class PackedData:
         out = torch.ones(self.tokens.shape[0], dtype=torch.bool)
         out[self.offsets[:-1]] = False   # an event's first token is its incoming particle
         e_in, pid_in = (self.incoming[:, c].repeat_interleave(self.n_out) for c in (0, -1))
-        self.tokens[out, 0] = prep.norm_out_energy(self.tokens[out, 0], e_in, pid_in, self.tokens[out, -1])
+        self.tokens[out, 0] = prep.norm_out_energy(self.tokens[out, 0], e_in, pid_in, self.pdgids[out])
         self.out_energy_mev = False
 
     def _outgoing(self) -> tuple[Tensor, Tensor]:
@@ -221,7 +227,7 @@ class PackedData:
         ev = torch.arange(len(self)).repeat_interleave(self.offsets.diff())
         out = torch.ones(self.tokens.shape[0], dtype=torch.bool)
         out[self.offsets[:-1]] = False   # an event's first token is its incoming particle
-        return ev[out], self.tokens[out, -1]
+        return ev[out], self.pdgids[out]
 
     def _prefix_and_incoming(self) -> tuple:
         """Returns every event's prefix and incoming tokens as a padded batch ``(f, None, None[, edep_layers])``.

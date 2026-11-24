@@ -90,6 +90,7 @@ class _StubLego:
 
     class rc:
         odeint_conf = {"step_size": 0.5}
+        pdgid_is_idx = False   # the batches hold PDG ids
 
     def gen_base_wrapper(self, ds_t):
         return ds_t.f.model_in.clone()
@@ -192,5 +193,5 @@ def test_overflow_sentinel_is_decoded_before_comparing(monkeypatch):
 
     set_layout(("Density",))
     monkeypatch.setattr(ShowerValMetrics, "_generate", staticmethod(sentinel_copy))
-    out = ShowerValMetrics()(None, ds)
+    out = ShowerValMetrics()(_StubLego(), ds)
     assert out["val/w1_particle/energy"] < 1e-6 and out["val/w1_summary/E_dep"] < 1e-6

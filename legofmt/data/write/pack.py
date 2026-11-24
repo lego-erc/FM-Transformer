@@ -31,7 +31,7 @@ def pack(f: Tensor, m: Tensor, am: Tensor, n_prefix: int, edep_layers: Tensor | 
     ```
 
     Args:
-        f:           (N, L, 8) float32, the features.
+        f:           (N, L, 8) float32, the features; float64 also keeps the PDG ids exact (``pdgid``).
         m:           (N, L) int64, the loss mask.
         am:          (N, L) bool, the attention mask.
         n_prefix:    the number of prefix tokens.
@@ -45,6 +45,8 @@ def pack(f: Tensor, m: Tensor, am: Tensor, n_prefix: int, edep_layers: Tensor | 
             from ``am``, the prefix or the padding tokens are not one template outside channel 0, or an event's
             padding tokens differ in channel 0.
     """
+    pdgid = f[:, n_prefix:][am[:, n_prefix:]][:, 7].round().int() if f.dtype == torch.float64 else None
+    f = f.float()   # the tokens are float32 either way
     _check_packable(f, m, am, n_prefix)
     P, tot = n_prefix, am.sum(1)
     prefix_token, pad_token, pad_e0 = _templates(f, tot)
@@ -59,6 +61,7 @@ def pack(f: Tensor, m: Tensor, am: Tensor, n_prefix: int, edep_layers: Tensor | 
         L=f.shape[1],
         edep_layers=None if edep_layers is None else edep_layers.clone(),
         out_energy_mev=out_energy_mev,
+        pdgid=pdgid,
     )
 
 
@@ -66,8 +69,8 @@ def concat(parts: list[PackedData]) -> PackedData:
     """Joins datasets event-wise, as packing their padded tensors in one go would.
 
     Raises:
-        ValueError: the parts disagree on ``n_prefix``, ``L``, the template tokens, on carrying ``edep_layers``, or
-            on the unit of the outgoing energy.
+        ValueError: the parts disagree on ``n_prefix``, ``L``, the template tokens, on carrying ``edep_layers`` or
+            exact PDG ids, or on the unit of the outgoing energy.
     """
     P, L = parts[0].n_prefix, parts[0].L
     if any(p.n_prefix != P or p.L != L for p in parts):
@@ -76,13 +79,15 @@ def concat(parts: list[PackedData]) -> PackedData:
         raise ValueError("some parts carry edep_layers and some do not")
     if len({p.out_energy_mev for p in parts}) > 1:
         raise ValueError("some parts store the outgoing energy in MeV and some on the legacy log scale")
+    if len({p.pdgid is None for p in parts}) > 1:
+        raise ValueError("some parts carry exact PDG ids and some do not")
     cat = lambda name: torch.cat([getattr(p, name) for p in parts])
     offsets = F.pad(torch.cat([p.offsets.diff() for p in parts]).cumsum(0), (1, 0))
     return PackedData(prefix=cat("prefix"), tokens=cat("tokens"), offsets=offsets, pad_e0=cat("pad_e0"),
                       pad_token=_merge_tokens([p.pad_token for p in parts], "pad_token"),
                       prefix_token=_merge_tokens([p.prefix_token for p in parts], "prefix_token"), n_prefix=P, L=L,
                       edep_layers=None if parts[0].edep_layers is None else cat("edep_layers"),
-                      out_energy_mev=parts[0].out_energy_mev)
+                      out_energy_mev=parts[0].out_energy_mev, pdgid=None if parts[0].pdgid is None else cat("pdgid"))
 
 
 # ---- plumbing --------------------------------------------------------------------------------------------------------

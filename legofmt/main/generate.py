@@ -15,13 +15,15 @@ tokens    [prefix, incoming, slot_1 .. slot_max_particles], the prefix being the
           (build_batch)
 flow      LEGOLtng.forward flows the base to the outgoing particles and E_dep; pass-through events skip it, and with
           model_conf.exclude_absorbed so do absorbed events (no outgoing particle)
-output    species indices back to pdgids; the E_dep token capped at norm_edep_layer(E_in + excess(species))
+output    the species stay vocabulary indices (pdgids_of: the PDG ids); the E_dep token capped at
+          norm_edep_layer(E_in + excess(species))
           (_clamp_edep); an absorbed event's E_dep = E_in, + 2 m_e for an e+ (absorbed_deposit); with
           model_conf.edep_ae the E_dep layers [MeV], left in self.edep_layers
 ```
 
 The momentum in ``cond`` must be energy-scaled, not unit-norm, or the event is conditioned on a ~1 MeV particle. The
-output stays on the model's scales; ``dp.denorm_out_energy`` decodes an outgoing energy to MeV.
+output stays on the model's scales; ``dp.denorm_out_energy`` decodes an outgoing energy to MeV, with ``pdgids_of``'s
+ids.
 ``gen_model_w_g4_args`` takes Geant4-shaped arguments instead. The energy balance and exit consistency
 (``odeint_conf``) and ``GenerateIn``, the reverse direction, are :mod:`legofmt.legacy.generate`.
 """
@@ -201,7 +203,8 @@ class GenerateOut(torch.nn.Module):
                 sampled counts.
 
         Returns:
-            ``(sols, mask, attn_mask)``: the tokens (B, L, 8) on the model's scales, the pdgid in the last channel;
+            ``(sols, mask, attn_mask)``: the tokens (B, L, 8) on the model's scales, the species index in the last
+            channel (``pdgids_of``: its PDG id);
             the loss mask (B, L), 1 on the generated tokens; the attention mask (B, L), True on the real tokens.
             With ``model_conf.edep_ae`` the E_dep layers [MeV] are left in ``self.edep_layers`` (None without).
 
@@ -219,7 +222,6 @@ class GenerateOut(torch.nn.Module):
         sols, mask, attn_mask = self._flow(cond_fm, mask, attn_mask, pt_mask | absorbed, rng)
 
         out = _F(sols)
-        out.pdgids.copy_(self._pdgids_of(out.pdgids))
         out.edep.copy_(self._clamp_edep(out.edep, e_in, pid_in))
         e_absorbed = self.dp.norm_edep_margin(absorbed_deposit(e_in, pid_in), e_in, pid_in).to(out.edep)
         out.edep.copy_(torch.where(absorbed, e_absorbed, out.edep))   # an absorbed event deposits everything
@@ -474,9 +476,9 @@ class GenerateOut(torch.nn.Module):
         sols[keep] = sub.to(sols.dtype)
         return sols, mask, attn_mask
 
-    def _pdgids_of(self, idx: torch.Tensor) -> torch.Tensor:
-        """Maps the species indices ``idx`` (0: none) back to pdgids."""
-        return F.pad(self.pdgids.to(idx.dtype), (1, 0))[idx.long()]
+    def pdgids_of(self, idx: torch.Tensor) -> torch.Tensor:
+        """Returns the PDG ids (int64, exact: nuclei too) of the species indices ``idx``, 0 for none."""
+        return F.pad(self.pdgids, (1, 0))[idx.long()]
 
     def _edep_excess(self, pid_in: torch.Tensor, e_in: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns each event's E_dep excess [MeV] by its incoming species, and whether its E_dep token is capped.
@@ -505,7 +507,7 @@ class GenerateOut(torch.nn.Module):
         if not self.dp.edep_margin:
             return s.edep
         e_in = self.dp.pen.from_scalar(s.in_mom, s.in_energy).norm(dim=-1)
-        edep = self.dp.denorm_edep_margin(s.edep.double(), e_in.double(), s.in_pid)
+        edep = self.dp.denorm_edep_margin(s.edep.double(), e_in.double(), self.pdgids_of(s.in_pid))
         return self.dp.norm_edep_layer(edep).to(s.edep.dtype)
 
     def _g4_cond(self, n, pos, mom, energy, density, size, pdgids, Z, A):

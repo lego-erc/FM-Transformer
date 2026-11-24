@@ -21,6 +21,8 @@ _enter_frame, _leave_frame     into and out of the frame the flow works in: the 
 The config is checked where it is resolved (``legofmt/config.py``).
 """
 
+from dataclasses import replace
+
 import torch
 from torch import Tensor, nn
 from torch.utils.data import DataLoader
@@ -120,10 +122,10 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
     def convert_pdgids(self, pdgids: Tensor) -> Tensor:
         """Maps raw pdgids to vocabulary indices: 1-based positions in ``pdgids_template``, 0 for unknown or padding.
 
-        NaN, 0, ions (>= 1e8) and every pdgid that is not in ``pdgids_template`` map to 0.
+        NaN, 0 and every pdgid that is not in ``pdgids_template`` map to 0.
         """
         pos, known = vocab_index(self.pdgids_template.to(pdgids.device), pdgids.contiguous())
-        unknown = (pdgids == 0) | (pdgids >= 1e8) | ~known   # NaN is never known
+        unknown = (pdgids == 0) | ~known   # NaN is never known
         return torch.where(unknown, 0, pos + 1)
 
     def species_idx(self, pdgids: Tensor) -> Tensor:
@@ -229,6 +231,9 @@ class LEGOLtng(TrainStep, LegacyTrainStep, LegacyEdepToken, LegacyBaseDist, Base
         if getattr(self, "_val_ds", None) is not None:
             return
         full = load_dataset(**self.rc.dl_conf["lds_args"], prep=DataPrep(self.rc.config))
+        if getattr(full, "pdgid", None) is not None:   # exact PDG ids (nuclei too): to vocabulary indices, once
+            full.tokens[:, 7] = self.convert_pdgids(full.pdgid.long()).float()
+            self.rc = replace(self.rc, pdgid_is_idx=True)   # as GenerateOut's batches
         pool = self.model.vf.cond_pool
         # a fresh field with ``cond_pool`` standardises its conditioning scalars by this dataset's mean and std
         if pool is not None and self.rc.state_dict is None:

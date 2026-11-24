@@ -76,7 +76,7 @@ def test_gt_mult_replaces_the_sampled_counts(generator: GenerateOut, monkeypatch
 
     sols, mask, _ = generator(_gun_cond(generator.pdgids[0].item(), batch=3), gt_mult=gt_mult)
 
-    assert _counts_of(_F(sols).out_p[..., -1]) == gt_mult.tolist()
+    assert _counts_of(generator.pdgids_of(_F(sols).out_p[..., -1])) == gt_mult.tolist()
     assert (mask.sum(-1) > 0).all(), "an event generates nothing: it was treated as a pass-through"
 
 
@@ -89,7 +89,7 @@ def test_gt_mult_through_the_g4_arguments(generator: GenerateOut) -> None:
         2, torch.tensor([[0.0, 0.0, -1.0]]), torch.tensor([[0.0, 0.0, 1.0]]), torch.tensor([150.0, 300.0]),
         torch.tensor([1.0]), torch.tensor([1.0]), generator.pdgids[:1], gt_mult=gt_mult)
 
-    assert _counts_of(out["per_particle"]["Outgoing"][..., -1]) == gt_mult.tolist()
+    assert _counts_of(generator.pdgids_of(out["per_particle"]["Outgoing"][..., -1])) == gt_mult.tolist()
 
 
 @torch.no_grad()
@@ -129,3 +129,9 @@ def test_generate_in_smoke(tmp_path_factory: pytest.TempPathFactory) -> None:
     assert torch.isfinite(in_p).all(), "non-finite incoming features"
     raw_ids = in_p[..., -1].flatten().long()
     assert all(i in gen_in.pdgids for i in raw_ids), raw_ids
+
+
+def test_pdgids_of_is_exact_for_nuclei(generator: GenerateOut, monkeypatch) -> None:
+    """The output's species indices map to exact int64 PDG ids: a float32 channel would round a nucleus' 10 digits."""
+    monkeypatch.setattr(generator, "pdgids", torch.tensor([22, 1000010020, 1000010030]))
+    assert generator.pdgids_of(torch.tensor([[0.0, 2.0, 3.0]])).tolist() == [[0, 1000010020, 1000010030]]

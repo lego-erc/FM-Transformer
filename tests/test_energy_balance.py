@@ -53,7 +53,7 @@ def _decode(pen, dp, f: torch.Tensor, e_in: float) -> tuple[float, torch.Tensor]
 
 
 def _run(pen, dp, f, e_in, pid):
-    _balance_energy(f, torch.tensor([e_in]), torch.tensor([pid]), pen, dp)
+    _balance_energy(f, torch.tensor([e_in]), torch.tensor([pid]), pen, dp, _F(f).out_p[..., -1])
 
 
 def test_em_event_is_scaled_to_close_the_balance(codec) -> None:
