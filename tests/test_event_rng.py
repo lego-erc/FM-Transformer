@@ -16,7 +16,7 @@ from legofmt.cfm.edep_ae import EdepLayerAE
 from legofmt.data.struct import DataStruct, set_layout
 from legofmt.main.generate import GenerateOut
 from legofmt.main.modules import LEGOLtng
-from legofmt.rng import EventRNG, species_rank_ids
+from legofmt.rng import EventRNG, categorical, species_rank_ids
 from test_edep_latents import _batch as _latent_batch, _model as _latent_model, _wake
 from test_helpers import _flow_config, _gun_cond, _pt_mult_config, _save_mult_ckpt
 
@@ -79,6 +79,44 @@ def test_draws_have_the_requested_distributions() -> None:
     assert (torch.bincount(many.flatten(), minlength=4) / many.numel() - p).abs().max() < 4e-3
 
 
+@pytest.mark.parametrize("keyed", [False, True])
+def test_categorical_frequencies_match_the_weights(keyed: bool) -> None:
+    """Unnormalised weights with a zero class and a class of probability 1e-4; one and three samples per event."""
+    B, w = 1_000_000, torch.tensor([2.0, 0.0, 5.0, 1e-3, 2.999])
+    p = w / w.sum()
+    rng = EventRNG(torch.arange(B)) if keyed else None
+    torch.manual_seed(0)
+    for k in (categorical(w.expand(B, 5), rng, 4), categorical(w.expand(B, 5), rng, 5, torch.arange(3))):
+        freq = torch.bincount(k.flatten(), minlength=5) / k.numel()
+        assert k.shape[0] == B and (k != 1).all()
+        assert ((freq - p).abs() <= 5 * (p * (1 - p) / k.numel()).sqrt()).all()
+
+
+@pytest.mark.parametrize("keyed", [False, True])
+def test_categorical_samples_one_index_per_distribution_of_a_stack(keyed: bool) -> None:
+    """Probabilities (B, L, K) with ``elem`` (L,): one index per event and l, from its own distribution (the shape of
+    the E_dep layers' mixture components)."""
+    B, p = 200_000, torch.tensor([[0.7, 0.3, 0.0], [0.1, 0.1, 0.8]])
+    torch.manual_seed(0)
+    k = categorical(p.expand(B, 2, 3), EventRNG(torch.arange(B)) if keyed else None, 4, torch.arange(2))
+    freq = torch.stack((torch.bincount(k[:, 0], minlength=3), torch.bincount(k[:, 1], minlength=3))) / B
+    assert k.shape == (B, 2) and (freq - p).abs().max() < 4e-3
+
+
+@pytest.mark.parametrize("keyed", [False, True])
+def test_categorical_keeps_its_sample_when_an_unsampled_class_loses_weight(keyed: bool) -> None:
+    """Gumbel-max: every class has its own draw, so lowering the weight of a class that was not sampled changes no
+    sample (an inverse CDF moves every class boundary above it)."""
+    B = 20_000
+    p, q = torch.tensor([0.1, 0.4, 0.2, 0.3]), torch.tensor([0.01, 0.4, 0.2, 0.3])
+    rng = EventRNG(torch.arange(B)) if keyed else None
+    torch.manual_seed(0)
+    k = categorical(p.expand(B, 4), rng, 4)
+    torch.manual_seed(0)
+    k_q = categorical(q.expand(B, 4), rng, 4)
+    assert (k == 0).any() and torch.equal(k_q[k != 0], k[k != 0])
+
+
 def test_duplicate_keys_are_refused() -> None:
     with pytest.raises(ValueError, match="unique"):
         EventRNG(torch.tensor([1, 2, 2]))
@@ -138,8 +176,8 @@ def test_keyed_base_pairs_slots_by_species_and_rank(generator: GenerateOut) -> N
 
 @torch.no_grad()
 def test_keyed_counts_couple_two_count_models(generator: GenerateOut) -> None:
-    """With shared keys a slightly different multiplicity model samples mostly the same counts (inverse CDF of shared
-    uniforms)."""
+    """With shared keys a slightly different multiplicity model samples mostly the same counts (Gumbel-max on shared
+    draws)."""
     mult_in, pidx = generator._mult_in(generator._model_cond(_mixed_cond(200), False))
     other = copy.deepcopy(generator.gen_mult)
     other.proj_out_b.data += 0.2 * torch.randn(other.proj_out_b.shape, generator=torch.Generator().manual_seed(0))

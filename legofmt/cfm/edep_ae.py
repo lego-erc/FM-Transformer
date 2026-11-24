@@ -25,7 +25,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from legofmt.rng import AE_MIX, AE_NORM, AE_ZERO, normal_like, uniform_like
+from legofmt.rng import AE_MIX, AE_NORM, AE_ZERO, categorical, normal_like, uniform_like
 
 LOG_OFFSET = 0.1               # [MeV], in the encoder's log(E + LOG_OFFSET): about a MIP's deposit in 0.3 mm Si
 _HALF_LOG_2PI = 0.9189385332046727
@@ -142,13 +142,10 @@ def _pick(p: Tensor, k: Tensor) -> Tensor:
 def _layer_noise(a: Tensor, log_w: Tensor, rng) -> tuple[Tensor, Tensor, Tensor]:
     """Samples per layer a mixture component (B, n_layers, 1), a standard normal and a uniform (B, n_layers).
 
-    torch's noise, or with ``rng`` keyed on the event and the layer. The component has its two branches here instead
-    of calling ``legofmt.rng.categorical``: without ``rng`` that function samples by ``torch.multinomial`` on 2-D
-    probabilities, where this one uses ``Categorical(logits).sample()`` on (B, n_layers, n_mix).
+    torch's noise, or with ``rng`` keyed on the event and the layer.
     """
     layer = torch.arange(a.shape[-1], device=a.device)
-    k = (torch.distributions.Categorical(logits=log_w).sample() if rng is None
-         else rng.categorical(torch.softmax(log_w, dim=-1), AE_MIX, layer)).unsqueeze(-1)
+    k = categorical(torch.softmax(log_w, dim=-1), rng, AE_MIX, layer).unsqueeze(-1)
     n = normal_like(a, rng, AE_NORM, layer)
     u = uniform_like(a, rng, AE_ZERO, layer)
     return k, n, u

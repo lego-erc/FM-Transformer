@@ -2,7 +2,7 @@
 
 Every draw is a pure function of (seed, event key, draw site, element): a counter-based SplitMix64 hash (the scheme of
 DeepSeek's DeepInfer sampler) mapped to a uniform in (0, 1), then to the distribution of the torch draw it replaces
-(inverse normal CDF, inverse CDF of a categorical, ``u < p``). The distributions are unchanged. An event's randomness
+(inverse normal CDF, Gumbel-max for a categorical, ``u < p``). The distributions are unchanged. An event's randomness
 does not depend on its batch, its row or which rows a caller subsets, and two models generating the same keyed events
 share it, so their outputs differ only because the models differ.
 
@@ -18,6 +18,22 @@ import torch
 # direction draw uses ``stream`` and ``stream + 1``.
 PASSTHROUGH, SYM_PT, SYM_COUNT, COUNT, REFILL, SYM_FLOW, BASE_E, EDEP, LATENT, AE_MIX, AE_NORM, AE_ZERO = range(1, 13)
 BASE_MOM, BASE_POS, ISO_E, ISO_MOM, ISO_POS = 20, 22, 24, 26, 28
+
+
+def gumbel_max(probs: torch.Tensor, e: torch.Tensor) -> torch.Tensor:
+    """Samples class indices from the unnormalised ``probs`` (..., K), given one exponential draw ``e`` per class.
+
+    ```
+    k = argmax_c (log p_c + g_c),   g_c = -log e_c,   e_c ~ Exp(1)
+    ```
+
+    ``g_c`` is a standard Gumbel, so ``P(k = c) = p_c / sum p``. ``e`` is shaped like ``probs``, or (..., n, K) for
+    n indices per distribution.
+    """
+    log_p = probs.log()
+    if e.dim() > probs.dim():   # n indices per distribution
+        log_p = log_p.unsqueeze(-2)
+    return (log_p - e.log()).argmax(-1)
 
 
 def _mix(z):
@@ -86,19 +102,16 @@ class EventRNG:
         return (self.uniform(stream, elem) * high).long()
 
     def categorical(self, probs: torch.Tensor, stream: int, elem=0) -> torch.Tensor:
-        """Samples class indices from unnormalised ``probs`` (B, ..., K) by the inverse CDF.
+        """Samples class indices from unnormalised ``probs`` (B, ..., K) by ``gumbel_max``.
 
-        One index per distribution when ``elem`` gives the shape of ``probs`` without its last dim; ``n`` indices per
-        event for ``probs`` (B, K) and a 1-D ``elem`` (n,). A class of weight 0 is never sampled.
+        One index per distribution when ``elem`` gives the shape of ``probs`` without its first and last dims; ``n``
+        indices per event for ``probs`` (B, K) and a 1-D ``elem`` (n,). Class c of element i takes its draw at the id
+        ``i * K + c``.
         """
-        cdf = probs.double().cumsum(-1)
-        u   = self.uniform(stream, elem).to(cdf.device)
-        one = u.dim() == probs.dim() - 1   # one index per distribution
-        if one:
-            u = u.unsqueeze(-1)
-        idx = torch.searchsorted(cdf, u * cdf[..., -1:], right=True)   # the first k with u * total < cdf_k
-        idx = idx.clamp_(max=probs.shape[-1] - 1)                       # u * total can round up to the total
-        return idx.squeeze(-1) if one else idx
+        K   = probs.shape[-1]
+        ids = _int64(elem, self.keys).unsqueeze(-1) * K + torch.arange(K, device=self.keys.device)
+        u   = self.uniform(stream, ids.flatten()).reshape(-1, *ids.shape)
+        return gumbel_max(probs, -u.log().to(probs.device))
 
 
 class Noise:
@@ -153,16 +166,16 @@ def randint_like(high: int, x: torch.Tensor, rng: EventRNG | None, stream: int) 
 
 
 def categorical(probs: torch.Tensor, rng: EventRNG | None, stream: int, elem=0) -> torch.Tensor:
-    """Samples class indices from the unnormalised ``probs`` (B, K).
+    """Samples class indices from the unnormalised ``probs`` (B, ..., K) by ``gumbel_max``; ``elem`` as in
+    ``EventRNG.categorical``.
 
-    One per event for an int ``elem``; ``len(elem)`` per event, with replacement, for a 1-D tensor ``elem`` (the
-    element ids of the keyed draw, as in ``EventRNG.categorical``).
+    Without ``rng``, one index per distribution is the sample of ``torch.multinomial(probs, 1)`` at the same seed
+    (checked on CPU).
     """
     if rng is not None:
         return rng.categorical(probs, stream, elem)
-    if isinstance(elem, torch.Tensor):
-        return torch.multinomial(probs, len(elem), replacement=True)
-    return torch.multinomial(probs, 1).squeeze(-1)
+    shape = (probs.shape[0], *torch.as_tensor(elem).shape, probs.shape[-1])   # (B, *elem, K)
+    return gumbel_max(probs, probs.new_empty(shape).exponential_())
 
 
 def rng_sub(rng: EventRNG | None, rows) -> EventRNG | None:
