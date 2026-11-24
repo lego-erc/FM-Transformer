@@ -2,6 +2,7 @@
 
 ```
 time       t = 1 - u + s/3 (sin(pi/2 u)**2 - u)            u ~ U(0, 1),  s = t_dist_scale  (SD3 mode sampling)
+           t -> t^(1/k)                                     k = t_dist_shift: density ~ k t^(k-1), k < 1 toward t = 0
 path       x_t, dx_t on the geodesic from x_0 ~ base to x_1 = the data;  z_t = z_0 + t (z_1 - z_0) for the latent
 cells      L_c = the mean of |v - dx_t|**2 over the generated tokens' channels of cell c
              energy    channel 0, without the E_dep token when edep_cell
@@ -21,10 +22,10 @@ joint      one_step_euler_frac = q > 0 (every = 1): a random share q of the even
 Averaged over the steps, the two flow-map lines are ``fac (lv_f + exp(-lv_f) L_fm)``, the Kendall form of a cell;
 without learned loss weights ``lv_f`` is 0.
 
-The formulas are module functions (``sd3_time``, ``latent_path``, ``loss_cells``, ``kendall_total``,
+The formulas are module functions (``sd3_time``, ``time_shift``, ``latent_path``, ``loss_cells``, ``kendall_total``,
 ``flow_map_term``); ``TrainStep`` puts the batch into the frame the flow learns in, samples the path, and reduces the
-squared errors to the loss. Inverse events (``mask_conf.p_forward < 1``), the ``sm_norm`` and the shifted time
-distribution, and reflow are :mod:`legofmt.legacy.train_step`. ``reduce_loss`` returns ``(total, logs)`` so that it
+squared errors to the loss. Inverse events (``mask_conf.p_forward < 1``), the ``sm_norm`` time distribution and
+reflow are :mod:`legofmt.legacy.train_step`. ``reduce_loss`` returns ``(total, logs)`` so that it
 runs without a Trainer; ``LEGOLtngDirect`` (``legacy/reflow.py``) reuses it.
 """
 
@@ -43,6 +44,11 @@ from legofmt.main.val_metrics import UNSYNCED_PREFIXES
 def sd3_time(u, s):
     """Returns SD3's mode-sampled time for ``u ~ U(0, 1)`` and scale ``s``; ``s = 0`` is uniform."""
     return 1 - u + s / 3 * (torch.sin(torch.pi / 2 * u) ** 2 - u)
+
+
+def time_shift(t, k):
+    """Returns ``t^(1/k)``: a uniform ``t`` gets the density ``k t^(k-1)``; k > 1 moves it toward 1, k < 1 toward 0."""
+    return t if k == 1.0 else t.clamp(min=0) ** (1 / k)
 
 
 def latent_path(z0: Tensor, z1: Tensor, t: Tensor) -> tuple[Tensor, Tensor]:
@@ -247,9 +253,9 @@ class TrainStep:
         return ds_t
 
     def _sample_t(self, ds_t: DataStruct) -> Tensor:
-        """Samples each event's time ``t``, (B,), with ``sd3_time``."""
-        if self.rc.t_dist != "sd3" or self.rc.t_dist_shift != 1.0: return self._sample_t_options(ds_t)   # legacy
-        return sd3_time(torch.rand_like(ds_t.f.d), self.rc.t_dist_scale)
+        """Samples each event's time ``t``, (B,), with ``sd3_time``, shifted by ``time_shift``."""
+        if self.rc.t_dist != "sd3": return time_shift(self._sample_t_options(ds_t), self.rc.t_dist_shift)   # legacy
+        return time_shift(sd3_time(torch.rand_like(ds_t.f.d), self.rc.t_dist_scale), self.rc.t_dist_shift)
 
     def _latent_ends(self, layers: Tensor | None, base: Tensor) -> tuple[Tensor, Tensor] | None:
         """Returns the edep_ae latent's ``(z_0, z_1)``, (B, K) each: noise, and the encoding of the true E_dep layers.

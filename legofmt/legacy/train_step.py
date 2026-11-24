@@ -2,7 +2,7 @@
 
     inverse events   ``mask_conf.p_forward < 1``: per event a coin flip generates the incoming particle from the
                      outgoing set instead (``_sample_mask``)
-    t distribution   ``t_dist: sm_norm`` (logit-normal) and ``t_dist_shift != 1`` (``_sample_t_options``)
+    t distribution   ``t_dist: sm_norm`` (logit-normal, ``_sample_t_options``)
     reflow           a frozen teacher's transport of the base replaces the data target: ``reflow_path`` from step 0,
                      ``reflow_start_epoch > 0`` the student's end-of-epoch snapshot from that epoch on
     overflow_delta   an outgoing energy of exactly 0 (the particle keeps the full incoming energy) and an E_dep of
@@ -49,27 +49,18 @@ class LegacyTrainStep:
         return torch.where(pick.unsqueeze(-1), fwd, inv)
 
     def _sample_t_options(self, ds_t: DataStruct) -> Tensor:
-        """Samples each event's time ``t`` (B,) for a ``t_dist`` or ``t_dist_shift`` that is not the recipe's.
+        """Samples each event's time ``t`` (B,) for a ``t_dist`` other than ``sd3``; ``_sample_t`` then shifts it.
 
         ```
         sm_norm   t = sigmoid(t_dist_scale z),   z ~ N(0, 1)      (logit-normal)
-        sd3       t = sd3_time(u, t_dist_scale),   u ~ U(0, 1)    (``main/train_step.py``)
-        shift     t = t ** (1 / t_dist_shift)                     applied to either
         ```
 
         Raises:
             ValueError: an unknown ``t_dist``.
         """
         if self.rc.t_dist == "sm_norm":
-            t = torch.sigmoid(self.rc.t_dist_scale * torch.randn_like(ds_t.f.d))
-        elif self.rc.t_dist == "sd3":
-            u = torch.rand_like(ds_t.f.d)
-            t = 1 - u + self.rc.t_dist_scale / 3 * ((torch.pi / 2 * u).sin() ** 2 - u)
-        else:
-            raise ValueError(f"unknown t_dist: {self.rc.t_dist!r}")
-        if self.rc.t_dist_shift != 1.0:
-            t = t.clamp(min=0) ** (1.0 / self.rc.t_dist_shift)
-        return t
+            return torch.sigmoid(self.rc.t_dist_scale * torch.randn_like(ds_t.f.d))
+        raise ValueError(f"unknown t_dist: {self.rc.t_dist!r}")
 
     # ---- reflow -------------------------------------------------------------------------------------------------
 

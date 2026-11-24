@@ -60,7 +60,7 @@ config:
     max_energy: 300.0
     t_dist: sd3
     t_dist_scale: 0.0
-    t_dist_shift: 1.3       # k: t -> t^(1/k), density ~ k t^(k-1), a slight shift toward t = 1 (legacy; 1.0: off)
+    t_dist_shift: 1.3       # k: t -> t^(1/k), density ~ k t^(k-1): k > 1 toward t = 1, k < 1 toward t = 0 (1.0: off)
     one_step_euler_fac: 0.
     reflow_kwargs: {method: midpoint, step_size: 0.5}
     reflow_start_epoch: 0    # legacy; > 0: self-reflow from that epoch on (a reflow_path teacher runs from step 0)

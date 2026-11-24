@@ -475,6 +475,8 @@ def _check_lego(config: dict, c: dict, cond_scalars: tuple, len_buckets, state_d
         if c["one_step_euler_frac"] > 0 and c["one_step_euler_every"] != 1:
             raise ValueError("one_step_euler_frac puts flow-map events into every step's forward: one_step_euler_every "
                              f"must be 1, got {c['one_step_euler_every']}.")
+    if not c["t_dist_shift"] > 0:
+        raise ValueError(f"t_dist_shift must be > 0 (t -> t^(1/k) leaves [0, 1] otherwise), got {c['t_dist_shift']}.")
     if c["dir_zoom"] is not None and not c["dir_zoom"] > 0:
         raise ValueError(f"dir_zoom must be > 0 (rad) or absent, got {c['dir_zoom']}.")
     if not 0.0 <= c["dir_zoom_mix"] < 1.0:
