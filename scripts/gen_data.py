@@ -157,7 +157,7 @@ torch.save(packed.to_dict(), f"{out_dir}/data_packed.pt")
 ntokens, pids = packed.L, packed.tokens[:, -1]
 
 pdgids = pids.flatten().nan_to_num().unique()
-pdgids = pdgids[(0 < pdgids.abs()) & (pdgids.abs() < 100000000)].tolist()   # no padding (0), no nuclei (10 digits)
+pdgids = pdgids[(0 < pdgids.abs())].tolist()   # no padding (0), no nuclei (10 digits)
 
 meta_dict = {
     "ntokens": ntokens,
