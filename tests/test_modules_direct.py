@@ -323,6 +323,83 @@ def test_curriculum_logs_the_top_rung() -> None:
         assert (top is None) if expected is None else (float(top) == expected), f"u={u}: logged {top}"
 
 
+# ---- the flow map in the velocity loss's forward (one_step_euler_frac) ----------------------------------------------
+
+def _forward_log(model) -> list[tuple[bool, int, set]]:
+    """Records every field call as (with gradient, events, the events told a step d > 0); returns the live list."""
+    calls, orig = [], model.model.vf.forward
+
+    def spy(x, mask, attn_mask, types, pdgids_, t=None, d=None):
+        stepped = set() if d is None else set((d.reshape(len(d), -1)[:, 0] > 0).nonzero().flatten().tolist())
+        calls.append((torch.is_grad_enabled(), len(x), stepped))
+        return orig(x, mask, attn_mask, types, pdgids_, t=t, d=d)
+
+    model.model.vf.forward = spy
+    return calls
+
+
+def test_one_step_euler_frac_resolves_and_is_checked() -> None:
+    assert LEGOLtngVelocity(_step_cond_config(one_step_euler_frac=0.25)).rc.one_step_euler_frac == 0.25
+    for bad in ({"one_step_euler_frac": 1.0}, {"one_step_euler_frac": -0.1},
+                {"one_step_euler_frac": 0.25, "one_step_euler_every": 2}):
+        with pytest.raises(ValueError, match="one_step_euler_frac"):
+            LEGOLtngVelocity(_step_cond_config(**bad))
+
+
+def test_joint_step_is_one_forward_after_the_teacher_on_a_quarter() -> None:
+    """With ``one_step_euler_frac`` 0.25 a training step calls the field three times: the teacher's two half steps on
+    a quarter of the events, without gradient, then one forward on every event, in which that quarter is told its
+    step d > 0 and the rest d = 0."""
+    model = _fit(LEGOLtngVelocity(_step_cond_config(one_step_euler_frac=0.25)))
+    calls = _forward_log(model)
+    model._step(_fake_batch(B=16), 0)
+    assert [(grad, n) for grad, n, _ in calls] == [(False, 4), (False, 4), (True, 16)]
+    assert len(calls[-1][2]) == 4
+
+
+def test_joint_step_splits_the_events_between_the_two_losses() -> None:
+    """The events told a step are exactly the ones left out of the velocity cells, and they are drawn at random (not
+    the first rows of a length-sorted batch)."""
+    model = _fit(LEGOLtngVelocity(_step_cond_config(one_step_euler_frac=0.25)))
+    calls, velocity_rows, orig = _forward_log(model), [], model.reduce_loss
+
+    def reduce(sq, ds, sq_lat=None):
+        velocity_rows.append(set(((ds.m.full == 1) & (ds.am.full == 1)).any(1).nonzero().flatten().tolist()))
+        return orig(sq, ds, sq_lat)
+
+    picked = set()
+    with patch.object(model, "reduce_loss", reduce):
+        for seed in range(4):
+            torch.manual_seed(seed)
+            model._step(_fake_batch(B=16), 0)
+            stepped = calls[-1][2]
+            assert len(stepped) == 4 and stepped.isdisjoint(velocity_rows[-1])
+            assert stepped | velocity_rows[-1] == set(range(16))
+            picked.add(frozenset(stepped))
+    assert len(picked) > 1
+
+
+def test_joint_step_leaves_validation_as_it_was() -> None:
+    """Validation keeps both losses on every event (the velocity forward, the teacher, the prediction), so its
+    losses compare with runs without the option."""
+    model = _fit(LEGOLtngVelocity(_step_cond_config(one_step_euler_frac=0.25)), train=False)
+    calls = _forward_log(model)
+    with torch.no_grad():
+        model._step(_fake_batch(B=16), 0)
+    assert [n for _, n, _ in calls] == [16, 16, 16, 16]
+    assert calls[0][2] == set() and len(calls[-1][2]) == 16
+
+
+@pytest.mark.parametrize("learned_loss_weights", [False, True], ids=["step_gain", "lv_flow"])
+def test_joint_step_gives_every_param_a_grad(learned_loss_weights) -> None:
+    """DDP with ``find_unused_parameters=False`` needs a gradient on every parameter in the joint step too."""
+    extra = {"learned_loss_weights": True} if learned_loss_weights else {}
+    model = _fit(LEGOLtngVelocity(_step_cond_config(one_step_euler_frac=0.25, **extra)))
+    model._step(_fake_batch(B=16), 0).backward()
+    missing = [n for n, p in model.named_parameters() if p.grad is None]
+    assert not missing, f"params without grad: {missing}"
+
+
 def test_one_step_euler_requires_step_cond() -> None:
     with pytest.raises(ValueError, match="step_cond"):
         LEGOLtngVelocity(_tiny_config(one_step_euler_fac=1.0))

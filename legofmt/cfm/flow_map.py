@@ -16,7 +16,8 @@ L_fm      the mean of |v(s0, t0; d) - target|**2 over the channels of the genera
 ``s = (x, z)`` is the state of ``cfm/state.py``: the tokens and the ``edep_ae`` latent. The latent takes the same two
 half steps (Euclidean, from ``z_{t0} = z_0 + t0 (z_1 - z_0)`` on its straight path), and its error joins the mean as
 K more entries. Only the generated tokens move. The step sizes ``d = 2**-k`` are the rungs ``k`` of a ladder.
-``one_step_euler_loss`` takes the ``LEGOLtng`` as its first argument.
+``one_step_euler_loss`` takes the ``LEGOLtng`` as its first argument. A step that predicts in a forward of its own
+(``one_step_euler_frac``) takes the teacher's part from ``ladder_targets`` and the loss from ``ladder_error``.
 """
 
 import torch
@@ -47,9 +48,34 @@ def one_step_euler_loss(lego, base: Tensor, ds_t, pdgid_idx: Tensor, model=None,
         return _one_step_euler_loss_fp32(lego, base.float(), ds_t, pdgid_idx, model, z)
 
 
+def ladder_targets(lego, base: Tensor, ds_t, pdgid_idx: Tensor, model, z=None) -> tuple[State, Tensor, Tensor, State]:
+    """Returns each event's rung as ``(s0, t0, d, target)``: the start state, its time and step (B, 1), the target.
+
+    In fp32 and without gradient; arguments as in ``one_step_euler_loss``. The prediction ``v(s0, t0; d)`` is the
+    caller's, ``ladder_error`` its loss.
+    """
+    with torch.autocast(base.device.type, enabled=False):
+        z = None if z is None else tuple(a.float() for a in z)
+        field, man, gen = _ladder_inputs(lego, ds_t, pdgid_idx, model)
+        return _rung_targets(lego, field, man, gen, base.float(), ds_t, z)
+
+
+def ladder_error(pred: State, tgt: State, ds_t, latent: bool) -> Tensor:
+    """Returns ``L_fm`` of a prediction ``pred`` against ``ladder_targets``' target, over the batch ``ds_t``'s
+    generated tokens (and the latent with ``latent``)."""
+    gen = (ds_t.m.full == 1).unsqueeze(-1)
+    return _mean_squared_error(pred, tgt, gen & ds_t.am.full.unsqueeze(-1), latent=latent)
+
+
 def _one_step_euler_loss_fp32(lego, base: Tensor, ds_t, pdgid_idx: Tensor, model, z=None) -> Tensor:
     """Computes ``L_fm`` as the module docstring has it, on fp32 inputs; arguments as in ``one_step_euler_loss``."""
     field, man, gen = _ladder_inputs(lego, ds_t, pdgid_idx, model)
+    s0, t0, d, tgt = _rung_targets(lego, field, man, gen, base, ds_t, z)
+    return _mean_squared_error(field(s0, t0, d=d), tgt, gen & ds_t.am.full.unsqueeze(-1), latent=z is not None)
+
+
+def _rung_targets(lego, field, man, gen: Tensor, base: Tensor, ds_t, z) -> tuple[State, Tensor, Tensor, State]:
+    """Draws one rung per event and returns ``(s0, t0, d, target)`` as the module docstring has them."""
     sections = lego.rc.one_step_euler_sections
     with torch.no_grad():
         k     = _uniform_rung(sections, base, top_rung(lego))                     # k ~ U{top, ..., sections - 1}
@@ -61,7 +87,7 @@ def _one_step_euler_loss_fp32(lego, base: Tensor, ds_t, pdgid_idx: Tensor, model
         s_mid = moved(gen, s0,    man.expmap(s0,    _per_event(half) * field(s0, t0, d=d_t)))
         s_end = moved(gen, s_mid, man.expmap(s_mid, _per_event(half) * field(s_mid, t0 + half, d=d_t)))
         tgt   = man.logmap(s0, s_end) / _per_event(d)
-    return _mean_squared_error(field(s0, t0, d=d), tgt, gen & ds_t.am.full.unsqueeze(-1), latent=z is not None)
+    return s0, t0, d, tgt
 
 
 # ---- plumbing ------------------------------------------------------------------------------------------------------

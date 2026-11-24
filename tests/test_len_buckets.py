@@ -147,11 +147,12 @@ def _loss_and_grads(model: LEGOLtng, ds: DataStruct) -> tuple[torch.Tensor, dict
     return loss.detach(), {n: p.grad.clone() for n, p in model.named_parameters() if p.grad is not None}
 
 
-@pytest.mark.parametrize("flow_map", [False, True], ids=["velocity", "with_flow_map"])
-def test_split_step_matches_the_unsplit_step(flow_map: bool) -> None:
+@pytest.mark.parametrize("flow_map, frac", [(False, 0.0), (True, 0.0), (True, 0.25)],
+                         ids=["velocity", "with_flow_map", "joint_flow_map"])
+def test_split_step_matches_the_unsplit_step(flow_map: bool, frac: float) -> None:
     extra = dict(learned_loss_weights=True, edep_cell=True)
     if flow_map:
-        extra.update(one_step_euler_fac=0.5, one_step_euler_sections=4)
+        extra.update(one_step_euler_fac=0.5, one_step_euler_sections=4, one_step_euler_frac=frac)
     plain = _model(_config(step_cond=flow_map, **extra))
     split = _model(_config(dl={"len_buckets": [4, 6], "len_split": 2}, step_cond=flow_map, **extra))
     ds = _by_length(_ragged_batch(edep_generated=True))   # lengths 4,4,5 | 5,6,8 -> pieces at 6 and 8
@@ -441,7 +442,8 @@ def test_config_resolves_len_max_tokens() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="host-device syncs only exist with a GPU")
-def test_training_step_has_no_host_device_sync() -> None:
+@pytest.mark.parametrize("frac", [0.0, 0.25], ids=["flow_map_pass", "joint_flow_map"])
+def test_training_step_has_no_host_device_sync(frac: float) -> None:
     """Every sync makes the CPU wait for the GPU, so Python, kernel launches and data loading never overlap GPU work.
     A group-mode step (OT coupling, learned loss weights, flow-map term) has none once Lightning's
     ``on_before_batch_transfer`` has seen the batch on the CPU. The field is a stand-in: x-transformers' eager einx
@@ -461,7 +463,7 @@ def test_training_step_has_no_host_device_sync() -> None:
 
     model = _model(_config(dl={"len_buckets": [4, 6], "len_mode": "group"}, step_cond=True, ot_coupling=True,
                            learned_loss_weights=True, edep_cell=True, one_step_euler_fac=0.5,
-                           one_step_euler_sections=4))
+                           one_step_euler_sections=4, one_step_euler_frac=frac))
     model.model.vf = _VF()
     model = model.cuda()
     model.train()

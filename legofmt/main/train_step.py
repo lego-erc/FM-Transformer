@@ -14,6 +14,8 @@ total      sum_c (exp(-lv_c) L_c + lv_c)                   learned_loss_weights 
 flow map   + fac (lv_f + every exp(-lv_f) L_fm)            where global_step % every == 0: L_fm is evaluated
            + fac lv_f                                      on the other steps
                                                            fac = one_step_euler_fac, every = one_step_euler_every
+joint      one_step_euler_frac = q > 0 (every = 1): a random share q of the events takes L_fm instead of the cells, in
+           the same forward (Frans et al.); the teacher runs on those events alone (``_joint_step``)
 ```
 
 Averaged over the steps, the two flow-map lines are ``fac (lv_f + exp(-lv_f) L_fm)``, the Kendall form of a cell;
@@ -34,7 +36,8 @@ from legofmt.data.load.loader import smallest_bucket
 from legofmt.data.struct import DataStruct, _F
 from legofmt.numerics import held, masked_mean
 
-from legofmt.cfm.flow_map import one_step_euler_loss, top_rung
+from legofmt.cfm.flow_map import ladder_error, ladder_targets, one_step_euler_loss, top_rung
+from legofmt.cfm.state import State, no_latent, state_field
 from legofmt.main.val_metrics import UNSYNCED_PREFIXES
 
 def sd3_time(u, s):
@@ -122,6 +125,8 @@ class TrainStep:
             path = self.ps.sample(base, ds_t.f.model_in, t)
             z_t, dz = (None, None) if z is None else latent_path(*z, path.t)
 
+        if self.training and self.rc.one_step_euler_frac > 0:
+            return self._joint_step(model, path, base, ds_t, pdgid_idx, z, z_t, dz)
         v, v_z = self._velocity(model, path, ds_t, pdgid_idx, z_t)
         sq_lat = None if z is None else (v_z - dz) ** 2
         loss, logs = self.reduce_loss((v - path.dx_t) ** 2, ds_t, sq_lat)
@@ -159,8 +164,40 @@ class TrainStep:
             total = cells.sum()
         return total, (self._loss_logs(cells) if self.training else {})
 
+    def _joint_step(self, model, path, base: Tensor, ds_t: DataStruct, pdgid_idx: Tensor, z, z_t, dz) -> Tensor:
+        """Computes a training batch's loss with the flow map in the velocity loss's forward (``one_step_euler_frac``).
+
+        ```
+        rows      a random share q of the events: they take L_fm, the others the velocity cells
+        teacher   their rungs' targets, on those events alone (ladder_targets; self.model, as split mode's pieces
+                  are cut from the whole batch)
+        forward   once over every event, in fp32: the velocity rows at (x_t, t, d = 0), the flow-map rows at (s0, t0, d)
+        ```
+        Arguments as ``_step`` has them: the field, the path sample, x_0, the batch, the species indices, the latent's
+        ``(z_0, z_1)``, its ``z_t`` and velocity ``dz`` (None without a latent).
+        """
+        q    = max(1, round(self.rc.one_step_euler_frac * len(ds_t)))
+        perm = torch.randperm(len(ds_t), device=base.device)
+        rows, vel = perm[:q], perm[q:]
+        s0, t0, d, tgt = ladder_targets(self, base[rows], ds_t[rows], pdgid_idx[rows], self.model,
+                                        z=None if z is None else (z[0][rows], z[1][rows]))
+        z_in  = no_latent(path.x_t) if z_t is None else z_t
+        s_in  = State(path.x_t.index_put((rows,), s0.x), z_in.index_put((rows,), s0.z))
+        am    = ds_t.am.full
+        field = state_field(model, dict(mask=ds_t.m.full, attn_mask=am, types=self.types_embd[:, :am.shape[1]],
+                                        pdgids=pdgid_idx))
+        with torch.autocast(base.device.type, enabled=False):
+            v = field(s_in, path.t.index_put((rows,), t0), d=torch.zeros_like(path.t).index_put((rows,), d))
+
+        velocity_rows = DataStruct(ds_t.f.full, ds_t.m.full.index_fill(0, rows, 0), am)
+        sq_lat = None if z is None else ((v.z - dz) ** 2)[vel]
+        loss, logs = self.reduce_loss((v.x - path.dx_t) ** 2, velocity_rows, sq_lat)
+        self._log_step(logs)
+        l_fm = ladder_error(State(v.x[rows], v.z[rows]), tgt, ds_t[rows], latent=z is not None)
+        return self._flow_map_loss(loss, base, ds_t, pdgid_idx, model, z=z, l_fm=l_fm)
+
     def _flow_map_loss(self, loss: Tensor, base: Tensor, ds_t: DataStruct, pdgid_idx: Tensor, model=None,
-                       z=None) -> Tensor:
+                       z=None, l_fm: Tensor | None = None) -> Tensor:
         """Adds the flow-map term (module docstring) to ``loss``; validation evaluates ``L_fm`` on every step.
 
         Args:
@@ -170,6 +207,7 @@ class TrainStep:
             pdgid_idx: (B, L, 1), the tokens' species indices.
             model:     the field to call (in split mode the piecewise one); None: ``self.model``.
             z:         ``(z_0, z_1)`` of the edep_ae latent, or None.
+            l_fm:      ``L_fm`` when the step has computed it (``_joint_step``); None: computed here.
 
         Returns:
             ``loss`` with the term added; ``loss`` itself when ``one_step_euler_fac`` is 0.
@@ -183,7 +221,8 @@ class TrainStep:
         if self.training and self.global_step % every != 0:
             return loss
 
-        l_fm = one_step_euler_loss(self, base, ds_t, pdgid_idx, model, z=z)
+        if l_fm is None:
+            l_fm = one_step_euler_loss(self, base, ds_t, pdgid_idx, model, z=z)
         self._log_step({"loss/one_step_euler": l_fm,
                         "loss_weight/var_flow": None if lv_f is None else torch.exp(lv_f.detach()),
                         "flow_map/top_rung": None if self.rc.one_step_euler_unlock <= 0
