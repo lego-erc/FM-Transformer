@@ -38,6 +38,7 @@ def distance(manifold, a: Tensor, b: Tensor) -> Tensor:
     return (a - b).norm(dim=-1).float()
 
 
+@torch.compiler.disable   # eager inside the compiled base draw (scripts/train.py): dynamo's trace of _pair_cost fails
 def ot_couple(base: Tensor, ds_t: DataStruct, manifold) -> Tensor:
     """Permutes each event's base slots onto its data slots by optimal assignment.
 

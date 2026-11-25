@@ -140,6 +140,7 @@ class TrainStep:
         return self._flow_map_loss(loss, base, ds_t, pdgid_idx, model, z=z)
 
     def training_step(self, batch: DataStruct, _batch_idx: int | Tensor) -> Tensor:
+        torch.compiler.cudagraph_mark_step_begin()   # a new step for the field's CUDA graphs (scripts/train.py)
         return self._step(batch, _batch_idx)
 
     @torch.no_grad()
@@ -232,7 +233,7 @@ class TrainStep:
         self._log_step({"loss/one_step_euler": l_fm,
                         "loss_weight/var_flow": None if lv_f is None else torch.exp(lv_f.detach()),
                         "flow_map/top_rung": None if self.rc.one_step_euler_unlock <= 0
-                                             else l_fm.new_tensor(float(top_rung(self)))})
+                                             else l_fm.new_full((), float(top_rung(self)))})   # no host-device sync
         return loss + flow_map_term(l_fm, fac, every if self.training else 1, lv_f)
 
     # ---- the batch, the path, the field ---------------------------------------------------------------------------
@@ -325,9 +326,14 @@ class TrainStep:
         return logs
 
     def _log_step(self, logs: dict) -> None:
-        """Logs a training step's scalars, detached and unsynced; nothing outside training. A None value is skipped."""
+        """Logs a training step's scalars, detached and unsynced, on the steps Lightning writes to the logger (every
+        ``log_every_n_steps``; ``self.log`` costs CPU time on every call); nothing outside training. A None value is
+        skipped."""
+        t = self._trainer
+        if not (self.training and t and ((self.global_step + 1) % t.log_every_n_steps == 0 or t.should_stop)):
+            return
         logs = {k: v.detach() for k, v in logs.items() if v is not None}
-        if self.training and logs:
+        if logs:
             self.log_dict(logs, on_step=True, on_epoch=False, logger=True, sync_dist=False)
 
     def _log_validation(self, loss: Tensor, bs: int) -> None:

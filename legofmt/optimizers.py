@@ -91,8 +91,8 @@ class BatchedMuon(torch.optim.Optimizer):
         bufs = self._state(ps, "momentum_buffer")
         torch._foreach_lerp_(bufs, grads, 1.0 - mu)                                  # buf
         upd  = torch._foreach_lerp(grads, bufs, mu) if group["nesterov"] else bufs    # upd
-        for idx, ratio in self._groups_by_shape(group, ps):
-            ns = _newton_schulz(upd, idx, ps, group["ns_steps"])
+        shapes = self._groups_by_shape(group, ps)
+        for (idx, ratio), ns in zip(shapes, _newton_schulz(upd, [idx for idx, _ in shapes], ps, group["ns_steps"])):
             torch._foreach_add_([ps[i] for i in idx], ns, alpha=-lr * ratio)            # p
 
     def _adamw_update(self, group, ps, grads, lr) -> None:
@@ -200,9 +200,22 @@ def _get(reg, k):
     return reg[k] if isinstance(k, str) else k
 
 
-def _newton_schulz(upd, idx, ps, steps):
-    """Returns NS(upd[i]) of the equal-shape parameters in ``idx`` from one batched call, in their shape and dtype."""
-    stacked = torch.stack([upd[i].flatten(1) for i in idx])
-    o = zero_power_via_newton_schulz_5(stacked, num_steps=steps)
-    o = o.contiguous().to(ps[idx[0]].dtype)  # one cast for the whole group; unbind/view below are free
-    return [oi.reshape(ps[i].shape) for i, oi in zip(idx, o.unbind(0))]
+def _ns_stacked(xs, steps):
+    """Returns the Newton-Schulz orthogonalisation of each stack of equal-shape matrices in ``xs``."""
+    return [zero_power_via_newton_schulz_5(x, num_steps=steps) for x in xs]
+
+
+_NS_GRAPHED = torch.compile(_ns_stacked, dynamic=False, mode="reduce-overhead")   # every group in one CUDA graph
+
+
+def _newton_schulz(upd, groups, ps, steps):
+    """Returns per group of equal-shape parameters (``groups``: their indices) NS(upd[i]) of each, in its shape and
+    dtype.
+
+    A group is one batched NS call; on CUDA all groups are one CUDA graph: one launch instead of ~25 per group.
+    """
+    xs   = [torch.stack([upd[i].flatten(1) for i in idx]) for idx in groups]
+    outs = (_NS_GRAPHED if xs[0].is_cuda else _ns_stacked)(xs, steps)
+    # one cast per group; unbind/view are free
+    return [[oi.reshape(ps[i].shape) for i, oi in zip(idx, o.contiguous().to(ps[idx[0]].dtype).unbind(0))]
+            for idx, o in zip(groups, outs)]

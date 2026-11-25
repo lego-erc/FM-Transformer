@@ -147,8 +147,10 @@ if resume_from:
         if hasattr(model, k):
             getattr(model, k).data.copy_(v)
 
-if compile_mode == "model":  # fm: the ProjectModel; mult: the trunk
-    model.model = torch.compile(model.model, dynamic=False)
+if compile_mode == "model":  # fm: the ProjectModel as CUDA graphs (one launch per call); mult: the trunk
+    model.model = torch.compile(model.model, dynamic=False, mode="reduce-overhead" if train_model == "fm" else None)
+    if train_model == "fm":  # the base draw: fused kernels instead of ~100 small eager ones
+        model._draw_prior = torch.compile(model._draw_prior)
 
 if run.get("data_seed") is not None:
     torch.manual_seed(int(run["data_seed"]))
