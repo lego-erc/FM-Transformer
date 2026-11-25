@@ -6,26 +6,31 @@ parameter of a model (``max_energy``, the margins).
 
 ```
 energy     incoming   e_in [MeV]   --norm_e-->  log(e_in / cutoff) / log(max_energy / cutoff)
-           outgoing   e_out [MeV]  --norm_e-->  e = 1 - u of the margin scale             lo = cutoff
+           outgoing   e_out [MeV]  --norm_e-->  e = 1 - u of the margin scale's log form    lo = cutoff
 momentum              p / |p|
 position              direction of x / cuboid_dim             incoming: x ray-traced onto the cube first
 
 E_dep      layer scale    u = log(edep / e_min) / log(max_energy / e_min)        e_min = edep_log_min
-           margin scale   u of the margin scale                                  lo = e_min
+           margin scale   u of the margin scale's logit form                     lo = e_min
 
-margin     z = logit(x / cap) = log(x) - log(cap - x)       cap  = e_in + margin
-           u = (z - z_lo) / (z_hi - z_lo)                    z_lo = log(lo / cap),   z_hi = log(cap / 1e-3 MeV)
+margin     log form     u = log(x / lo) / log(cap / lo)                                    cap  = e_in + margin
+           logit form   z = logit(x / cap) = log(x) - log(cap - x),   u = (z - z_lo) / (z_hi - z_lo)
+                        z_lo = log(lo / cap),   z_hi = log(cap / 1e-3 MeV)
 ```
 
-Every channel but the directions lies in [0, 1]. The margin scale is the log-odds of a fraction of the cap: a small
-value keeps a log scale, and near the cap the scale resolves the missing energy ``cap - x``.
+Every channel but the directions lies in [0, 1]. The margin scale runs from ``lo`` to a cap above ``e_in``. Its log
+form spreads log x evenly over [0, 1]; its logit form, the log-odds of a fraction of the cap, keeps a log scale for a
+small value and resolves the missing energy ``cap - x`` near the cap, at the price of about twice the range per unit
+of log x (``z_hi - z_lo`` against ``-z_lo``).
 
-- The outgoing energy (``model_conf.out_margin``): ``margin(pid_in, pid_out)`` is the training data's largest
-  ``e_out - e_in`` per pair of species (``model_conf.out_excess_mev``), 0 for a pair of one species. So a surviving
-  particle's energy loss spreads over the middle of [0, 1], and a decay or capture product keeps an energy above
-  ``e_in``. Turned round, ``e = 1 - u``, it keeps the legacy scale's ends: 0 at the cap, 1 at the cutoff.
-- The E_dep token (``model_conf.edep_margin``): ``margin(species)`` is the training data's largest ``edep - e_in``
-  per incoming species (``model_conf.edep_excess_mev``). A contained shower's narrow peak below ``e_in`` becomes wide.
+- The outgoing energy (``model_conf.out_margin``) takes the log form: ``margin(pid_in, pid_out)`` is the training
+  data's largest ``e_out - e_in`` per pair of species (``model_conf.out_excess_mev``), 0 for a pair of one species,
+  so a decay or capture product keeps an energy above ``e_in``, and a pair of one species gets the legacy log scale
+  exactly. Turned round, ``e = 1 - u``, it keeps the legacy scale's ends: 0 at the cap, 1 at the cutoff. (The logit
+  form here coarsened most outgoing tokens 2.4-4x and doubled problem 2's MMD^2 against the log form, 25.11.)
+- The E_dep token (``model_conf.edep_margin``) takes the logit form: ``margin(species)`` is the training data's
+  largest ``edep - e_in`` per incoming species (``model_conf.edep_excess_mev``). A contained shower's narrow peak
+  below ``e_in`` becomes wide.
   The per-layer deposits, and the token of an incoming species not in ``model_conf.edep_margin_species``, take the
   layer scale.
 
@@ -78,20 +83,31 @@ class MarginScale(NamedTuple):
     """The margin scale of the E_dep token and the outgoing energy, per particle, held in [0, 1].
 
     ```
-    norm     z = logit(x / cap),   u = (z - z_lo) / (z_hi - z_lo)     0 at x = lo cap / (cap + lo), 1 at cap - ~1e-3 MeV
-    denorm   x = cap sigmoid(z_lo + u (z_hi - z_lo))
+    norm_log       u = log(x / cap) / -z_lo + 1                     0 at x = lo = cap exp(z_lo), 1 at cap
+    denorm_log     x = cap exp(z_lo (1 - u))
+    norm_logit     z = logit(x / cap),   u = (z - z_lo) / (z_hi - z_lo)
+                                                                    0 at x = lo cap / (cap + lo), 1 at cap - ~1e-3 MeV
+    denorm_logit   x = cap sigmoid(z_lo + u (z_hi - z_lo))
     ```
     """
     cap:  Tensor
     z_lo: Tensor
     z_hi: Tensor
 
-    def norm(self, x):
+    def norm_log(self, x):
+        cap, z_lo, _ = self
+        return (torch.log(x / cap) / (-z_lo).clamp(min=1e-6) + 1).clamp(0.0, 1.0)   # e_in at the cutoff: width 0
+
+    def denorm_log(self, u):
+        cap, z_lo, _ = self
+        return cap * torch.exp(z_lo * (1 - u.clamp(0.0, 1.0)))
+
+    def norm_logit(self, x):
         cap, z_lo, z_hi = self
         z = torch.logit((x / cap).clamp(0.0, 1.0))
         return ((z - z_lo) / (z_hi - z_lo)).clamp(0.0, 1.0)
 
-    def denorm(self, u):
+    def denorm_logit(self, u):
         cap, z_lo, z_hi = self
         return cap * torch.sigmoid(z_lo + u.clamp(0.0, 1.0) * (z_hi - z_lo))
 
@@ -243,8 +259,8 @@ class DataPrep:
     def norm_out_energy(self, e_out: Tensor, e_in: Tensor, pid_in: Tensor, pid_out: Tensor) -> Tensor:
         """Converts the outgoing energy from MeV to the model scale, computed in float64: the cap gives 0.
 
-        ``e = 1 - u`` of the margin scale (``_out_scale``). Without ``out_margin`` (legacy): the log scale that every
-        dataset from before stores.
+        ``e = 1 - u`` of the margin scale's log form (``_out_scale``). Without ``out_margin`` (legacy): the log scale
+        that every dataset from before stores, which is the log form with no margin.
 
         Args:
             e_out:   the outgoing energy [MeV].
@@ -256,19 +272,19 @@ class DataPrep:
             The energy channel, in the shape and dtype of ``e_out``.
         """
         if not self.out_margin: return norm_out_energy_log(e_out, e_in, self.pen.cutoff)   # legacy
-        return (1 - self._out_scale(e_in.double(), pid_in, pid_out).norm(e_out.double())).to(e_out.dtype)
+        return (1 - self._out_scale(e_in.double(), pid_in, pid_out).norm_log(e_out.double())).to(e_out.dtype)
 
     def denorm_out_energy(self, e: Tensor, e_in: Tensor, pid_in: Tensor, pid_out: Tensor) -> Tensor:
         """Converts the outgoing energy from the model scale to MeV, computed in float64: ``norm_out_energy`` inverted.
 
-        ``e`` is held in [0, 1]: 0 decodes to 1e-3 MeV below the cap, 1 to ``cap cutoff / (cap + cutoff)``. The
-        arguments are those of ``norm_out_energy``, with ``e`` in the place of ``e_out``.
+        ``e`` is held in [0, 1]: 0 decodes to the cap, 1 to the cutoff. The arguments are those of
+        ``norm_out_energy``, with ``e`` in the place of ``e_out``.
 
         Returns:
             The energy [MeV], in the shape and dtype of ``e``.
         """
         if not self.out_margin: return denorm_out_energy_log(e, e_in, self.pen.cutoff)   # legacy
-        return self._out_scale(e_in.double(), pid_in, pid_out).denorm(1 - e.double()).to(e.dtype)
+        return self._out_scale(e_in.double(), pid_in, pid_out).denorm_log(1 - e.double()).to(e.dtype)
 
     @staticmethod
     def out_excess_max(f: Tensor) -> dict[int, dict[int, float]]:
@@ -322,7 +338,7 @@ class DataPrep:
             The token, in the shape and dtype of ``edep``.
         """
         if not self.edep_margin: return self.norm_edep_layer(edep)
-        u = self._margin_scale(e_in.double(), pid).norm(edep.double()).to(edep.dtype)
+        u = self._margin_scale(e_in.double(), pid).norm_logit(edep.double()).to(edep.dtype)
         return torch.where(self.edep_margin_mask(pid), u, self.norm_edep_layer(edep))
 
     def denorm_edep_margin(self, u: Tensor, e_in: Tensor, pid: Tensor) -> Tensor:
@@ -340,7 +356,7 @@ class DataPrep:
             The deposit [MeV], in the shape and dtype of ``u``.
         """
         if not self.edep_margin: return self.denorm_edep_layer(u)
-        edep = torch.where(u > 0, self._margin_scale(e_in.double(), pid).denorm(u.double()), 0.0).to(u.dtype)
+        edep = torch.where(u > 0, self._margin_scale(e_in.double(), pid).denorm_logit(u.double()), 0.0).to(u.dtype)
         return torch.where(self.edep_margin_mask(pid), edep, self.denorm_edep_layer(u))
 
     def edep_margin_mask(self, pid: Tensor) -> Tensor:
