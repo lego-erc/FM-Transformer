@@ -1,14 +1,14 @@
-"""``model_conf.out_margin``: the outgoing energy as the log-odds of its fraction of a cap per pair of species.
+"""``model_conf.out_margin``: the outgoing energy on a log scale up to a cap per pair of species.
 
 ```
-cap = e_in + margin(pid_in, pid_out)       z    = logit(e_out / cap)
-e   = 1 - (z - z_lo) / (z_hi - z_lo)       z_lo = log(cutoff / cap),   z_hi = log(cap / 1e-3 MeV)
+cap = e_in + margin(pid_in, pid_out)
+e   = 1 - log(e_out / cutoff) / log(cap / cutoff)
 ```
 
-The E_dep token's margin scale (``test_edep_margin.py``) turned round, so that 0 is still the cap and 1 the cutoff.
-Near the cap it resolves the energy a surviving particle lost, and the margin lets a decay or capture product carry
-more than E_in. A dataset stores the outgoing energy in MeV, and ``norm_e`` encodes it when the dataset is loaded; a
-file from before stores the legacy log scale, which only a model without the key can read.
+The log form of the margin scale, turned round, so that 0 is still the cap and 1 the cutoff: the legacy log scale with
+its top raised by the pair's margin. A pair without a margin keeps the legacy scale exactly, and the margin lets a decay
+or capture product carry more than E_in. A dataset stores the outgoing energy in MeV, and ``norm_e`` encodes it when
+the dataset is loaded; a file from before stores the legacy log scale, which only a model without the key can read.
 """
 
 from __future__ import annotations
@@ -44,26 +44,30 @@ def _t(*values: float) -> torch.Tensor:
 
 def _scale(x: float, cap: float) -> float:
     """The scale as the module docstring writes it, in float64."""
-    z, z_lo, z_hi = math.log(x / (cap - x)), math.log(CUT / cap), math.log(cap / 1e-3)
-    return 1 - (z - z_lo) / (z_hi - z_lo)
+    return 1 - math.log(x / CUT) / math.log(cap / CUT)
 
 
 # ---- the scale ------------------------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("lost", [0.3, 3.3, 30.0])
-def test_a_survivor_is_resolved_near_the_cap(lost: float) -> None:
-    """A surviving e- keeps its species, so its cap is E_in. The energy it lost (0.3 / 3.3 / 30 MeV of 1 GeV) lands at
-    e = 0.25 / 0.35 / 0.45, where the legacy log scale put it within 0.004 of 0."""
-    x = _t(E_IN - lost)
-    e = _prep().norm_out_energy(x, _t(E_IN), _t(11), _t(11))
-    assert float(e) == pytest.approx(_scale(float(x), E_IN), abs=1e-6)
-    assert float(_prep(margin=False).norm_out_energy(x, _t(E_IN), _t(11), _t(11))) < 0.004
+@pytest.mark.parametrize("pid_out", [11.0, 22.0])
+def test_a_pair_without_a_margin_keeps_the_legacy_log_scale(pid_out: float) -> None:
+    """A surviving e- (one species) and an e- -> gamma pair (margin 0) get the scale a model had before the key."""
+    x = _t(0.1, 5.0, 500.0, 999.7)
+    args = (x, torch.full_like(x, E_IN), torch.full_like(x, 11.0), torch.full_like(x, pid_out))
+    torch.testing.assert_close(_prep().norm_out_energy(*args), _prep(margin=False).norm_out_energy(*args))
 
 
-def test_the_cap_gives_0_and_the_cutoff_almost_1() -> None:
+def test_a_pair_with_a_margin_takes_the_log_scale_up_to_its_cap() -> None:
+    """pi+ -> nu_mu: the cap is E_in + 29.8 MeV."""
+    x = _t(0.5, 5.0, 25.0)
+    e = _prep().norm_out_energy(x, torch.full_like(x, 10.0), torch.full_like(x, 211.0), torch.full_like(x, 14.0))
+    assert e.tolist() == pytest.approx([_scale(v, 39.8) for v in x.tolist()], abs=1e-6)
+
+
+def test_the_cap_gives_0_and_the_cutoff_1() -> None:
     e = _prep().norm_out_energy(_t(E_IN, CUT), _t(E_IN, E_IN), _t(11, 11), _t(11, 22))
     assert float(e[0]) == 0.0
-    assert float(e[1]) > 0.999
+    assert float(e[1]) == pytest.approx(1.0, abs=1e-6)
 
 
 def test_decoding_inverts_encoding() -> None:
@@ -212,8 +216,8 @@ GEN_TABLE = {22: {211: 5.0}}   # the tiny flow's species: 22, 211, 2212
 
 @torch.no_grad()
 def test_generated_energies_decode_between_the_scale_ends(tmp_path) -> None:
-    """``dp.denorm_out_energy`` turns a generated outgoing energy into MeV: at most the pair's cap, and at least
-    ``cap cutoff / (cap + cutoff)``, which e = 1 decodes to."""
+    """``dp.denorm_out_energy`` turns a generated outgoing energy into MeV: at most the pair's cap, and at least the
+    cutoff, which e = 1 decodes to."""
     gen = GenerateOut(str(_save_flow_ckpt(tmp_path, LEGOLtng, out_margin=True, out_excess_mev=GEN_TABLE)),
                       str(_save_mult_ckpt(tmp_path)), device="cpu")
     out = gen.gen_model_w_g4_args(64, torch.tensor([[0.0, 0.0, -1.0]]), torch.tensor([[0.0, 0.0, 1.0]]),
@@ -224,7 +228,7 @@ def test_generated_energies_decode_between_the_scale_ends(tmp_path) -> None:
     cap = 150.0 + 5.0 * (pid == 211)
     real = pid != 0
     assert real.any()
-    assert ((E <= cap) & (E >= cap * 10.0 / (cap + 10.0) * (1 - 1e-6)))[real].all()
+    assert ((E <= cap * (1 + 1e-6)) & (E >= 10.0 * (1 - 1e-6)))[real].all()
 
 
 @torch.no_grad()
