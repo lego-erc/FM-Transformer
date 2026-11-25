@@ -16,14 +16,14 @@ import torch
 import torch.nn.functional as F
 
 from legofmt.data.write.norm import DataPrep
-from legofmt.data.struct import _F
+from legofmt.data.struct import _F, _M
 from legofmt.geometry.geom_trafos import GeomTrafos
 from legofmt.geometry.raytracing_proj import CubeTrace
 from legofmt.main.generate import GenerateOut
 from legofmt.main.modules import LEGOLtng
 from legofmt.config import resolve_legoltng_config
 from legofmt.multiplicity.model import MultModel
-from test_helpers import MANIFOLD, _flow_config, _pt_mult_config, _save_mult_ckpt
+from test_helpers import MANIFOLD, _flow_config, _gun_cond, _pt_mult_config, _save_mult_ckpt
 from test_helpers import _head_batch as _batch, _head_config as _config
 
 SLAB = [10.0, 100.0, 100.0]
@@ -44,6 +44,44 @@ def test_raytrace_cube_box_is_the_old_cube_trace() -> None:
     p = F.normalize(torch.randn(256, 3, generator=g), dim=-1)
     ray = torch.cat((p, x), -1)
     assert torch.equal(CubeTrace([7.0, 7.0, 7.0])(ray), CubeTrace()(ray))
+
+
+def test_an_exit_point_across_an_edge_is_mirrored_onto_the_face_the_momentum_leaves() -> None:
+    """Exit points on the +x and -x faces just short of the edge to +y, momentum into that face and out through +y:
+    the two largest |components| swap. An outward momentum, a point far from the edge, and a momentum into +y too
+    stay."""
+    u = F.normalize(torch.tensor([[1.0, 0.97, 0.2], [-1.0, 0.97, 0.2], [1.0, 0.97, 0.2], [1.0, 0.5, 0.2],
+                                  [1.0, 0.97, 0.2]]), dim=-1)
+    p = F.normalize(torch.tensor([[-0.3, 1.0, 0.0], [0.3, 1.0, 0.0], [0.3, 1.0, 0.0], [-0.3, 1.0, 0.0],
+                                  [-0.3, -1.0, 0.0]]), dim=-1)
+    want = u.clone()
+    want[0] = F.normalize(torch.tensor([0.97, 1.0, 0.2]), dim=-1)
+    want[1] = F.normalize(torch.tensor([-0.97, 1.0, 0.2]), dim=-1)
+    assert torch.allclose(CubeTrace().exit_across_edge(p, u), want, atol=1e-6)
+
+
+def _across_edge(p: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+    """Whether an exit point lies just across an edge from the face its momentum leaves through."""
+    mag, ax = u.abs().sort(-1, descending=True)
+    a, b = ax[..., :1], ax[..., 1:2]
+    into = p.gather(-1, a) * u.gather(-1, a).sign() < 0
+    out_b = p.gather(-1, b) * u.gather(-1, b).sign() > 0
+    return (into & (mag[..., 1:2] > 0.95 * mag[..., :1]) & out_b).squeeze(-1)
+
+
+def test_generate_leaves_no_exit_point_across_an_edge(tmp_path) -> None:
+    """An untrained flow puts exit points and momenta at random, so some land across an edge; none is left."""
+    cfg = _flow_config()
+    torch.manual_seed(0)
+    m = LEGOLtng({"state_dict": {}, "config": cfg})
+    torch.save({"state_dict": m.model.vf.state_dict(), "config": cfg}, tmp_path / "flow.pt")
+    gen = GenerateOut(str(tmp_path / "flow.pt"), str(_save_mult_ckpt(tmp_path)), device="cpu")
+    with torch.no_grad():
+        sols, _, attn = gen(_gun_cond(22, batch=512))
+    out = _F(sols)
+    live = _M(attn).out_p
+    assert live.sum() > 500
+    assert not (_across_edge(out.out_mom, out.out_pos) & live).any()
 
 
 def _prep(cuboid_dim=None) -> DataPrep:
