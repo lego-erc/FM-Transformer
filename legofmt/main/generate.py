@@ -17,8 +17,9 @@ flow      LEGOLtng.forward flows the base to the outgoing particles and E_dep; p
           model_conf.exclude_absorbed so do absorbed events (no outgoing particle)
 output    the species stay vocabulary indices (pdgids_of: the PDG ids); the E_dep token capped at
           norm_edep_layer(E_in + excess(species))
-          (_clamp_edep); an absorbed event's E_dep = E_in, + 2 m_e for an e+ (absorbed_deposit); with
-          model_conf.edep_ae the E_dep layers [MeV], left in self.edep_layers
+          (_clamp_edep); an absorbed event's E_dep = E_in, + 2 m_e for an e+ (absorbed_deposit); an exit point just
+          across an edge from the face its momentum leaves through mirrored onto that face (CubeTrace.exit_across_edge);
+          with model_conf.edep_ae the E_dep layers [MeV], left in self.edep_layers
 ```
 
 The momentum in ``cond`` must be energy-scaled, not unit-norm, or the event is conditioned on a ~1 MeV particle. The
@@ -225,6 +226,7 @@ class GenerateOut(torch.nn.Module):
         out.edep.copy_(self._clamp_edep(out.edep, e_in, pid_in))
         e_absorbed = self.dp.norm_edep_margin(absorbed_deposit(e_in, pid_in), e_in, pid_in).to(out.edep)
         out.edep.copy_(torch.where(absorbed, e_absorbed, out.edep))   # an absorbed event deposits everything
+        out.out_pos.copy_(self.proj_ray.exit_across_edge(out.out_mom, out.out_pos))   # no exit point across an edge
         close_balance(self, sols, e_in, pid_in)   # legacy: energy_balance, exit_consistency
         self.edep_layers = self._edep_layers(sols, pt_mask, e_in, pid_in, rng)
         return sols, mask, attn_mask
