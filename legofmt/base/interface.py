@@ -259,8 +259,12 @@ class BaseDist:
 # ---- plumbing --------------------------------------------------------------------------------------------------------
 
 def _count_per_class(cls: Tensor, valid: Tensor, n_cls: int) -> Tensor:
-    """Counts each event's valid slots per species: (B, n) species indices -> (B, n_cls), float."""
-    return (F.one_hot(cls, n_cls) * valid.unsqueeze(-1)).sum(-2).float()
+    """Counts each event's valid slots per species: (B, n) species indices -> (B, n_cls), float.
+
+    A scatter-add, not a sum over a (B, n, n_cls) one-hot: with nuclei as species (n_cls ~ 200) and events of ~1000
+    tokens that one-hot takes hundreds of GB.
+    """
+    return torch.zeros(*cls.shape[:-1], n_cls, device=cls.device).scatter_add_(-1, cls, valid.float())
 
 
 def _forward_cont(lego: BaseDist, dev) -> Tensor:
